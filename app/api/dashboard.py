@@ -30,6 +30,7 @@ class AISettingsRequest(BaseModel):
     ollama_model: Optional[str] = "llama3"
     escalation_provider: Optional[str] = "none"
     escalation_model: Optional[str] = ""
+    escalate_to_pro: bool = False
     batch_size: int
     max_concurrency: int
     max_concurrent_jobs: Optional[int] = 1
@@ -205,6 +206,7 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "ollama_model": get_setting("ollama_model", "llama3"),
             "escalation_provider": get_setting("escalation_provider", "none"),
             "escalation_model": get_setting("escalation_model", ""),
+            "escalate_to_pro": get_setting("escalate_to_pro", "false").lower() == "true",
             "batch_size": int(get_setting("batch_size", "50")),
             "max_concurrency": int(get_setting("max_concurrency", "1")),
             "max_concurrent_jobs": int(get_setting("max_concurrent_jobs", "1")),
@@ -217,7 +219,6 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "auto_repair_unhealthy": get_setting("auto_repair_unhealthy", "true").lower() == "true",
             "strict_sync_lock": get_setting("strict_sync_lock", "true").lower() == "true",
             "original_language_guard": get_setting("original_language_guard", "true").lower() == "true",
-            "escalate_to_pro": get_setting("escalate_to_pro", "false").lower() == "true"
         },
         "languages": languages,
         "folders": {
@@ -270,6 +271,7 @@ async def api_save_ai_settings(req: AISettingsRequest):
         set_setting("escalation_provider", req.escalation_provider)
     if req.escalation_model is not None:
         set_setting("escalation_model", req.escalation_model.strip())
+    set_setting("escalate_to_pro", "true" if req.escalate_to_pro else "false")
     set_setting("batch_size", str(req.batch_size))
     set_setting("max_concurrency", str(req.max_concurrency))
     if req.max_concurrent_jobs is not None:
@@ -366,7 +368,6 @@ class ModulesSettingsRequest(BaseModel):
     auto_repair_unhealthy: bool
     strict_sync_lock: bool
     original_language_guard: bool
-    escalate_to_pro: bool
 
 @router.post("/settings/modules")
 async def api_save_modules(req: ModulesSettingsRequest):
@@ -376,7 +377,6 @@ async def api_save_modules(req: ModulesSettingsRequest):
     set_setting("auto_repair_unhealthy", "true" if req.auto_repair_unhealthy else "false")
     set_setting("strict_sync_lock", "true" if req.strict_sync_lock else "false")
     set_setting("original_language_guard", "true" if req.original_language_guard else "false")
-    set_setting("escalate_to_pro", "true" if req.escalate_to_pro else "false")
     return {"status": "saved"}
 
 @router.post("/settings/languages")

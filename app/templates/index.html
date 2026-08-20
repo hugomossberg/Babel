@@ -512,24 +512,43 @@
 
               <!-- Escalation Model -->
               <div class="pt-4 border-t border-slate-700/50 mt-4 mb-4">
-                <h4 class="text-sm font-semibold text-white mb-3 flex items-center gap-2">
-                  <i class="fa-solid fa-arrow-trend-up text-orange-400"></i> Fallback Escalation Model
-                </h4>
-                <p class="text-xs text-slate-400 mb-4">
-                  Configure a stronger model (e.g., gemini-3.7-flash or gpt-4o) to handle stubborn lines if "Escalate to Pro Model" is enabled in Modules.
-                </p>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div class="flex items-center justify-between mb-3">
+                  <div>
+                    <h4 class="text-sm font-semibold text-white flex items-center gap-2">
+                      <i class="fa-solid fa-arrow-trend-up text-orange-400"></i> Contextual Escalation
+                    </h4>
+                    <p class="text-xs text-slate-400 mt-1">
+                      Automatically retry stubborn lines with a stronger model and previous/next dialogue context.
+                    </p>
+                  </div>
+                  <input type="checkbox" x-model="settingsData.ai.escalate_to_pro" class="rounded bg-slate-800 border-slate-700 text-orange-500 focus:ring-orange-400 w-5 h-5">
+                </div>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6" x-show="settingsData.ai.escalate_to_pro">
                   <div class="space-y-2">
-                    <label class="block text-sm font-medium text-slate-300">Provider</label>
+                    <label class="block text-sm font-medium text-slate-300">Fallback Provider</label>
                     <select x-model="settingsData.ai.escalation_provider" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
-                      <option value="none">Disabled</option>
+                      <option value="none">Same as Primary</option>
                       <option value="gemini">Google Gemini</option>
                       <option value="openai">OpenAI</option>
                     </select>
                   </div>
-                  <div class="space-y-2" x-show="settingsData.ai.escalation_provider !== 'none'">
-                    <label class="block text-sm font-medium text-slate-300">Model Name</label>
-                    <input type="text" x-model="settingsData.ai.escalation_model" placeholder="e.g. gemini-3.7-flash or gpt-4o" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                  <div class="space-y-2" x-show="settingsData.ai.escalation_provider === 'gemini'">
+                    <label class="block text-sm font-medium text-slate-300">Fallback Model</label>
+                    <select x-model="settingsData.ai.escalation_model" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                      <option value="gemini-3.7-flash">gemini-3.7-flash (Recommended)</option>
+                      <option value="gemini-3.6-flash">gemini-3.6-flash</option>
+                      <option value="gemini-3.5-pro">gemini-3.5-pro</option>
+                      <option value="gemini-4.0-flash">gemini-4.0-flash</option>
+                    </select>
+                  </div>
+                  <div class="space-y-2" x-show="settingsData.ai.escalation_provider === 'openai'">
+                    <label class="block text-sm font-medium text-slate-300">Fallback Model</label>
+                    <select x-model="settingsData.ai.escalation_model" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                      <option value="gpt-4o">gpt-4o (Recommended)</option>
+                      <option value="gpt-5.6-turbo">gpt-5.6-turbo</option>
+                      <option value="o1-mini">o1-mini</option>
+                    </select>
                   </div>
                 </div>
               </div>
@@ -674,17 +693,7 @@
                 <input type="checkbox" x-model="settingsData.modules.original_language_guard" class="rounded bg-slate-800 border-slate-700 text-purple-600 focus:ring-purple-500 w-5 h-5">
               </div>
 
-              <div class="flex items-center justify-between p-4 bg-slate-900/50 rounded-xl border border-slate-700/50">
-                <div>
-                  <h4 class="text-sm font-semibold text-white flex items-center gap-2">
-                    <i class="fa-solid fa-arrow-trend-up text-orange-400"></i> Escalate to Pro Model
-                  </h4>
-                  <p class="text-xs text-slate-400 mt-0.5">
-                    Automatically fallback to gpt-4o or gemini-3.6-flash for individual stubborn lines that fail standard contextual QA.
-                  </p>
-                </div>
-                <input type="checkbox" x-model="settingsData.modules.escalate_to_pro" class="rounded bg-slate-800 border-slate-700 text-orange-500 focus:ring-orange-400 w-5 h-5">
-              </div>
+
 
               <div class="pt-4 flex justify-end">
                 <button @click="saveModulesSettings()" class="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium shadow-lg shadow-purple-600/30 transition text-sm">
@@ -1159,6 +1168,7 @@
             gemini_model: 'gemini-3.5-flash-lite',
             escalation_provider: 'none',
             escalation_model: '',
+            escalate_to_pro: false,
             batch_size: 50,
             max_concurrency: 4,
             glossary: ''
@@ -1170,7 +1180,6 @@
             auto_repair_unhealthy: true,
             strict_sync_lock: true,
             original_language_guard: true,
-            escalate_to_pro: false
           },
           languages: [
             {name: 'Swedish', code: 'sv', enabled: true}
