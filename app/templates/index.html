@@ -38,7 +38,7 @@
         </div>
         <div>
           <span class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400">Babel</span>
-          <span class="text-xs text-slate-400 ml-2 px-2 py-0.5 rounded bg-slate-800 border border-slate-700">v0.1.4</span>
+          <span class="text-xs text-slate-400 ml-2 px-2 py-0.5 rounded bg-slate-800 border border-slate-700">v0.1.5</span>
         </div>
       </div>
 
@@ -147,42 +147,49 @@
                   <td class="px-5 py-4">
                     <span class="px-2 py-0.5 rounded text-xs font-medium bg-slate-800 border border-slate-700 text-slate-300" x-text="job.event_source"></span>
                   </td>
-                  <td class="px-5 py-4">
-                    <template x-if="job.status === 'TRANSLATED' || job.status === 'SUCCESS'">
-                      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800/50">
-                        <i class="fa-solid fa-check"></i> TRANSLATED
+                  <td class="px-5 py-4 cursor-pointer" x-data="{ hovered: false }" @mouseenter="hovered = true" @mouseleave="hovered = false" @click.stop="if (hovered && !['TRANSLATING', 'PROCESSING', 'QUEUED'].includes(job.status)) triggerProcess(job.video_path, true)">
+                    <div x-show="!hovered || ['TRANSLATING', 'PROCESSING', 'QUEUED'].includes(job.status)">
+                      <template x-if="job.status === 'TRANSLATED' || job.status === 'SUCCESS'">
+                        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800/50">
+                          <i class="fa-solid fa-check"></i> TRANSLATED
+                        </span>
+                      </template>
+                      <template x-if="job.status === 'REPAIRED'">
+                        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-950 text-purple-300 border border-purple-800/50">
+                          <i class="fa-solid fa-wrench"></i> REPAIRED
+                        </span>
+                      </template>
+                      <template x-if="job.status === 'BAZARR MATCH' || job.status === 'BAZARR'">
+                        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-cyan-950 text-cyan-300 border border-cyan-700/50" :title="job.reason">
+                          <i class="fa-solid fa-cloud-arrow-down"></i> BAZARR MATCH
+                        </span>
+                      </template>
+                      <template x-if="job.status === 'ALREADY EXISTS' || job.status === 'HEALTHY' || job.status === 'SKIPPED' || job.status === 'EXISTING / SKIPPED'">
+                        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300 border border-slate-700" :title="job.reason">
+                          <i class="fa-solid fa-circle-check"></i> ALREADY EXISTS
+                        </span>
+                      </template>
+                      <template x-if="job.status === 'TRANSLATING' || job.status === 'PROCESSING'">
+                        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-950 text-amber-400 border border-amber-800/50 animate-pulse">
+                          <i class="fa-solid fa-spinner fa-spin"></i> TRANSLATING
+                        </span>
+                      </template>
+                      <template x-if="job.status === 'QUEUED'">
+                        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-indigo-950 text-indigo-400 border border-indigo-800/50">
+                          <i class="fa-solid fa-clock"></i> QUEUED
+                        </span>
+                      </template>
+                      <template x-if="job.status === 'FAILED'">
+                        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-950 text-rose-400 border border-rose-800/50" :title="job.error_message">
+                          <i class="fa-solid fa-circle-exclamation"></i> FAILED
+                        </span>
+                      </template>
+                    </div>
+                    <div x-show="hovered && !['TRANSLATING', 'PROCESSING', 'QUEUED'].includes(job.status)" style="display: none;">
+                      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-600 text-white border border-purple-500 shadow-lg shadow-purple-600/20 transition-transform active:scale-95">
+                        <i class="fa-solid fa-rotate-right"></i> RETRY
                       </span>
-                    </template>
-                    <template x-if="job.status === 'REPAIRED'">
-                      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-950 text-purple-300 border border-purple-800/50">
-                        <i class="fa-solid fa-wrench"></i> REPAIRED
-                      </span>
-                    </template>
-                    <template x-if="job.status === 'BAZARR MATCH' || job.status === 'BAZARR'">
-                      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-cyan-950 text-cyan-300 border border-cyan-700/50" :title="job.reason">
-                        <i class="fa-solid fa-cloud-arrow-down"></i> BAZARR MATCH
-                      </span>
-                    </template>
-                    <template x-if="job.status === 'ALREADY EXISTS' || job.status === 'HEALTHY' || job.status === 'SKIPPED' || job.status === 'EXISTING / SKIPPED'">
-                      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300 border border-slate-700" :title="job.reason">
-                        <i class="fa-solid fa-circle-check"></i> ALREADY EXISTS
-                      </span>
-                    </template>
-                    <template x-if="job.status === 'TRANSLATING' || job.status === 'PROCESSING'">
-                      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-950 text-amber-400 border border-amber-800/50 animate-pulse">
-                        <i class="fa-solid fa-spinner fa-spin"></i> TRANSLATING
-                      </span>
-                    </template>
-                    <template x-if="job.status === 'QUEUED'">
-                      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-indigo-950 text-indigo-400 border border-indigo-800/50">
-                        <i class="fa-solid fa-clock"></i> QUEUED
-                      </span>
-                    </template>
-                    <template x-if="job.status === 'FAILED'">
-                      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-950 text-rose-400 border border-rose-800/50" :title="job.error_message">
-                        <i class="fa-solid fa-circle-exclamation"></i> FAILED
-                      </span>
-                    </template>
+                    </div>
                   </td>
                   <td class="px-5 py-4">
                     <template x-if="job.status === 'TRANSLATING' || job.status === 'PROCESSING'">
