@@ -1,4 +1,5 @@
 import logging
+import os
 from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
 from typing import Optional
@@ -48,7 +49,7 @@ async def sonarr_webhook(request: Request, background_tasks: BackgroundTasks):
             series_path = series.get("path", "")
             rel_path = episode_file.get("relativePath", "")
             if series_path and rel_path:
-                video_path = f"{series_path}/{rel_path}"
+                video_path = os.path.normpath(os.path.join(series_path, rel_path.lstrip("/")))
         
         # Fallback to episode_file.path if relativePath wasn't available
         if not video_path:
@@ -95,7 +96,7 @@ async def radarr_webhook(request: Request, background_tasks: BackgroundTasks):
             folder_path = movie.get("folderPath") or movie.get("path", "")
             rel_path = movie_file.get("relativePath", "")
             if folder_path and rel_path:
-                video_path = f"{folder_path}/{rel_path}"
+                video_path = os.path.normpath(os.path.join(folder_path, rel_path.lstrip("/")))
                 
         if not video_path:
             video_path = movie_file.get("path") or movie.get("path")
