@@ -1576,7 +1576,7 @@
           if (all_eps.length === 0) return;
           
           const countText = all_eps.length === 1 ? 'the only episode' : `all ${all_eps.length} episodes`;
-          this.showConfirm('Retranslate All', `Are you sure you want to retranslate ${countText} of "${show.title}"?\n\nThis will permanently delete the current AI subtitles for this show and start a fresh translation (using your active Glossary rules).`, async () => {
+          this.showConfirm('Retranslate All', `Are you sure you want to retranslate ${countText} of "${show.title}"?\n\nThis will overwrite the current target subtitles for this show and start a fresh translation (using your active Glossary rules).`, async () => {
             this.currentTab = 'dashboard';
             for (const path of all_eps) {
               fetch('/webhook/process', {

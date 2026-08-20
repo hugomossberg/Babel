@@ -14,9 +14,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Create required directories
+RUN mkdir -p /app/app/static /app/data
+
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8765
 
 EXPOSE 8765
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8765", "--reload"]
+# Bug #44: Remove --reload for production
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8765"]

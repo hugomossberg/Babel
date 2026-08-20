@@ -5,11 +5,8 @@ import srt
 # Regex for SDH descriptions: [door closes], (chuckles), [SIGHING], etc.
 SDH_BRACKET_REGEX = re.compile(r'\[.*?\]|\(.*?\)', re.DOTALL)
 
-# Regex for music notes and signs: ♪, ♫, ♬, ♩, #
-MUSIC_NOTES_REGEX = re.compile(r'[♪♫♬♩#]+')
-
-# Regex for speaker identifiers at start of line: "JOHN:", "MAN ON TV:"
-SPEAKER_REGEX = re.compile(r'^[A-Z0-9\s_\-\.]{2,20}:\s*', re.MULTILINE)
+# Regex for music notes and signs: ♪, ♫, ♬, ♩
+MUSIC_NOTES_REGEX = re.compile(r'[♪♫♬♩]+')
 
 # Placeholder that preserves the block structure for parsers and locks timestamps
 EMPTY_PLACEHOLDER = "<i></i>"

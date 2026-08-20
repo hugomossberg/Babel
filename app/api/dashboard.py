@@ -87,23 +87,8 @@ async def api_stats() -> Dict[str, Any]:
 
 @router.get("/jobs")
 async def api_jobs(limit: int = 50) -> List[Dict[str, Any]]:
-    all_jobs = get_jobs(limit=limit)
-    valid_jobs = []
-    
-    for j in all_jobs:
-        vpath = j.get("video_path")
-        if j.get("status") in ("ALREADY EXISTS", "HEALTHY", "SKIPPED"):
-            parent = os.path.dirname(vpath) if vpath else ""
-            base_name = os.path.basename(os.path.splitext(vpath)[0]) if vpath else ""
-            has_sub = False
-            if parent and os.path.exists(parent):
-                has_sub = any(f.startswith(base_name) and f.endswith(".srt") for f in os.listdir(parent))
-            if not has_sub:
-                delete_job(j["id"])
-                continue
-        valid_jobs.append(j)
-        
-    return valid_jobs
+    # Bug #33: GET endpoint should NEVER delete/mutate data
+    return get_jobs(limit=limit)
 
 @router.get("/jobs/{job_id}")
 async def api_job_detail(job_id: int) -> Dict[str, Any]:
@@ -130,17 +115,54 @@ async def api_delete_subtitles(req: DeleteSubRequest):
     parent_dir = os.path.dirname(req.video_path)
     base_name = os.path.basename(base_no_ext)
     
+    # Bug #37: Only delete target language SRTs, not source subtitles
+    # Get configured target languages to know which files Babel created
+    target_codes = set()
+    try:
+        langs = json.loads(get_setting("languages", "[]"))
+        target_codes = {l["code"] for l in langs if l.get("enabled", True)}
+    except Exception:
+        target_codes = {"sv"}
+    
+    # Also include common variants
+    LANG_VARIANTS = {
+        "sv": ["sv", "swe", "swedish"],
+        "da": ["da", "dan", "danish"],
+        "no": ["no", "nor", "nob", "norwegian"],
+        "de": ["de", "ger", "german"],
+        "fr": ["fr", "fre", "french"],
+        "es": ["es", "spa", "spanish"],
+        "fi": ["fi", "fin", "finnish"],
+    }
+    delete_suffixes = set()
+    for code in target_codes:
+        variants = LANG_VARIANTS.get(code, [code])
+        for v in variants:
+            delete_suffixes.add(f".{v}.srt")
+    
     deleted_files = []
     if os.path.exists(parent_dir):
         for f in os.listdir(parent_dir):
-            if f.startswith(base_name) and f.endswith(".srt"):
+            if not f.startswith(base_name):
+                continue
+            fname_lower = f.lower()
+            # Only delete if it matches a target language suffix
+            if any(fname_lower.endswith(suffix) for suffix in delete_suffixes):
                 full_sub_path = os.path.join(parent_dir, f)
                 try:
                     os.remove(full_sub_path)
                     deleted_files.append(f)
                 except Exception:
                     pass
+            # Also clean up babel-replaced backups
+            if f.endswith(".babel-replaced"):
+                try:
+                    os.remove(os.path.join(parent_dir, f))
+                    deleted_files.append(f)
+                except Exception:
+                    pass
     
+    # Clean up job history for this video
     from app.core.db import DB_PATH
     import sqlite3
     with sqlite3.connect(DB_PATH) as conn:
@@ -153,6 +175,12 @@ async def api_delete_subtitles(req: DeleteSubRequest):
 
 @router.get("/settings/all")
 async def api_get_all_settings() -> Dict[str, Any]:
+    # Bug #41: Mask API keys so they aren't sent to the browser in plaintext
+    def mask_key(key: str) -> str:
+        if not key or len(key) < 8:
+            return key
+        return "••••••••" + key[-4:]
+
     raw_key = get_setting("gemini_api_key", "")
 
     langs_json = get_setting("languages", "")
@@ -170,13 +198,13 @@ async def api_get_all_settings() -> Dict[str, Any]:
     return {
         "ai": {
             "ai_provider": get_setting("ai_provider", "gemini"),
-            "gemini_api_key": raw_key,
+            "gemini_api_key": mask_key(raw_key),
             "has_api_key": bool(raw_key),
             "gemini_model": get_setting("gemini_model", "gemini-3.5-flash-lite"),
-            "openai_api_key": get_setting("openai_api_key", ""),
+            "openai_api_key": mask_key(get_setting("openai_api_key", "")),
             "has_openai_key": bool(get_setting("openai_api_key", "")),
             "openai_model": get_setting("openai_model", "gpt-4o-mini"),
-            "deepl_api_key": get_setting("deepl_api_key", ""),
+            "deepl_api_key": mask_key(get_setting("deepl_api_key", "")),
             "ollama_url": get_setting("ollama_url", "http://localhost:11434"),
             "ollama_model": get_setting("ollama_model", "llama3"),
             "batch_size": int(get_setting("batch_size", "50")),
@@ -201,14 +229,14 @@ async def api_get_all_settings() -> Dict[str, Any]:
         },
         "integrations": {
             "enable_bazarr_check": get_setting("enable_bazarr_check", "true").lower() == "true",
-            "bazarr_url": get_setting("bazarr_url", "http://dev-bazarr:6767"),
-            "bazarr_api_key": get_setting("bazarr_api_key", ""),
+            "bazarr_url": get_setting("bazarr_url", "http://bazarr:6767"),
+            "bazarr_api_key": mask_key(get_setting("bazarr_api_key", "")),
             "bazarr_container_name": get_setting("bazarr_container_name", "bazarr"),
             "bazarr_container_status": docker_info,
             "wait_time_seconds": int(get_setting("wait_time_seconds", "15")),
             "notify_jellyfin": get_setting("notify_jellyfin", "true").lower() == "true",
-            "jellyfin_url": get_setting("jellyfin_url", "http://dev-jellyfin:8096"),
-            "jellyfin_api_key": get_setting("jellyfin_api_key", "devtestkey1234567890abcdef")
+            "jellyfin_url": get_setting("jellyfin_url", "http://jellyfin:8096"),
+            "jellyfin_api_key": mask_key(get_setting("jellyfin_api_key", ""))
         }
     }
 

@@ -1,15 +1,14 @@
 import os
-from pydantic import BaseModel
 
-class Settings(BaseModel):
-    app_name: str = "Babel"
-    version: str = "0.1.0"
-    port: int = int(os.getenv("PORT", "8765"))
-    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
-    batch_size: int = int(os.getenv("BATCH_SIZE", "50"))
-    wait_time_seconds: int = int(os.getenv("WAIT_TIME_SECONDS", "15"))
-    jellyfin_url: str = os.getenv("JELLYFIN_URL", "http://dev-jellyfin:8096")
-    jellyfin_api_key: str = os.getenv("JELLYFIN_API_KEY", "devtestkey1234567890abcdef")
+# Bug #23: This file now only provides environment defaults and server-level config.
+# All application logic should read from SQLite via get_setting().
 
-settings = Settings()
+APP_NAME = "Babel"
+VERSION = "0.1.0"
+PORT = int(os.getenv("PORT", "8765"))
+
+# Bug #39: Authentication config
+# Set BABEL_AUTH_USERNAME and BABEL_AUTH_PASSWORD in environment to enable HTTP Basic Auth
+AUTH_USERNAME = os.getenv("BABEL_AUTH_USERNAME", "")
+AUTH_PASSWORD = os.getenv("BABEL_AUTH_PASSWORD", "")
+

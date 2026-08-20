@@ -49,6 +49,18 @@ def extract_json_safely(raw_text: str) -> List[dict]:
     except Exception:
         pass
 
+    # Repair common JSON issues before regex fallback
+    try:
+        repaired_text = re.sub(r'[\x00-\x1F]+', '', raw_text)
+        repaired_text = re.sub(r',\s*([\]}])', r'\1', repaired_text)
+        data = json.loads(repaired_text)
+        if isinstance(data, dict) and "translations" in data:
+            return data["translations"]
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+
     # 2. Regex match for "translations": [...]
     match = re.search(r'"translations"\s*:\s*(\[[\s\S]*?\])\s*\}?', raw_text)
     if match:
@@ -63,7 +75,7 @@ def extract_json_safely(raw_text: str) -> List[dict]:
     for m in pattern.finditer(raw_text):
         try:
             item_id = int(m.group(1))
-            item_text = m.group(2).encode().decode('unicode_escape')
+            item_text = m.group(2)
             items.append({"id": item_id, "text": item_text})
         except Exception:
             pass
@@ -87,7 +99,7 @@ class SubtitleTranslator:
             raise ValueError("OpenAI API Key is not configured in settings.")
         return openai.OpenAI(api_key=api_key)
 
-    async def translate_batch_gemini(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None) -> List[dict]:
+    async def translate_batch_gemini(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
         client = self.get_gemini_client()
         
         context_section = ""
@@ -117,7 +129,6 @@ class SubtitleTranslator:
         }
 
         glossary = get_setting("glossary", "")
-        show_title = getattr(self, '_current_show_title', '') or ''
         config = types.GenerateContentConfig(
             system_instruction=get_system_instruction(target_language, glossary=glossary, show_title=show_title),
             response_mime_type="application/json",
@@ -154,7 +165,7 @@ class SubtitleTranslator:
 
         return extract_json_safely(response.text)
 
-    async def translate_batch_openai(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None) -> List[dict]:
+    async def translate_batch_openai(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
         client = self.get_openai_client()
         
         context_section = ""
@@ -166,7 +177,6 @@ class SubtitleTranslator:
         prompt = f"Translate the following {len(items)} subtitle lines into {target_language}:{context_section}\n\n" + json.dumps(items, ensure_ascii=False)
 
         glossary = get_setting("glossary", "")
-        show_title = getattr(self, '_current_show_title', '') or ''
         
         def call_openai(model_to_use):
             return client.chat.completions.create(
@@ -196,7 +206,15 @@ class SubtitleTranslator:
         if not api_key:
             raise ValueError("DeepL API Key is not configured.")
         
-        target_lang_code = "SV" if target_language.lower() in ["swedish", "sv"] else target_language.upper()[:2]
+        DEEPL_LANG_MAP = {
+            "swedish": "SV", "danish": "DA", "norwegian": "NB", "finnish": "FI",
+            "german": "DE", "french": "FR", "spanish": "ES", "italian": "IT",
+            "dutch": "NL", "polish": "PL", "portuguese": "PT-PT", "russian": "RU",
+            "japanese": "JA", "chinese": "ZH", "korean": "KO", "turkish": "TR",
+            "czech": "CS", "romanian": "RO", "hungarian": "HU", "bulgarian": "BG",
+            "greek": "EL", "indonesian": "ID", "arabic": "AR",
+        }
+        target_lang_code = DEEPL_LANG_MAP.get(target_language.lower(), target_language.upper()[:2])
         url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
         
         texts = [it["text"] for it in items]
@@ -209,9 +227,11 @@ class SubtitleTranslator:
             resp.raise_for_status()
             data = resp.json()
             translations = data.get("translations", [])
+            if len(translations) != len(items):
+                raise ValueError(f"DeepL returned {len(translations)} translations, but expected {len(items)}.")
             return [{"id": items[i]["id"], "text": translations[i]["text"]} for i in range(len(items))]
 
-    async def translate_batch_ollama(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None) -> List[dict]:
+    async def translate_batch_ollama(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
         ollama_url = get_setting("ollama_url", "http://localhost:11434").rstrip("/")
         
         context_section = ""
@@ -221,7 +241,6 @@ class SubtitleTranslator:
                 context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
 
         glossary = get_setting("glossary", "")
-        show_title = getattr(self, '_current_show_title', '') or ''
         
         prompt = f"{get_system_instruction(target_language, glossary=glossary, show_title=show_title)}\n\nTranslate the following JSON list into {target_language}:{context_section}\n{json.dumps(items, ensure_ascii=False)}"
         
@@ -234,19 +253,19 @@ class SubtitleTranslator:
             data = resp.json()
             return extract_json_safely(data.get("response", "{}"))
 
-    async def translate_batch(self, items: List[dict], target_language: str = "Swedish", context_lines: List[dict] = None) -> List[dict]:
+    async def translate_batch(self, items: List[dict], target_language: str = "Swedish", context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
         provider = get_setting("ai_provider", "gemini").lower()
         if provider == "openai":
             model = get_setting("openai_model", "gpt-4o-mini")
-            return await self.translate_batch_openai(items, target_language, model, context_lines=context_lines)
+            return await self.translate_batch_openai(items, target_language, model, context_lines=context_lines, show_title=show_title)
         elif provider == "deepl":
             return await self.translate_batch_deepl(items, target_language, context_lines=context_lines)
         elif provider in ["ollama", "localai"]:
             model = get_setting("ollama_model", "llama3")
-            return await self.translate_batch_ollama(items, target_language, model, context_lines=context_lines)
+            return await self.translate_batch_ollama(items, target_language, model, context_lines=context_lines, show_title=show_title)
         else:
             model = get_setting("gemini_model", "gemini-3.5-flash-lite")
-            return await self.translate_batch_gemini(items, target_language, model, context_lines=context_lines)
+            return await self.translate_batch_gemini(items, target_language, model, context_lines=context_lines, show_title=show_title)
 
     async def translate_srt_content(
         self,
@@ -256,7 +275,6 @@ class SubtitleTranslator:
         job_id: Optional[int] = None,
         show_title: Optional[str] = None
     ) -> List[srt.Subtitle]:
-        self._current_show_title = show_title
         total_lines = len(subs)
         batches = []
         for i in range(0, total_lines, batch_size):
@@ -293,7 +311,8 @@ class SubtitleTranslator:
                     results = await self.translate_batch(
                         payload,
                         target_language=target_language,
-                        context_lines=previous_context if previous_context else None
+                        context_lines=previous_context if previous_context else None,
+                        show_title=show_title or ""
                     )
                     res_dict = {r["id"]: r["text"] for r in results if "id" in r and "text" in r}
                     
@@ -311,7 +330,8 @@ class SubtitleTranslator:
                             recovery_results = await self.translate_batch(
                                 missing_payload,
                                 target_language=target_language,
-                                context_lines=previous_context if previous_context else None
+                                context_lines=previous_context if previous_context else None,
+                                show_title=show_title or ""
                             )
                             for r in recovery_results:
                                 if "id" in r and "text" in r:

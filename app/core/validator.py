@@ -2,7 +2,6 @@ import re
 import os
 import srt
 from typing import Dict, Any, List, Tuple, Optional
-from app.core.extractor import extract_embedded_srt
 
 SWEDISH_COMMON_WORDS = {
     "och", "att", "det", "som", "på", "är", "en", "av", "för", "med", "till", "den", 
@@ -60,27 +59,36 @@ def verify_sync(original_subs: List[srt.Subtitle], translated_subs: List[srt.Sub
             "end_diff_ms": -1
         }
 
-    orig_start_ms = int(original_subs[0].start.total_seconds() * 1000)
-    trans_start_ms = int(translated_subs[0].start.total_seconds() * 1000)
-    start_diff = abs(orig_start_ms - trans_start_ms)
-
-    orig_end_ms = int(original_subs[-1].end.total_seconds() * 1000)
-    trans_end_ms = int(translated_subs[-1].end.total_seconds() * 1000)
-    end_diff = abs(orig_end_ms - trans_end_ms)
+    max_start_diff = 0
+    max_end_diff = 0
+    
+    min_len = min(len(original_subs), len(translated_subs))
+    for i in range(min_len):
+        orig_start_ms = int(original_subs[i].start.total_seconds() * 1000)
+        trans_start_ms = int(translated_subs[i].start.total_seconds() * 1000)
+        start_diff = abs(orig_start_ms - trans_start_ms)
+        if start_diff > max_start_diff:
+            max_start_diff = start_diff
+            
+        orig_end_ms = int(original_subs[i].end.total_seconds() * 1000)
+        trans_end_ms = int(translated_subs[i].end.total_seconds() * 1000)
+        end_diff = abs(orig_end_ms - trans_end_ms)
+        if end_diff > max_end_diff:
+            max_end_diff = end_diff
 
     len_orig = len(original_subs)
     len_trans = len(translated_subs)
     count_diff = abs(len_orig - len_trans)
 
-    is_valid = (start_diff == 0) and (end_diff == 0) and (count_diff == 0)
+    is_valid = (max_start_diff == 0) and (max_end_diff == 0) and (count_diff == 0)
 
     return {
         "valid": is_valid,
         "original_count": len_orig,
         "translated_count": len_trans,
         "count_diff": count_diff,
-        "start_diff_ms": start_diff,
-        "end_diff_ms": end_diff
+        "start_diff_ms": max_start_diff,
+        "end_diff_ms": max_end_diff
     }
 
 def check_dropped_lines(original_subs: List[srt.Subtitle], translated_subs: List[srt.Subtitle]) -> Tuple[int, List[Dict[str, Any]]]:

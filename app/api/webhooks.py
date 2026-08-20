@@ -107,9 +107,19 @@ async def radarr_webhook(request: Request, background_tasks: BackgroundTasks):
 
 @router.post("/process")
 async def manual_process(req: ManualProcessRequest, background_tasks: BackgroundTasks):
+    # Bug #43: Validate that video_path is under configured media directories
+    import os, re
+    series_path = get_setting("media_series_path", "/tv")
+    movies_path = get_setting("media_movies_path", "/movies")
+    norm_path = os.path.normpath(req.video_path)
+    
+    allowed_roots = [os.path.normpath(p) for p in [series_path, movies_path, "/media", "/data"] if p]
+    if not any(norm_path.startswith(root) for root in allowed_roots):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=403, detail=f"Path '{req.video_path}' is not under any configured media directory")
+
     title = req.title
     if not title:
-        import os, re
         base = os.path.basename(req.video_path)
         base = os.path.splitext(base)[0]
         title = re.sub(r'(?i)(WEBDL|WEB-DL|WEB|HDTV|Bluray|720p|1080p|2160p|4K|x264|x265|HDR|AMZN).*', '', base).strip(' -._')

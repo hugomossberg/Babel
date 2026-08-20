@@ -1,10 +1,22 @@
 import os
 import logging
+import json
+import srt
 from typing import List, Dict, Any
+from app.core.db import get_setting
 
 logger = logging.getLogger("babel.scanner")
 
 VIDEO_EXTS = (".mkv", ".mp4", ".avi")
+
+def _get_target_lang_codes():
+    """Get configured target language codes."""
+    raw = get_setting("languages", '[]')
+    try:
+        langs = json.loads(raw)
+        return [l["code"] for l in langs if l.get("enabled", True)]
+    except Exception:
+        return ["sv"]
 
 def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[str, Any]]:
     """
@@ -14,6 +26,7 @@ def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[
     if not root_path or not os.path.exists(root_path):
         return []
 
+    target_langs = _get_target_lang_codes()
     results = []
 
     if category == "series":
@@ -35,14 +48,15 @@ def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[
                             subs = []
                             try:
                                 for f in os.listdir(root):
-                                    if f.startswith(base_name) and f.endswith(".srt") and not ".temp" in f:
+                                    if f.startswith(base_name) and f.endswith(".srt") and ".temp" not in f:
                                         sub_path = os.path.join(root, f)
                                         line_count = 0
                                         try:
                                             with open(sub_path, "r", encoding="utf-8", errors="ignore") as sf:
-                                                line_count = sum(1 for line in sf if line.strip().isdigit())
+                                                content = sf.read()
+                                                line_count = len(list(srt.parse(content)))
                                         except Exception:
-                                            pass
+                                            line_count = 0
                                         subs.append({
                                             "filename": f,
                                             "path": sub_path,
@@ -58,13 +72,22 @@ def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[
                                 pass
 
                             rel_season = os.path.basename(root)
+                            
+                            has_target_sub = False
+                            for sub in subs:
+                                fname_lower = sub["filename"].lower()
+                                if any(f".{lang}." in fname_lower for lang in target_langs):
+                                    has_target_sub = True
+                                    break
+                                    
                             show_episodes.append({
                                 "filename": file,
                                 "path": video_full_path,
                                 "season": rel_season if rel_season != show_name else "Root",
                                 "size_mb": size_mb,
                                 "subtitles": subs,
-                                "has_any_sub": len(subs) > 0
+                                "has_any_sub": len(subs) > 0,
+                                "has_target_sub": has_target_sub
                             })
 
                 if show_episodes:
@@ -87,14 +110,15 @@ def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[
                         subs = []
                         try:
                             for f in os.listdir(root):
-                                if f.startswith(base_name) and f.endswith(".srt") and not ".temp" in f:
+                                if f.startswith(base_name) and f.endswith(".srt") and ".temp" not in f:
                                     sub_path = os.path.join(root, f)
                                     line_count = 0
                                     try:
                                         with open(sub_path, "r", encoding="utf-8", errors="ignore") as sf:
-                                            line_count = sum(1 for line in sf if line.strip().isdigit())
+                                            content = sf.read()
+                                            line_count = len(list(srt.parse(content)))
                                     except Exception:
-                                        pass
+                                        line_count = 0
                                     subs.append({
                                         "filename": f,
                                         "path": sub_path,
@@ -109,12 +133,20 @@ def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[
                         except Exception:
                             pass
 
+                        has_target_sub = False
+                        for sub in subs:
+                            fname_lower = sub["filename"].lower()
+                            if any(f".{lang}." in fname_lower for lang in target_langs):
+                                has_target_sub = True
+                                break
+
                         results.append({
                             "filename": file,
                             "path": video_full_path,
                             "size_mb": size_mb,
                             "subtitles": subs,
-                            "has_any_sub": len(subs) > 0
+                            "has_any_sub": len(subs) > 0,
+                            "has_target_sub": has_target_sub
                         })
         except Exception as e:
             logger.error(f"Error scanning movies path {root_path}: {e}")

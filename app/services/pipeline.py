@@ -3,19 +3,130 @@ import os
 import time
 import json
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 import srt
 import httpx
 
 from app.core.cleaner import sanitize_srt_content, subs_to_srt_string
 from app.core.extractor import extract_embedded_srt, inspect_mkv_tracks
-from app.core.validator import verify_sync, check_dropped_lines, evaluate_subtitle_health
+from app.core.validator import verify_sync, check_dropped_lines, evaluate_subtitle_health, detect_language_heuristics
 from app.core.db import create_job, update_job, append_job_log, get_setting
-from app.services.bazarr_checker import check_existing_swedish_subtitle, check_existing_english_subtitle
+from app.services.bazarr_checker import check_existing_swedish_subtitle, check_existing_english_subtitle, find_external_subtitle
 from app.services.translator import SubtitleTranslator
 from app.services.jellyfin_notifier import notify_jellyfin_library_refresh
 
 logger = logging.getLogger("babel.pipeline")
+
+
+# ---------------------------------------------------------------------------
+# BABEL QA GATE — The most important function in the entire project.
+# A translated file is NEVER published unless it passes every check.
+# ---------------------------------------------------------------------------
+def qa_gate(
+    source_subs: list,
+    translated_subs: list,
+    target_lang_code: str = "sv",
+    job_id: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Final Quality Assurance gate. Returns a dict with:
+      - passed: bool
+      - score: int (0-100)
+      - issues: list of strings describing problems
+      - untranslated_ids: list of subtitle indices where original text was kept
+    """
+    issues = []
+    untranslated_ids = []
+    score = 100
+
+    # 1. Line count must match exactly
+    if len(translated_subs) != len(source_subs):
+        issues.append(f"Line count mismatch: source={len(source_subs)}, translated={len(translated_subs)}")
+        score -= 50
+
+    # 2. Check for untranslated lines (original English still present)
+    min_len = min(len(source_subs), len(translated_subs))
+    for i in range(min_len):
+        orig = source_subs[i].content.strip()
+        trans = translated_subs[i].content.strip()
+
+        # Skip empty placeholders
+        if not orig or orig == "<i></i>":
+            continue
+
+        # If translated text is identical to original AND original looks like English
+        if trans == orig:
+            untranslated_ids.append(i)
+
+    if untranslated_ids:
+        pct = round(len(untranslated_ids) / min_len * 100, 1)
+        issues.append(f"{len(untranslated_ids)} lines ({pct}%) still contain original English text")
+        # Small number is warning, large number is failure
+        if pct > 5.0:
+            score -= 40
+        elif pct > 1.0:
+            score -= 20
+        else:
+            score -= 5
+
+    # 3. Check for completely empty translations (dropped lines)
+    dropped_count, dropped_details = check_dropped_lines(source_subs, translated_subs)
+    if dropped_count > 0:
+        pct = round(dropped_count / len(source_subs) * 100, 1)
+        issues.append(f"{dropped_count} lines ({pct}%) were dropped (empty in translation)")
+        if pct > 2.0:
+            score -= 30
+        else:
+            score -= 10
+
+    # 4. Verify sync (every cue must match)
+    sync_report = verify_sync(source_subs, translated_subs)
+    max_drift = max(sync_report.get("start_diff_ms", 0), sync_report.get("end_diff_ms", 0))
+    if max_drift > 0:
+        issues.append(f"Timestamp drift detected: {max_drift}ms")
+        if max_drift > 500:
+            score -= 30
+        elif max_drift > 50:
+            score -= 10
+
+    # 5. Language detection on translated output
+    if translated_subs:
+        sample_text = " ".join([s.content for s in translated_subs[:80] if s.content.strip() and s.content.strip() != "<i></i>"])
+        if sample_text:
+            detected = detect_language_heuristics(sample_text)
+            if detected == "en" and target_lang_code != "en":
+                issues.append(f"Target language detection failed: output appears to be English, expected {target_lang_code}")
+                score -= 30
+
+    # 6. Valid SRT structure
+    try:
+        srt_text = subs_to_srt_string(translated_subs)
+        reparsed = list(srt.parse(srt_text))
+        if len(reparsed) != len(translated_subs):
+            issues.append(f"SRT re-parse mismatch: wrote {len(translated_subs)}, re-parsed {len(reparsed)}")
+            score -= 20
+    except Exception as e:
+        issues.append(f"Invalid SRT structure: {e}")
+        score -= 30
+
+    score = max(0, score)
+    passed = score >= 60 and len(untranslated_ids) == 0 and dropped_count == 0
+
+    if job_id:
+        if passed:
+            append_job_log(job_id, f"QA Gate PASSED (Score: {score}/100)")
+        else:
+            append_job_log(job_id, f"QA Gate FAILED (Score: {score}/100) — Issues: {'; '.join(issues)}")
+
+    return {
+        "passed": passed,
+        "score": score,
+        "issues": issues,
+        "untranslated_ids": untranslated_ids,
+        "dropped_count": dropped_count,
+        "sync_diff_ms": max_drift,
+    }
+
 
 class SubtitlePipeline:
     def __init__(self):
@@ -23,6 +134,9 @@ class SubtitlePipeline:
         self._video_semaphore = None
         self._current_max_jobs = 1
         self._active_tasks: Dict[int, asyncio.Task] = {}
+        # Bug #17: Per-video locking to prevent duplicate processing
+        self._active_video_paths: Set[str] = set()
+        self._video_lock = asyncio.Lock()
 
     def cancel_job(self, job_id: int):
         if job_id in self._active_tasks:
@@ -46,8 +160,9 @@ class SubtitlePipeline:
         except Exception:
             return [{"name": "Swedish", "code": "sv", "enabled": True}]
 
-    async def trigger_bazarr_search(self, video_path: str):
-        bazarr_url = get_setting("bazarr_url", "http://dev-bazarr:6767").rstrip("/")
+    # Bug #3: Accept language parameter instead of hardcoded "sv"
+    async def trigger_bazarr_search(self, video_path: str, language: str = "sv"):
+        bazarr_url = get_setting("bazarr_url", "http://bazarr:6767").rstrip("/")
         bazarr_api_key = get_setting("bazarr_api_key", "")
         if not bazarr_api_key:
             return
@@ -55,32 +170,10 @@ class SubtitlePipeline:
         headers = {"X-API-KEY": bazarr_api_key}
         async with httpx.AsyncClient(timeout=15.0) as client:
             try:
-                # 1. Check if it matches an Episode in Bazarr
-                res = await client.get(f"{bazarr_url}/api/episodes", headers=headers)
-                if res.status_code == 200:
-                    episodes = res.json().get("data", [])
-                    norm_target = os.path.normpath(video_path)
-                    for ep in episodes:
-                        ep_path = os.path.normpath(ep.get("path", ""))
-                        if ep_path == norm_target or os.path.basename(ep_path) == os.path.basename(norm_target):
-                            s_id = ep.get("sonarrSeriesId")
-                            e_id = ep.get("sonarrEpisodeId")
-                            if s_id and e_id:
-                                logger.info(f"Triggering Bazarr episode subtitle search for series {s_id}, episode {e_id}")
-                                await client.patch(
-                                    f"{bazarr_url}/api/episodes/subtitles",
-                                    headers=headers,
-                                    params={
-                                        "seriesid": s_id,
-                                        "episodeid": e_id,
-                                        "language": "sv",
-                                        "forced": "False",
-                                        "hi": "False"
-                                    }
-                                )
-                                return
-
-                # 2. Check if it matches a Movie in Bazarr
+                # Bug #4: Use Bazarr API properly — search movies first (simpler),
+                # then series. For series, we match by video path in the movies/episodes list.
+                
+                # 1. Try Movies
                 m_res = await client.get(f"{bazarr_url}/api/movies", headers=headers)
                 if m_res.status_code == 200:
                     movies = m_res.json().get("data", [])
@@ -90,18 +183,59 @@ class SubtitlePipeline:
                         if m_path == norm_target or os.path.basename(m_path) == os.path.basename(norm_target):
                             r_id = m.get("radarrId")
                             if r_id:
-                                logger.info(f"Triggering Bazarr movie subtitle search for radarrId {r_id}")
+                                logger.info(f"Triggering Bazarr movie subtitle search for radarrId {r_id}, lang={language}")
                                 await client.patch(
                                     f"{bazarr_url}/api/movies/subtitles",
                                     headers=headers,
                                     params={
                                         "radarrid": r_id,
-                                        "language": "sv",
+                                        "language": language,
                                         "forced": "False",
                                         "hi": "False"
                                     }
                                 )
                                 return
+
+                # 2. Try Series — get all series first, then find episodes for matching series
+                s_res = await client.get(f"{bazarr_url}/api/series", headers=headers)
+                if s_res.status_code == 200:
+                    all_series = s_res.json().get("data", [])
+                    norm_target = os.path.normpath(video_path)
+                    
+                    for series in all_series:
+                        series_path = os.path.normpath(series.get("path", ""))
+                        # Check if the video path starts with this series' path
+                        if norm_target.startswith(series_path):
+                            s_id = series.get("sonarrSeriesId")
+                            if not s_id:
+                                continue
+                            # Get episodes for this specific series
+                            ep_res = await client.get(
+                                f"{bazarr_url}/api/episodes",
+                                headers=headers,
+                                params={"seriesid[]": s_id}
+                            )
+                            if ep_res.status_code == 200:
+                                episodes = ep_res.json().get("data", [])
+                                for ep in episodes:
+                                    ep_path = os.path.normpath(ep.get("path", ""))
+                                    if ep_path == norm_target or os.path.basename(ep_path) == os.path.basename(norm_target):
+                                        e_id = ep.get("sonarrEpisodeId")
+                                        if e_id:
+                                            logger.info(f"Triggering Bazarr episode subtitle search for series {s_id}, episode {e_id}, lang={language}")
+                                            await client.patch(
+                                                f"{bazarr_url}/api/episodes/subtitles",
+                                                headers=headers,
+                                                params={
+                                                    "seriesid": s_id,
+                                                    "episodeid": e_id,
+                                                    "language": language,
+                                                    "forced": "False",
+                                                    "hi": "False"
+                                                }
+                                            )
+                                            return
+                            break  # Found the right series, no need to continue
             except Exception as e:
                 logger.warning(f"Failed to trigger Bazarr search: {e}")
 
@@ -113,6 +247,14 @@ class SubtitlePipeline:
         title: Optional[str] = None,
         force_retranslate: bool = False
     ) -> Dict[str, Any]:
+        # Bug #17: Prevent duplicate processing of the same video
+        async with self._video_lock:
+            norm_path = os.path.normpath(video_path)
+            if norm_path in self._active_video_paths:
+                logger.warning(f"Skipping duplicate request for {norm_path} — already being processed")
+                return {"status": "skipped", "reason": "already_processing", "video_path": norm_path}
+            self._active_video_paths.add(norm_path)
+
         job_id = create_job(video_path=video_path, event_source=event_source, title=title)
         
         current_task = asyncio.current_task()
@@ -140,6 +282,8 @@ class SubtitlePipeline:
             raise
         finally:
             self._active_tasks.pop(job_id, None)
+            async with self._video_lock:
+                self._active_video_paths.discard(os.path.normpath(video_path))
 
     async def _execute_process_video(
         self,
@@ -161,6 +305,11 @@ class SubtitlePipeline:
                 title=title
             )
 
+    async def _maybe_notify_jellyfin(self):
+        """Bug #21: Only notify Jellyfin if the setting is enabled."""
+        if get_setting("notify_jellyfin", "true").lower() == "true":
+            await notify_jellyfin_library_refresh()
+
     async def _run_pipeline_logic(
         self,
         job_id: int,
@@ -170,29 +319,34 @@ class SubtitlePipeline:
         force_retranslate: bool = False,
         title: Optional[str] = None
     ) -> Dict[str, Any]:
-        # Orphaned subtitle cleanup (Upgrades/Renames)
+        # Bug #38: Safer orphan cleanup — require exact episode match, not prefix
         if event_source in ["SONARR", "RADARR"] and os.path.exists(os.path.dirname(video_path)):
             dir_path = os.path.dirname(video_path)
             base_name, _ = os.path.splitext(os.path.basename(video_path))
             import re
             
-            # Find the episode identifier (e.g. S01E01) or use the movie title prefix
             ep_match = re.search(r'(S\d+E\d+)', base_name, re.IGNORECASE)
-            search_token = ep_match.group(1).lower() if ep_match else ""
-            
-            # If it's a movie, the search token is the first few words of the base_name to prevent wiping flat directories
-            if not search_token:
-                search_token = " ".join(base_name.split(".")[:2]).split("(")[0].strip().lower()
+            if ep_match:
+                search_token = ep_match.group(1).lower()
+                try:
+                    for fname in os.listdir(dir_path):
+                        if fname.endswith(".srt"):
+                            f_base, _ = os.path.splitext(fname)
+                            # Only clean up if it matches the EXACT episode identifier but has a different base name
+                            if f_base != base_name and search_token in fname.lower():
+                                # Additional safety: the episode token must be surrounded by non-alphanumeric chars
+                                fname_lower = fname.lower()
+                                token_pos = fname_lower.find(search_token)
+                                if token_pos >= 0:
+                                    before_ok = token_pos == 0 or not fname_lower[token_pos - 1].isalnum()
+                                    after_pos = token_pos + len(search_token)
+                                    after_ok = after_pos >= len(fname_lower) or not fname_lower[after_pos].isalnum()
+                                    if before_ok and after_ok:
+                                        os.remove(os.path.join(dir_path, fname))
+                                        append_job_log(job_id, f"Cleaned up orphaned subtitle from previous version: {fname}")
+                except Exception:
+                    pass
 
-            try:
-                for fname in os.listdir(dir_path):
-                    if fname.endswith(".srt"):
-                        f_base, _ = os.path.splitext(fname)
-                        if f_base != base_name and search_token and search_token in fname.lower():
-                            os.remove(os.path.join(dir_path, fname))
-                            append_job_log(job_id, f"Cleaned up orphaned subtitle from previous version: {fname}")
-            except Exception as e:
-                pass
         enable_bazarr = get_setting("enable_bazarr_check", "true").lower() == "true"
         extract_target_embedded = get_setting("extract_target_embedded", "true").lower() == "true"
         extract_source_embedded = get_setting("extract_source_embedded", "true").lower() == "true"
@@ -216,88 +370,100 @@ class SubtitlePipeline:
         base_path, _ = os.path.splitext(video_path)
 
         # -------------------------------------------------------------
-        # 0. HYBRID MODE: CHECK BAZARR FOR HUMAN SUBTITLES (Grace Period)
+        # Bug #11: Reordered pipeline — check LOCAL targets FIRST
+        # 
+        # Order: 
+        #   1. External target on disk
+        #   2. Embedded target in video
+        #   3. Bazarr target search
+        #   4. (If no target found) Resolve source → AI translate
         # -------------------------------------------------------------
-        if enable_bazarr and not force_retranslate:
-            # Check if Swedish sub already exists first
-            existing_swe = check_existing_swedish_subtitle(video_path)
-            if not existing_swe:
-                bazarr_wait = wait_seconds if wait_seconds is not None else int(get_setting("wait_time_seconds", "15"))
-                if bazarr_wait > 0:
-                    append_job_log(job_id, f"Hybrid Mode: Triggering Bazarr search and waiting {bazarr_wait}s for human subtitles...")
-                    await self.trigger_bazarr_search(video_path)
-                    
-                    # Poll every 2 seconds during the grace period
-                    elapsed = 0
-                    while elapsed < bazarr_wait:
-                        await asyncio.sleep(2)
-                        elapsed += 2
-                        existing_swe = check_existing_swedish_subtitle(video_path)
-                        if existing_swe:
-                            if auto_repair_unhealthy:
-                                health = evaluate_subtitle_health(existing_swe)
-                                if not health.get("status") == "RED":
-                                    append_job_log(job_id, f"Bazarr found healthy human subtitle ({os.path.basename(existing_swe)}). Subtitle downloaded successfully.")
-                                    duration = round(time.time() - start_time, 2)
-                                    update_job(job_id, status="BAZARR MATCH", reason="Bazarr found human subtitle", duration_seconds=duration)
-                                    await notify_jellyfin_library_refresh()
-                                    return {"status": "skipped", "reason": "bazarr_downloaded", "file": existing_swe, "job_id": job_id}
-                                else:
-                                    append_job_log(job_id, f"Bazarr subtitle is corrupted or poor quality ({health.get('reason')}). Proceeding with Babel AI engine...")
-                                    break
-                            else:
-                                append_job_log(job_id, f"Bazarr found human subtitle ({os.path.basename(existing_swe)}). Subtitle downloaded successfully.")
-                                duration = round(time.time() - start_time, 2)
-                                update_job(job_id, status="BAZARR MATCH", reason="Bazarr found human subtitle", duration_seconds=duration)
-                                await notify_jellyfin_library_refresh()
-                                return {"status": "skipped", "reason": "bazarr_downloaded", "file": existing_swe, "job_id": job_id}
 
-                    append_job_log(job_id, f"Bazarr grace period ended ({bazarr_wait}s). No human subtitle found. Proceeding with Babel AI engine.")
+        # Track which languages still need translation
+        langs_needing_translation = []
 
-        # -------------------------------------------------------------
-        # 1. CHECK IF TARGET SUBTITLE CAN BE EXTRACTED DIRECTLY (Priority 0)
-        # -------------------------------------------------------------
-        if extract_target_embedded and not force_retranslate:
+        if not force_retranslate:
             for lang_info in target_languages:
                 lang_code = lang_info["code"]
+                lang_name = lang_info["name"]
                 target_output_path = f"{base_path}.{lang_code}.srt"
-                
-                if not os.path.exists(target_output_path):
-                    extracted_target = extract_embedded_srt(video_path, target_output_path, preferred_lang=lang_code)
-                    if extracted_target and os.path.exists(target_output_path):
-                        append_job_log(job_id, f"Found and extracted embedded target track ({lang_info['name']}) directly to {os.path.basename(target_output_path)}.")
-                        duration = round(time.time() - start_time, 2)
-                        update_job(
-                            job_id,
-                            status="TRANSLATED",
-                            reason=f"Extracted embedded {lang_info['name']}",
-                            duration_seconds=duration,
-                            output_files=json.dumps([target_output_path])
-                        )
-                        await notify_jellyfin_library_refresh()
-                        return {"status": "success", "extracted_embedded": True, "job_id": job_id}
+
+                # Bug #14: Use generalized find_external_subtitle
+                existing_target = find_external_subtitle(video_path, lang_code)
+                if existing_target:
+                    if auto_repair_unhealthy:
+                        health = evaluate_subtitle_health(existing_target, target_lang_code=lang_code)
+                        if health.get("status") == "RED":
+                            append_job_log(job_id, f"Existing {lang_name} subtitle found but unhealthy ({health['reason']}). Will re-translate.")
+                            langs_needing_translation.append(lang_info)
+                            continue
+                    append_job_log(job_id, f"Healthy {lang_name} subtitle already exists: {os.path.basename(existing_target)}. Skipping.")
+                    continue
+
+                # Bug #13: Don't return after first embedded target — continue loop
+                if extract_target_embedded:
+                    if not os.path.exists(target_output_path):
+                        extracted_target = extract_embedded_srt(video_path, target_output_path, preferred_lang=lang_code)
+                        if extracted_target and os.path.exists(target_output_path):
+                            append_job_log(job_id, f"Extracted embedded {lang_name} track to {os.path.basename(target_output_path)}.")
+                            continue
+
+                # This language needs translation
+                langs_needing_translation.append(lang_info)
+        else:
+            langs_needing_translation = list(target_languages)
+
+        # If all languages are covered, we're done
+        if not langs_needing_translation:
+            duration = round(time.time() - start_time, 2)
+            update_job(job_id, status="ALREADY EXISTS", reason="All target subtitles already exist", duration_seconds=duration)
+            return {"status": "skipped", "reason": "already_exists", "job_id": job_id}
 
         # -------------------------------------------------------------
-        # 2. CHECK IF HEALTHY SUBTITLE ALREADY EXISTS ON DISK
+        # HYBRID MODE: Check Bazarr for human target subtitles
         # -------------------------------------------------------------
-        if not force_retranslate:
-            existing_swe = check_existing_swedish_subtitle(video_path)
-            if existing_swe:
-                if auto_repair_unhealthy:
-                    health = evaluate_subtitle_health(existing_swe)
-                    if health.get("status") == "RED":
-                        append_job_log(job_id, f"Existing subtitle found but unhealthy ({health['reason']}). Triggering AI re-translation...")
-                    else:
-                        append_job_log(job_id, f"Healthy subtitle already exists: {os.path.basename(existing_swe)}. Skipping.")
-                        update_job(job_id, status="ALREADY EXISTS", reason="Healthy subtitle exists", duration_seconds=round(time.time() - start_time, 2))
-                        return {"status": "skipped", "reason": "already_exists", "file": existing_swe}
-                else:
-                    append_job_log(job_id, f"Subtitle already exists: {os.path.basename(existing_swe)}. Skipping.")
-                    update_job(job_id, status="ALREADY EXISTS", reason="Subtitle already exists", duration_seconds=round(time.time() - start_time, 2))
-                    return {"status": "skipped", "reason": "already_exists", "file": existing_swe}
+        if enable_bazarr and not force_retranslate:
+            bazarr_wait = wait_seconds if wait_seconds is not None else int(get_setting("wait_time_seconds", "15"))
+            if bazarr_wait > 0:
+                # Trigger Bazarr search for each missing target language
+                for lang_info in langs_needing_translation:
+                    append_job_log(job_id, f"Hybrid Mode: Triggering Bazarr search for {lang_info['name']} ({lang_info['code']})...")
+                    await self.trigger_bazarr_search(video_path, language=lang_info["code"])
+
+                # Wait and poll for results
+                elapsed = 0
+                while elapsed < bazarr_wait:
+                    await asyncio.sleep(2)
+                    elapsed += 2
+                    
+                    still_missing = []
+                    for lang_info in langs_needing_translation:
+                        existing = find_external_subtitle(video_path, lang_info["code"])
+                        if existing:
+                            if auto_repair_unhealthy:
+                                health = evaluate_subtitle_health(existing, target_lang_code=lang_info["code"])
+                                if health.get("status") == "RED":
+                                    still_missing.append(lang_info)
+                                    continue
+                            append_job_log(job_id, f"Bazarr found {lang_info['name']} subtitle: {os.path.basename(existing)}")
+                        else:
+                            still_missing.append(lang_info)
+                    
+                    langs_needing_translation = still_missing
+                    if not langs_needing_translation:
+                        break
+
+                if not langs_needing_translation:
+                    duration = round(time.time() - start_time, 2)
+                    update_job(job_id, status="BAZARR MATCH", reason="Bazarr found all target subtitles", duration_seconds=duration)
+                    await self._maybe_notify_jellyfin()
+                    return {"status": "skipped", "reason": "bazarr_downloaded", "job_id": job_id}
+
+                append_job_log(job_id, f"Bazarr grace period ended ({bazarr_wait}s). {len(langs_needing_translation)} language(s) still need AI translation.")
 
         # -------------------------------------------------------------
-        # 3. LOCATE SOURCE SUBTITLE (1: Embedded English, 2: External English, 3: Bazarr Fallback)
+        # LOCATE SOURCE SUBTITLE for AI translation
+        # Priority: 1. Embedded English, 2. External English, 3. Bazarr English fallback
         # -------------------------------------------------------------
         raw_srt_text = ""
         temp_extracted_srt = f"{base_path}.temp_extracted.en.srt"
@@ -317,7 +483,7 @@ class SubtitlePipeline:
 
         # PRIORITY 2: External English subtitle on disk
         if not raw_srt_text:
-            en_srt_source = check_existing_english_subtitle(video_path)
+            en_srt_source = find_external_subtitle(video_path, "en")
             if en_srt_source and os.path.exists(en_srt_source):
                 append_job_log(job_id, f"Found external source subtitle: {os.path.basename(en_srt_source)}")
                 try:
@@ -327,27 +493,14 @@ class SubtitlePipeline:
                     with open(en_srt_source, "r", encoding="windows-1252") as f:
                         raw_srt_text = f.read()
 
-        # PRIORITY 3: Fetch from Bazarr (via API wrapper)
+        # PRIORITY 3: Bazarr Safety Net — ask Bazarr for English subtitle
         if not raw_srt_text and enable_bazarr:
-            append_job_log(job_id, "Attempting to fetch missing subtitle via Bazarr API...")
-            en_srt_source = download_subtitle_from_bazarr(video_path, job_id=job_id)
-            if en_srt_source and os.path.exists(en_srt_source):
-                try:
-                    with open(en_srt_source, "r", encoding="utf-8-sig") as f:
-                        raw_srt_text = f.read()
-                except UnicodeDecodeError:
-                    with open(en_srt_source, "r", encoding="windows-1252") as f:
-                        raw_srt_text = f.read()
-
-        # PRIORITY 3: Bazarr Safety Net Fallback (Always active if video is naked and has no subs)
-        if not raw_srt_text:
-            append_job_log(job_id, "No embedded or external English sub found. Querying Bazarr safety net for English subtitle...")
-            await self.trigger_bazarr_search(video_path)
+            append_job_log(job_id, "No embedded or external English sub found. Querying Bazarr for English subtitle...")
+            await self.trigger_bazarr_search(video_path, language="en")
             
-            # Wait up to 15s in 2-second intervals for Bazarr to drop an English sub
             for _ in range(8):
                 await asyncio.sleep(2)
-                en_srt_source = check_existing_english_subtitle(video_path)
+                en_srt_source = find_external_subtitle(video_path, "en")
                 if en_srt_source:
                     append_job_log(job_id, f"Bazarr retrieved English subtitle: {os.path.basename(en_srt_source)}")
                     try:
@@ -370,7 +523,7 @@ class SubtitlePipeline:
 
         try:
             # -------------------------------------------------------------
-            # 4. PRE-PROCESSING & SDH CLEANER
+            # PRE-PROCESSING & SDH CLEANER
             # -------------------------------------------------------------
             clean_sdh_enabled = get_setting("clean_sdh", "true").lower() == "true"
             if clean_sdh_enabled:
@@ -396,24 +549,35 @@ class SubtitlePipeline:
             update_job(job_id, total_lines=total_source_lines, processed_lines=0, current_batch="Starting...")
             output_files = []
             successful_langs = []
-            repaired_langs = []
+            skipped_langs = []
             total_dropped = 0
             max_sync_diff = 0
 
             # -------------------------------------------------------------
-            # 5. TRANSLATION & STRICT SYNC ENFORCEMENT
+            # TRANSLATION & QUALITY ASSURANCE
             # -------------------------------------------------------------
             
-            # Original Language Guard
-            from app.core.extractor import inspect_mkv_tracks
-            mkv_info = inspect_mkv_tracks(video_path)
+            # Bug #20: Respect Original Language Guard toggle
+            original_language_guard = get_setting("original_language_guard", "true").lower() == "true"
+            
             primary_audio_lang = "und"
-            for audio in mkv_info.get("audio", []):
-                if audio.get("default") or audio.get("forced"):
-                    primary_audio_lang = audio.get("language", "und").lower()
-                    break
-            if primary_audio_lang == "und" and mkv_info.get("audio"):
-                primary_audio_lang = mkv_info["audio"][0].get("language", "und").lower()
+            if original_language_guard:
+                mkv_info = inspect_mkv_tracks(video_path)
+                # Bug #32: Better audio track detection — prefer default, skip forced/commentary
+                for audio in mkv_info.get("audio", []):
+                    audio_title = (audio.get("title") or "").lower()
+                    if any(bad in audio_title for bad in ["commentary", "director", "description"]):
+                        continue
+                    if audio.get("default") and not audio.get("forced"):
+                        primary_audio_lang = audio.get("language", "und").lower()
+                        break
+                if primary_audio_lang == "und" and mkv_info.get("audio"):
+                    # Fallback: first non-forced, non-commentary audio
+                    for audio in mkv_info.get("audio", []):
+                        audio_title = (audio.get("title") or "").lower()
+                        if not audio.get("forced") and not any(bad in audio_title for bad in ["commentary", "director"]):
+                            primary_audio_lang = audio.get("language", "und").lower()
+                            break
                 
             AUDIO_LANG_MAP = {
                 "sv": ["swe", "sve", "sv"],
@@ -426,19 +590,21 @@ class SubtitlePipeline:
                 "en": ["eng", "en"]
             }
 
-            for lang_info in target_languages:
+            for lang_info in langs_needing_translation:
                 lang_name = lang_info["name"]
                 lang_code = lang_info["code"]
                 target_output_path = f"{base_path}.{lang_code}.srt"
                 
                 # Check Original Language Guard
-                protected_langs = AUDIO_LANG_MAP.get(lang_code, [lang_code])
-                if primary_audio_lang in protected_langs:
-                    append_job_log(job_id, f"Original Language Guard: The primary audio is already '{primary_audio_lang}'. Skipping AI translation to {lang_name} to prevent bad round-trip translation.")
-                    successful_langs.append(lang_name) # Count as success so the job completes
-                    continue
+                if original_language_guard:
+                    protected_langs = AUDIO_LANG_MAP.get(lang_code, [lang_code])
+                    if primary_audio_lang in protected_langs:
+                        append_job_log(job_id, f"Original Language Guard: Primary audio is '{primary_audio_lang}'. Skipping translation to {lang_name}.")
+                        # Bug #31: Don't count guard-skipped as "successful translation"
+                        skipped_langs.append(lang_name)
+                        continue
 
-                append_job_log(job_id, f"Translating to {lang_name} ({lang_code}) using {active_engine_name} (0 to {total_source_lines} lines)...")
+                append_job_log(job_id, f"Translating to {lang_name} ({lang_code}) using {active_engine_name} ({total_source_lines} lines)...")
 
                 translated_subs = await self.translator.translate_srt_content(
                     subs=subs,
@@ -454,27 +620,70 @@ class SubtitlePipeline:
                         translated_subs[idx].start = subs[idx].start
                         translated_subs[idx].end = subs[idx].end
 
+                # -------------------------------------------------------
+                # Bug #1, #5: FINAL QA GATE — never publish a broken file
+                # -------------------------------------------------------
+                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id)
+
+                if not qa_result["passed"]:
+                    # Attempt recovery for untranslated lines
+                    if qa_result["untranslated_ids"]:
+                        append_job_log(job_id, f"QA Recovery: Retrying {len(qa_result['untranslated_ids'])} untranslated lines...")
+                        recovery_payload = [
+                            {"id": idx, "text": subs[idx].content}
+                            for idx in qa_result["untranslated_ids"]
+                            if subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>"
+                        ]
+                        if recovery_payload:
+                            try:
+                                recovery_results = await self.translator.translate_batch(
+                                    recovery_payload,
+                                    target_language=lang_name,
+                                    show_title=title or ""
+                                )
+                                res_dict = {r["id"]: r["text"] for r in recovery_results if "id" in r and "text" in r}
+                                for idx, text in res_dict.items():
+                                    if text != subs[idx].content:  # Only apply if actually different
+                                        translated_subs[idx].content = text
+                                
+                                # Re-run QA after recovery
+                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id)
+                            except Exception as e:
+                                append_job_log(job_id, f"QA Recovery failed: {e}")
+
+                # Bug #7: Track both start and end diff
                 sync_report = verify_sync(subs, translated_subs)
                 dropped_count, _ = check_dropped_lines(subs, translated_subs)
-
                 total_dropped += dropped_count
-                if sync_report.get("start_diff_ms", 0) > max_sync_diff:
-                    max_sync_diff = sync_report.get("start_diff_ms", 0)
+                this_max_diff = max(sync_report.get("start_diff_ms", 0), sync_report.get("end_diff_ms", 0))
+                if this_max_diff > max_sync_diff:
+                    max_sync_diff = this_max_diff
 
-                temp_output = target_output_path + ".tmp"
-                with open(temp_output, "w", encoding="utf-8") as f:
-                    f.write(subs_to_srt_string(translated_subs))
-                try:
-                    os.chmod(temp_output, 0o666)
-                except Exception as e:
-                    logger.warning(f"Could not set permissions for {temp_output}: {e}")
-                
-                # Atomic replace to prevent partial reads by media server
-                os.replace(temp_output, target_output_path)
+                if qa_result["passed"]:
+                    # Bug #16: Rename conflicting old subs instead of leaving duplicates
+                    if os.path.exists(target_output_path) and not force_retranslate:
+                        backup_path = target_output_path + ".babel-replaced"
+                        try:
+                            os.rename(target_output_path, backup_path)
+                            append_job_log(job_id, f"Renamed existing subtitle to {os.path.basename(backup_path)}")
+                        except Exception:
+                            pass
 
-                output_files.append(target_output_path)
-                successful_langs.append(lang_code)
-                append_job_log(job_id, f"Successfully saved {os.path.basename(target_output_path)} (Sync Diff: {sync_report.get('start_diff_ms', 0)}ms, Dropped: {dropped_count})")
+                    temp_output = target_output_path + ".tmp"
+                    with open(temp_output, "w", encoding="utf-8") as f:
+                        f.write(subs_to_srt_string(translated_subs))
+                    try:
+                        os.chmod(temp_output, 0o666)
+                    except Exception as e:
+                        logger.warning(f"Could not set permissions for {temp_output}: {e}")
+                    
+                    # Atomic replace to prevent partial reads by media server
+                    os.replace(temp_output, target_output_path)
+                    output_files.append(target_output_path)
+                    successful_langs.append(lang_code)
+                    append_job_log(job_id, f"Published {os.path.basename(target_output_path)} (QA Score: {qa_result['score']}/100, Sync: {this_max_diff}ms, Dropped: {dropped_count})")
+                else:
+                    append_job_log(job_id, f"BLOCKED: {lang_name} translation failed QA (Score: {qa_result['score']}/100). File NOT published. Issues: {'; '.join(qa_result['issues'])}")
 
             # Clean up temp file
             if os.path.exists(temp_extracted_srt):
@@ -482,7 +691,14 @@ class SubtitlePipeline:
                 except: pass
 
             total_duration = round(time.time() - start_time, 2)
-            final_status = "TRANSLATED"
+            
+            # Bug #31: Determine correct final status
+            if successful_langs:
+                final_status = "TRANSLATED"
+            elif skipped_langs and not langs_needing_translation:
+                final_status = "SKIPPED"
+            else:
+                final_status = "FAILED"
 
             update_job(
                 job_id,
@@ -496,10 +712,10 @@ class SubtitlePipeline:
                 duration_seconds=total_duration
             )
 
-            await notify_jellyfin_library_refresh()
+            await self._maybe_notify_jellyfin()
 
             return {
-                "status": "success",
+                "status": "success" if successful_langs else "failed",
                 "job_id": job_id,
                 "duration": total_duration,
                 "output_files": output_files

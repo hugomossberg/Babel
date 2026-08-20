@@ -1,19 +1,29 @@
+# Bug #9, #10, #46: Distributable docker-compose for Babel
+# Uses environment variables for media paths so anyone can run it.
+#
+# Usage:
+#   TV_PATH=/path/to/tv MOVIES_PATH=/path/to/movies docker compose up -d
+#
+# Or create a .env file with:
+#   TV_PATH=/data/media/tv
+#   MOVIES_PATH=/data/media/movies
+
 services:
   babel:
     build: .
     image: babel:latest
-    container_name: dev-babel
-    ports:
-      - "18765:8765"
-    volumes:
-      - /home/dev/babel/app:/app/app
-      - /home/dev/babel/data:/app/data
-      - /home/dev/dev-stack/media/tv:/tv
-      - /home/dev/dev-stack/media/movies:/movies
-      - /var/run/docker.sock:/var/run/docker.sock
+    container_name: babel
     environment:
+      - TZ=${TZ:-Europe/Stockholm}
       - PORT=8765
       - BABEL_DB_PATH=/app/data/babel.db
+    volumes:
+      - ./data:/app/data
+      - ${TV_PATH:-/data/media/tv}:/tv
+      - ${MOVIES_PATH:-/data/media/movies}:/movies
+      - /var/run/docker.sock:/var/run/docker.sock  # Optional: for Bazarr container control
+    ports:
+      - "${BABEL_PORT:-8765}:8765"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8765/api/stats || exit 1"]
@@ -21,10 +31,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-    networks:
-      - default
-
-networks:
-  default:
-    name: dev-stack_default
-    external: true
