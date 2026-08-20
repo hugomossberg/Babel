@@ -108,6 +108,7 @@ class SubtitleTranslator:
         system_prompt = f"""You are a subtitle quality assurance AI for {target_language}.
 The following lines were identical in English and {target_language}.
 Decide for each line whether it should be KEPT identical (e.g. proper nouns, brands, numbers, untranslatable sounds) or TRANSLATED.
+If a line is a song lyric, classify it as TRANSLATE. Do not keep song lyrics in English unless it is an untranslatable proper noun.
 
 Return ONLY a JSON array with this exact structure:
 [

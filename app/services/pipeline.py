@@ -618,10 +618,11 @@ class SubtitlePipeline:
                 # Bug #1, #5: FINAL QA GATE — never publish a broken file
                 # -------------------------------------------------------
                 qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id)
+                initial_candidates_count = len(qa_result.get("untranslated_ids", []))
 
                 # Attempt recovery for any untranslated lines
                 if qa_result["untranslated_ids"]:
-                    append_job_log(job_id, f"Initial QA: RECOVERY_REQUIRED ({len(qa_result['untranslated_ids'])} candidates need review)")
+                    append_job_log(job_id, f"Initial QA: RECOVERY_REQUIRED ({initial_candidates_count} candidates need review)")
                     recovery_payload = [
                         {"id": idx, "text": subs[idx].content}
                         for idx in qa_result["untranslated_ids"]
@@ -651,6 +652,7 @@ class SubtitlePipeline:
                                     elif action == "translate" and "text" in r:
                                         if r["text"] != subs[idx].content:
                                             translated_subs[idx].content = r["text"]
+                                            append_job_log(job_id, f"QA Recovery: Translated line {idx}")
                             else:
                                 # Deterministic fallback for DeepL
                                 recovery_results = []
@@ -666,6 +668,7 @@ class SubtitlePipeline:
                                 for idx, text in res_dict.items():
                                     if text != subs[idx].content:  # actually changed
                                         translated_subs[idx].content = text
+                                        append_job_log(job_id, f"QA Recovery: Translated line {idx} (DeepL Fallback)")
                             
                             # Re-run QA after recovery with safe_ids context
                             qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
@@ -714,7 +717,7 @@ class SubtitlePipeline:
 
                 # Build a detailed QA summary for the user
                 unresolved_count = len(qa_result.get("real_untranslated_ids", []))
-                identical_candidates = len(qa_result.get("untranslated_ids", []))
+                identical_candidates = initial_candidates_count if 'initial_candidates_count' in locals() else 0
                 kept_count = len(safe_ids) if 'safe_ids' in locals() else 0
                 recovered_count = identical_candidates - kept_count - unresolved_count
                 if recovered_count < 0: recovered_count = 0
