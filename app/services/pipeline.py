@@ -60,9 +60,25 @@ def qa_gate(
         if trans == orig:
             untranslated_ids.append(i)
 
-    if untranslated_ids:
-        pct = round(len(untranslated_ids) / min_len * 100, 1)
-        issues.append(f"{len(untranslated_ids)} lines ({pct}%) still contain original English text")
+    def is_safe_identical_line(text: str) -> bool:
+        stripped = text.strip()
+        # siffror / symboler
+        if not any(c.isalpha() for c in stripped):
+            return True
+        # väldigt korta cues (t.ex. namn "Seth Cohen")
+        words = stripped.split()
+        if len(words) <= 2:
+            return True
+        return False
+
+    real_untranslated_ids = [
+        i for i in untranslated_ids
+        if i not in safe_ids and not is_safe_identical_line(source_subs[i].content)
+    ]
+
+    if real_untranslated_ids:
+        pct = round(len(real_untranslated_ids) / min_len * 100, 1)
+        issues.append(f"{len(real_untranslated_ids)} lines ({pct}%) still contain original English text")
         # Small number is warning, large number is failure
         if pct > 5.0:
             score -= 40
@@ -110,22 +126,6 @@ def qa_gate(
     except Exception as e:
         issues.append(f"Invalid SRT structure: {e}")
         score -= 30
-
-    def is_safe_identical_line(text: str) -> bool:
-        stripped = text.strip()
-        # siffror / symboler
-        if not any(c.isalpha() for c in stripped):
-            return True
-        # väldigt korta cues (t.ex. namn "Seth Cohen")
-        words = stripped.split()
-        if len(words) <= 2:
-            return True
-        return False
-
-    real_untranslated_ids = [
-        i for i in untranslated_ids
-        if i not in safe_ids and not is_safe_identical_line(source_subs[i].content)
-    ]
 
     score = max(0, score)
     # Bug fix: Use real_untranslated_ids to enforce hard fail on actual sentences
