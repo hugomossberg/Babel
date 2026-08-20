@@ -284,7 +284,14 @@ async def api_save_ai_settings(req: AISettingsRequest):
 async def api_test_ai(req: TestAIRequest):
     provider = (req.provider or "gemini").lower()
     key = req.api_key.strip() if req.api_key else ""
-    
+    if key.startswith("••••••••"):
+        if provider == "deepl":
+            key = get_setting("deepl_api_key", "")
+        elif provider == "openai":
+            key = get_setting("openai_api_key", "")
+        elif provider == "gemini":
+            key = get_setting("gemini_api_key", "")
+            
     if provider == "deepl":
         if not key:
             key = get_setting("deepl_api_key", "")
