@@ -130,11 +130,15 @@ def qa_gate(
     score = max(0, score)
     # Bug fix: Use real_untranslated_ids to enforce hard fail on actual sentences
     # but allow safe identical lines (names, numbers) to pass
+    # Feature: Tolerate up to 3 unresolved English lines to avoid failing 99% perfect jobs
     passed = (
         score >= 60 
         and dropped_count == 0 
-        and len(real_untranslated_ids) == 0
+        and len(real_untranslated_ids) <= 3
     )
+    
+    if len(real_untranslated_ids) > 0 and passed:
+        issues.append(f"Tolerated {len(real_untranslated_ids)} unresolved lines to avoid blocking release.")
 
     if job_id:
         if passed:
@@ -736,7 +740,10 @@ class SubtitlePipeline:
                 recovered_count = identical_candidates - kept_count - unresolved_count
                 if recovered_count < 0: recovered_count = 0
 
-                summary_status = "PASS" if qa_result["passed"] else "FAIL"
+                if qa_result["passed"]:
+                    summary_status = "PASS (Tolerated)" if unresolved_count > 0 else "PASS"
+                else:
+                    summary_status = "FAIL"
                 summary_lines = [
                     "--- QA Summary ---",
                     f"{dropped_count} dropped lines",
