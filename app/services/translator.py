@@ -31,7 +31,7 @@ STRICT RULES:
 3. If a block is empty or contains only '<i></i>', keep it exactly as '<i></i>'.
 4. If a line starts with a speaker name or label in capital letters (e.g. ALICE:, OFFICER:), keep character names intact and only translate descriptive titles if appropriate, maintaining the colon separator.
 5. You MUST return a JSON object with a key "translations" containing the array of objects with integer "id" and string "text".
-6. Keep translations concise. Split lines naturally if a single line exceeds 42 characters.
+6. Keep translations concise. Split lines naturally using "\n" if a line exceeds 42 characters, but NEVER exceed 2 lines per subtitle block. Combine or condense text if necessary.
 Example:
 {{"translations": [{{"id": 1, "text": "Hej"}}, {{"id": 2, "text": "Världen"}}]}}
 """
