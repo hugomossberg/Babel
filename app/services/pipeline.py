@@ -169,6 +169,17 @@ class SubtitlePipeline:
             if not task.done():
                 task.cancel()
                 logger.info(f"Cancelled active task for job_id={job_id}")
+        
+        # Clean up partial progress file
+        import os
+        from app.core.db import DB_PATH
+        data_dir = os.path.dirname(DB_PATH)
+        partial_file = os.path.join(data_dir, f"job_{job_id}_partial.json")
+        if os.path.exists(partial_file):
+            try:
+                os.remove(partial_file)
+            except Exception:
+                pass
 
     def _get_semaphore(self) -> asyncio.Semaphore:
         max_jobs = int(get_setting("max_concurrent_jobs", "1"))

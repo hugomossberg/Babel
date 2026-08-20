@@ -58,7 +58,7 @@ async def test_resume_translation(tmp_path, monkeypatch):
     
     with open(partial_file, "r") as f:
         partial_data = json.load(f)
-    assert len(partial_data) == 150
+    assert len(partial_data.get("lines", {})) == 150
     assert progress_calls[-1] == 150
     
     # NOW RESTART

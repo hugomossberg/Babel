@@ -193,27 +193,23 @@ def validate_classifier_output(raw_text: str, items: list) -> list:
                         logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason=number but no digits)")
                         is_valid_keep = False
                 elif reason in ["proper_noun", "brand"]:
-                    # Check for conversational words leaking into proper_noun
-                    words = [w.strip(".,!?\"'()[]{}") for w in original_text.split()]
-                    lower_words = set(w.lower() for w in words if w)
+                    # Deterministic plausibility validation (fail-closed)
+                    import re
+                    words = [w for w in re.split(r"[^a-zA-Z0-9]+", original_text) if w]
                     
-                    forbidden_words = {
-                        "get", "come", "go", "do", "know", "think", "what", "how", "why", "who", "where", "when", 
-                        "are", "is", "am", "was", "were", "be", "been", "have", "has", "had", "can", "could", 
-                        "would", "should", "will", "shall", "may", "might", "must", "the", "a", "an", "this", 
-                        "that", "these", "those", "it", "they", "he", "she", "we", "i", "you", "my", "your", 
-                        "his", "her", "their", "our", "me", "him", "us", "them", "yes", "no", "ok", "okay", 
-                        "yeah", "nah", "out", "in", "up", "down", "here", "there", "happened"
-                    }
-                    
-                    has_forbidden = bool(lower_words.intersection(forbidden_words))
-                    
-                    if len(words) >= 5:
+                    if len(words) > 4:
                         logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason={reason} but text is {len(words)} words)")
                         is_valid_keep = False
-                    elif has_forbidden:
-                        logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason={reason} but contains conversational words)")
-                        is_valid_keep = False
+                    else:
+                        minor_words = {"and", "of", "the", "in", "de", "la", "von", "van", "a", "an"}
+                        for w in words:
+                            if w.lower() in minor_words: 
+                                continue
+                            # If a word is not purely digits and has no uppercase letters, it's not a valid proper noun
+                            if not any(c.isupper() for c in w) and not w.isdigit():
+                                logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason={reason} but word '{w}' is not capitalized)")
+                                is_valid_keep = False
+                                break
                 
                 if not is_valid_keep:
                     act = "translate" 
@@ -651,16 +647,24 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         data_dir = os.path.dirname(DB_PATH)
         partial_file = os.path.join(data_dir, f"job_{job_id}_partial.json") if job_id else None
         
+        import hashlib
+        fingerprint = hashlib.md5("".join(s.content for s in subs).encode("utf-8")).hexdigest() + "_" + target_language
+        
         partial_dict = {}
         if partial_file and os.path.exists(partial_file):
             try:
                 with open(partial_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    partial_dict = {int(k): v for k, v in data.items()}
-                for k, v in partial_dict.items():
-                    if k < len(translated_subs):
-                        translated_subs[k].content = v
-                logger.info(f"Loaded partial progress for job {job_id} ({len(partial_dict)} lines)")
+                
+                if data.get("fingerprint") == fingerprint:
+                    lines_data = data.get("lines", {})
+                    partial_dict = {int(k): v for k, v in lines_data.items()}
+                    for k, v in partial_dict.items():
+                        if k < len(translated_subs):
+                            translated_subs[k].content = v
+                    logger.info(f"Loaded partial progress for job {job_id} ({len(partial_dict)} lines)")
+                else:
+                    logger.warning(f"Partial progress fingerprint mismatch for job {job_id}. Discarding.")
             except Exception as e:
                 logger.error(f"Failed to load partial progress for job {job_id}: {e}")
 
@@ -746,8 +750,11 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 
                 if partial_file:
                     try:
-                        with open(partial_file, "w", encoding="utf-8") as f:
-                            json.dump(partial_dict, f, ensure_ascii=False)
+                        wrapper = {"fingerprint": fingerprint, "lines": partial_dict}
+                        tmp_file = partial_file + ".tmp"
+                        with open(tmp_file, "w", encoding="utf-8") as f:
+                            json.dump(wrapper, f, ensure_ascii=False)
+                        os.replace(tmp_file, partial_file)
                     except Exception as e:
                         logger.error(f"Failed to save partial progress for job {job_id}: {e}")
 
@@ -774,5 +781,10 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     append_job_log(job_id, f"Warning: Lines {start_idx + 1}-{end_idx} could not be translated: {e}. Keeping original text.")
                     update_job(job_id, processed_lines=processed_count)
 
+        if partial_file and os.path.exists(partial_file):
+            try:
+                os.remove(partial_file)
+            except Exception:
+                pass
         return translated_subs
 
