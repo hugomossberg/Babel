@@ -403,22 +403,18 @@ class SubtitlePipeline:
                         temp_target_path = f"{target_output_path}.tmp_embed"
                         extracted_target = extract_embedded_srt(video_path, temp_target_path, preferred_lang=lang_code)
                         if extracted_target and os.path.exists(temp_target_path):
-                            if auto_repair_unhealthy:
-                                health = evaluate_subtitle_health(temp_target_path, target_lang_code=lang_code)
-                                if health.get("status") == "RED":
-                                    append_job_log(job_id, f"Extracted embedded {lang_name} track but it is unhealthy ({health['reason']}). Will re-translate.")
-                                    try:
-                                        os.remove(temp_target_path)
-                                    except Exception:
-                                        pass
-                                    # Fall through to append to langs_needing_translation
-                                else:
-                                    os.replace(temp_target_path, target_output_path)
-                                    append_job_log(job_id, f"Extracted healthy embedded {lang_name} track to {os.path.basename(target_output_path)}.")
-                                    continue
+                            # Always validate extracted embedded target, regardless of auto_repair setting
+                            health = evaluate_subtitle_health(temp_target_path, target_lang_code=lang_code)
+                            if health.get("status") == "RED":
+                                append_job_log(job_id, f"Extracted embedded {lang_name} track but it is unhealthy ({health['reason']}). Rejecting candidate.")
+                                try:
+                                    os.remove(temp_target_path)
+                                except Exception:
+                                    pass
+                                # Fall through to append to langs_needing_translation
                             else:
                                 os.replace(temp_target_path, target_output_path)
-                                append_job_log(job_id, f"Extracted embedded {lang_name} track to {os.path.basename(target_output_path)}.")
+                                append_job_log(job_id, f"Extracted healthy embedded {lang_name} track to {os.path.basename(target_output_path)}.")
                                 continue
 
                 # This language needs translation
