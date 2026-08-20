@@ -167,23 +167,65 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         }
 
         def validate_classifier_output(raw_text: str) -> list:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Classifier validation: received {len(items)} candidates. Raw type: {type(raw_text)}")
+            
             valid_results = []
+            returned_ids = set()
+            
+            clean_text = raw_text.strip()
+            if clean_text.startswith("```"):
+                lines = clean_text.split('\n')
+                if lines[0].startswith("```"): lines = lines[1:]
+                if lines and lines[-1].startswith("```"): lines = lines[:-1]
+                clean_text = "\n".join(lines).strip()
+
             try:
-                data = json.loads(raw_text)
+                data = json.loads(clean_text)
                 results = data.get("results", [])
-                expected_ids = {item["id"] for item in items}
+                logger.info(f"Classifier validation: parsed {len(results)} results from JSON")
+                
+                expected_ids = {item["id"]: item["text"] for item in items}
                 allowed_reasons = {"proper_noun", "brand", "acronym", "number", "symbol", "non_verbal", "none"}
+                
+                kept = 0
+                translated = 0
+                rejected = 0
+                
                 for r in results:
                     rid = r.get("id")
                     act = r.get("action", "").lower()
-                    if rid not in expected_ids: continue
+                    if rid not in expected_ids: 
+                        logger.warning(f"Classifier validation: rejected result for unknown ID {rid}")
+                        rejected += 1
+                        continue
+                        
                     if act == "keep":
                         reason = r.get("reason", "none").lower()
                         if reason not in allowed_reasons:
-                            act = "translate" # Invalid reason, downgrade to translate
+                            logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (invalid reason: {reason})")
+                            act = "translate" 
+                            
+                    if act == "keep": kept += 1
+                    elif act == "translate": translated += 1
+                    else:
+                        logger.warning(f"Classifier validation: rejected result for ID {rid} due to invalid action {act}")
+                        rejected += 1
+                        continue
+                        
                     valid_results.append({"id": rid, "action": act, "reason": r.get("reason", ""), "text": r.get("text", "")})
-            except Exception:
-                pass
+                    returned_ids.add(rid)
+                    
+                logger.info(f"Classifier validation: Validated {kept} KEEP, {translated} TRANSLATE, {rejected} REJECTED")
+            except Exception as e:
+                logger.error(f"Classifier validation: JSON parse failed: {e}")
+            
+            for item in items:
+                if item["id"] not in returned_ids:
+                    logger.info(f"Classifier validation: Failsafe triggered for ID {item['id']}, forcing TRANSLATE")
+                    valid_results.append({"id": item["id"], "action": "translate", "reason": "malformed_fallback", "text": item["text"]})
+                    
             return valid_results
         
         # We will reuse the client calls directly here to keep it self-contained
@@ -262,6 +304,9 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
 
     @with_retry
     async def escalate_single_line(self, target_idx: int, target_text: str, prev_text: str, next_text: str, target_language: str, show_title: str) -> str:
+        import logging
+        logger = logging.getLogger(__name__)
+        
         provider = get_setting("ai_provider", "gemini").lower()
         
         escalate_enabled = get_setting("escalate_to_pro", "false").lower() == "true"
@@ -282,6 +327,29 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             },
             "required": ["translation"]
         }
+
+        def _safe_parse(raw_resp: str) -> str:
+            clean_text = raw_resp.strip()
+            if clean_text.startswith("```"):
+                lines = clean_text.split('\n')
+                if lines[0].startswith("```"): lines = lines[1:]
+                if lines and lines[-1].startswith("```"): lines = lines[:-1]
+                clean_text = "\n".join(lines).strip()
+            try:
+                data = json.loads(clean_text)
+                res = data.get("translation", "").strip()
+                if res and res != target_text:
+                    logger.info(f"Escalation line {target_idx}: valid translation returned ({len(res)} chars)")
+                    return res
+                elif res == target_text:
+                    logger.info(f"Escalation line {target_idx}: returned identical text")
+                    return target_text
+                else:
+                    logger.info(f"Escalation line {target_idx}: returned empty translation")
+                    return target_text
+            except Exception as e:
+                logger.error(f"Escalation line {target_idx} JSON parse failed: {e}. Raw: {raw_resp[:50]}")
+                return target_text
 
         try:
             if provider == "gemini":
@@ -305,11 +373,8 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 )
                 loop = asyncio.get_event_loop()
                 resp = await loop.run_in_executor(None, lambda: client.models.generate_content(model=model_name, contents=prompt, config=config))
-                try:
-                    data = json.loads(resp.text)
-                    return data.get("translation", target_text).strip()
-                except Exception:
-                    return target_text
+                return _safe_parse(resp.text)
+                
             elif provider == "openai":
                 import openai
                 import asyncio
@@ -329,13 +394,11 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     temperature=0.1,
                     response_format={"type": "json_schema", "json_schema": {"name": "esc", "schema": schema, "strict": True}}
                 ))
-                try:
-                    data = json.loads(resp.choices[0].message.content)
-                    return data.get("translation", target_text).strip()
-                except Exception:
-                    return target_text
+                return _safe_parse(resp.choices[0].message.content)
         except Exception as e:
+            logger.error(f"Escalation line {target_idx} API call failed: {e}")
             return target_text
+            
         return target_text
 
     @with_retry
