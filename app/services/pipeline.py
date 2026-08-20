@@ -12,7 +12,7 @@ from app.core.extractor import extract_embedded_srt, inspect_mkv_tracks
 from app.core.validator import verify_sync, check_dropped_lines, evaluate_subtitle_health, detect_language_heuristics
 from app.core.db import create_job, update_job, append_job_log, get_setting
 from app.services.bazarr_checker import check_existing_swedish_subtitle, check_existing_english_subtitle, find_external_subtitle
-from app.services.translator import SubtitleTranslator
+from app.services.translator import SubtitleTranslator, get_provider_capabilities
 from app.services.jellyfin_notifier import notify_jellyfin_library_refresh
 
 logger = logging.getLogger("babel.pipeline")
@@ -26,7 +26,8 @@ def qa_gate(
     source_subs: list,
     translated_subs: list,
     target_lang_code: str = "sv",
-    job_id: Optional[int] = None
+    job_id: Optional[int] = None,
+    safe_ids: Optional[list] = None
 ) -> Dict[str, Any]:
     """
     Final Quality Assurance gate. Returns a dict with:
@@ -37,6 +38,7 @@ def qa_gate(
     """
     issues = []
     untranslated_ids = []
+    safe_ids = safe_ids or []
     score = 100
 
     # 1. Line count must match exactly
@@ -122,7 +124,7 @@ def qa_gate(
 
     real_untranslated_ids = [
         i for i in untranslated_ids
-        if not is_safe_identical_line(source_subs[i].content)
+        if i not in safe_ids and not is_safe_identical_line(source_subs[i].content)
     ]
 
     score = max(0, score)
@@ -648,7 +650,7 @@ class SubtitlePipeline:
                 # -------------------------------------------------------
                 qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id)
 
-                # Attempt recovery for any untranslated lines (might just be identical names, but we try anyway)
+                # Attempt recovery for any untranslated lines
                 if qa_result["untranslated_ids"]:
                     append_job_log(job_id, f"QA Recovery: Retrying {len(qa_result['untranslated_ids'])} untranslated lines...")
                     recovery_payload = [
@@ -658,18 +660,41 @@ class SubtitlePipeline:
                     ]
                     if recovery_payload:
                         try:
-                            recovery_results = await self.translator.translate_batch(
-                                recovery_payload,
-                                target_language=lang_name,
-                                show_title=title or ""
-                            )
-                            res_dict = {r["id"]: r["text"] for r in recovery_results if "id" in r and "text" in r}
-                            for idx, text in res_dict.items():
-                                if text != subs[idx].content:  # Only apply if actually different
-                                    translated_subs[idx].content = text
+                            provider = get_setting("ai_provider", "gemini").lower()
+                            caps = get_provider_capabilities(provider)
+                            safe_ids = []
+
+                            if caps["supports_identical_classification"]:
+                                recovery_results = await self.translator.classify_and_recover_identical(
+                                    recovery_payload, lang_name, title or ""
+                                )
+                                for r in recovery_results:
+                                    idx = r.get("id")
+                                    if idx is None: continue
+                                    action = r.get("action")
+                                    if action == "keep":
+                                        safe_ids.append(idx)
+                                        append_job_log(job_id, f"QA Recovery: Model kept line {idx} ({r.get('reason', 'no reason')})")
+                                    elif action == "translate" and "text" in r:
+                                        if r["text"] != subs[idx].content:
+                                            translated_subs[idx].content = r["text"]
+                            else:
+                                # Deterministic fallback for DeepL
+                                recovery_results = await self.translator.translate_batch(
+                                    recovery_payload,
+                                    target_language=lang_name,
+                                    show_title=title or ""
+                                )
+                                res_dict = {r["id"]: r["text"] for r in recovery_results if "id" in r and "text" in r}
+                                for idx, text in res_dict.items():
+                                    if text != subs[idx].content:  # actually changed
+                                        translated_subs[idx].content = text
+                                    else:
+                                        # Ambiguous identical from DeepL - mark safe to avoid hard fail
+                                        safe_ids.append(idx)
                             
-                            # Re-run QA after recovery
-                            qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id)
+                            # Re-run QA after recovery with safe_ids context
+                            qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
                         except Exception as e:
                             append_job_log(job_id, f"QA Recovery failed: {e}")
 

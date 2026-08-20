@@ -86,7 +86,115 @@ def extract_json_safely(raw_text: str) -> List[dict]:
     raise ValueError(f"Could not extract JSON translation array from response: {raw_text[:100]}...")
 
 
+def get_provider_capabilities(provider: str) -> dict:
+    if provider == "deepl":
+        return {
+            "supports_structured_output": False,
+            "supports_identical_classification": False,
+            "supports_context": False
+        }
+    return {
+        "supports_structured_output": True,
+        "supports_identical_classification": True,
+        "supports_context": True
+    }
+
 class SubtitleTranslator:
+    async def classify_and_recover_identical(self, items: list, target_language: str, show_title: str) -> list:
+        provider = get_setting("ai_provider", "gemini").lower()
+        if provider == "deepl":
+            return [] # fallback to translation
+            
+        system_prompt = f"""You are a subtitle quality assurance AI for {target_language}.
+The following lines were identical in English and {target_language}.
+Decide for each line whether it should be KEPT identical (e.g. proper nouns, brands, numbers, untranslatable sounds) or TRANSLATED.
+
+Return ONLY a JSON array with this exact structure:
+[
+  {{
+    "id": 123,
+    "action": "keep",
+    "reason": "proper_noun",
+    "text": "Seth Cohen"
+  }},
+  {{
+    "id": 124,
+    "action": "translate",
+    "text": "The translated text here"
+  }}
+]"""
+        prompt = f"Context: {show_title}\n\nLines:\n" + json.dumps(items, ensure_ascii=False)
+        
+        # We will reuse the client calls directly here to keep it self-contained
+        if provider == "gemini":
+            from google import genai
+            from google.genai import types
+            api_key = get_setting("gemini_api_key", "")
+            model_name = get_setting("gemini_model", "gemini-3.5-flash-lite")
+            client = genai.Client(api_key=api_key)
+            
+            def do_gemini():
+                return client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        response_mime_type="application/json",
+                        temperature=0.1
+                    )
+                )
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(None, do_gemini)
+            try:
+                return json.loads(resp.text)
+            except Exception:
+                return []
+                
+        elif provider == "openai":
+            import openai
+            api_key = get_setting("openai_api_key", "")
+            model_name = get_setting("openai_model", "gpt-4o-mini")
+            client = openai.Client(api_key=api_key)
+            
+            def do_openai():
+                return client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.1
+                )
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(None, do_openai)
+            try:
+                content = resp.choices[0].message.content
+                data = json.loads(content)
+                if isinstance(data, dict):
+                    # In case they wrapped it
+                    for k, v in data.items():
+                        if isinstance(v, list): return v
+                return data
+            except Exception:
+                return []
+                
+        elif provider == "ollama":
+            import httpx
+            ollama_url = get_setting("ollama_url", "http://localhost:11434").rstrip("/")
+            model_name = get_setting("ollama_model", "llama3")
+            full_prompt = f"{system_prompt}\n\n{prompt}"
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{ollama_url}/api/generate",
+                    json={"model": model_name, "prompt": full_prompt, "format": "json", "stream": False}
+                )
+                try:
+                    return json.loads(resp.json()["response"])
+                except Exception:
+                    return []
+        
+        return []
     def get_gemini_client(self):
         api_key = get_setting("gemini_api_key", "")
         if not api_key:
