@@ -57,13 +57,6 @@ class MediaFoldersSettingsRequest(BaseModel):
     remote_path_prefix: Optional[str] = ""
     local_path_prefix: Optional[str] = ""
 
-class ModulesSettingsRequest(BaseModel):
-    clean_sdh: bool
-    extract_target_embedded: bool
-    extract_source_embedded: bool
-    auto_repair_unhealthy: bool
-    strict_sync_lock: bool
-    original_language_guard: bool
 
 class IntegrationsSettingsRequest(BaseModel):
     enable_bazarr_check: bool
@@ -219,7 +212,8 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "extract_source_embedded": get_setting("extract_source_embedded", "true").lower() == "true",
             "auto_repair_unhealthy": get_setting("auto_repair_unhealthy", "true").lower() == "true",
             "strict_sync_lock": get_setting("strict_sync_lock", "true").lower() == "true",
-            "original_language_guard": get_setting("original_language_guard", "true").lower() == "true"
+            "original_language_guard": get_setting("original_language_guard", "true").lower() == "true",
+            "escalate_to_pro": get_setting("escalate_to_pro", "false").lower() == "true"
         },
         "languages": languages,
         "folders": {
@@ -357,6 +351,15 @@ async def api_test_bazarr(req: TestBazarrRequest):
     else:
         raise HTTPException(status_code=400, detail=res.get("message", "Connection failed"))
 
+class ModulesSettingsRequest(BaseModel):
+    clean_sdh: bool
+    extract_target_embedded: bool
+    extract_source_embedded: bool
+    auto_repair_unhealthy: bool
+    strict_sync_lock: bool
+    original_language_guard: bool
+    escalate_to_pro: bool
+
 @router.post("/settings/modules")
 async def api_save_modules(req: ModulesSettingsRequest):
     set_setting("clean_sdh", "true" if req.clean_sdh else "false")
@@ -365,6 +368,7 @@ async def api_save_modules(req: ModulesSettingsRequest):
     set_setting("auto_repair_unhealthy", "true" if req.auto_repair_unhealthy else "false")
     set_setting("strict_sync_lock", "true" if req.strict_sync_lock else "false")
     set_setting("original_language_guard", "true" if req.original_language_guard else "false")
+    set_setting("escalate_to_pro", "true" if req.escalate_to_pro else "false")
     return {"status": "saved"}
 
 @router.post("/settings/languages")

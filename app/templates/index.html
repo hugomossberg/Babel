@@ -649,6 +649,18 @@
                 <input type="checkbox" x-model="settingsData.modules.original_language_guard" class="rounded bg-slate-800 border-slate-700 text-purple-600 focus:ring-purple-500 w-5 h-5">
               </div>
 
+              <div class="flex items-center justify-between p-4 bg-slate-900/50 rounded-xl border border-slate-700/50">
+                <div>
+                  <h4 class="text-sm font-semibold text-white flex items-center gap-2">
+                    <i class="fa-solid fa-arrow-trend-up text-orange-400"></i> Escalate to Pro Model
+                  </h4>
+                  <p class="text-xs text-slate-400 mt-0.5">
+                    Automatically fallback to gpt-4o or gemini-3.6-flash for individual stubborn lines that fail standard contextual QA.
+                  </p>
+                </div>
+                <input type="checkbox" x-model="settingsData.modules.escalate_to_pro" class="rounded bg-slate-800 border-slate-700 text-orange-500 focus:ring-orange-400 w-5 h-5">
+              </div>
+
               <div class="pt-4 flex justify-end">
                 <button @click="saveModulesSettings()" class="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium shadow-lg shadow-purple-600/30 transition text-sm">
                   Save Module Settings
@@ -1130,7 +1142,8 @@
             extract_source_embedded: true,
             auto_repair_unhealthy: true,
             strict_sync_lock: true,
-            original_language_guard: true
+            original_language_guard: true,
+            escalate_to_pro: false
           },
           languages: [
             {name: 'Swedish', code: 'sv', enabled: true}
