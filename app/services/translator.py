@@ -296,6 +296,36 @@ class SubtitleTranslator:
                         context_lines=previous_context if previous_context else None
                     )
                     res_dict = {r["id"]: r["text"] for r in results if "id" in r and "text" in r}
+                    
+                    # --- BABEL SMART RECOVERY (QA ENGINE) ---
+                    missing_ids = [p["id"] for p in payload if p["id"] not in res_dict]
+                    if missing_ids:
+                        logger.warning(f"QA: AI dropped {len(missing_ids)} lines in batch. Triggering Smart Recovery.")
+                        if job_id:
+                            append_job_log(job_id, f"QA Alert: AI skipped {len(missing_ids)} lines. Triggering Smart Recovery for IDs: {missing_ids[:5]}...")
+                        
+                        missing_payload = [p for p in payload if p["id"] in missing_ids]
+                        
+                        # Micro-request for ONLY the missing lines
+                        try:
+                            recovery_results = await self.translate_batch(
+                                missing_payload,
+                                target_language=target_language,
+                                context_lines=previous_context if previous_context else None
+                            )
+                            for r in recovery_results:
+                                if "id" in r and "text" in r:
+                                    res_dict[r["id"]] = r["text"]
+                            
+                            still_missing = [p["id"] for p in payload if p["id"] not in res_dict]
+                            if not still_missing and job_id:
+                                append_job_log(job_id, f"QA Success: Smart Recovery successfully translated the missing lines!")
+                        except Exception as e:
+                            logger.error(f"Smart recovery failed: {e}")
+                            if job_id:
+                                append_job_log(job_id, f"QA Warning: Smart recovery failed ({e}). Some lines will remain original.")
+                    # ----------------------------------------
+
                     for p in payload:
                         idx = p["id"]
                         if idx in res_dict:
