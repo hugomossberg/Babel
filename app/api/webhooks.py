@@ -37,6 +37,13 @@ from app.core.db import get_setting
 def translate_path(remote_path: str) -> str:
     if not remote_path:
         return remote_path
+        
+    # Auto-map common Sonarr/Radarr paths to Babel's internal mounts
+    if remote_path.startswith("/data/media/Series/"):
+        return remote_path.replace("/data/media/Series", get_setting("media_series_path", "/tv"), 1)
+    if remote_path.startswith("/data/media/Movies/"):
+        return remote_path.replace("/data/media/Movies", get_setting("media_movies_path", "/movies"), 1)
+
     remote_prefix = get_setting("remote_path_prefix", "").strip()
     local_prefix = get_setting("local_path_prefix", "").strip()
     if remote_prefix and remote_path.startswith(remote_prefix):
