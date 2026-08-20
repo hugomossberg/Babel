@@ -12,7 +12,7 @@ from app.core.extractor import extract_embedded_srt, inspect_mkv_tracks
 from app.core.validator import verify_sync, check_dropped_lines, evaluate_subtitle_health, detect_language_heuristics
 from app.core.db import create_job, update_job, append_job_log, get_setting
 from app.services.bazarr_checker import check_existing_swedish_subtitle, check_existing_english_subtitle, find_external_subtitle
-from app.services.translator import SubtitleTranslator, get_provider_capabilities
+from app.services.translator import SubtitleTranslator, ProviderUnavailableError, get_provider_capabilities
 from app.services.jellyfin_notifier import notify_jellyfin_library_refresh
 
 logger = logging.getLogger("babel.pipeline")
@@ -115,19 +115,21 @@ def qa_gate(
                 score -= 30
 
     # 6. Valid SRT structure
+    structure_valid = True
     try:
         srt_text = subs_to_srt_string(translated_subs)
         reparsed = list(srt.parse(srt_text))
         if len(reparsed) != len(translated_subs):
             issues.append(f"SRT re-parse mismatch: wrote {len(translated_subs)}, re-parsed {len(reparsed)}")
-            score -= 20
+            score -= 50
+            structure_valid = False
     except Exception as e:
         issues.append(f"Invalid SRT structure: {e}")
-        score -= 30
+        score -= 50
+        structure_valid = False
 
     score = max(0, score)
-    # Feature: Tolerate up to 3 unresolved English lines to avoid failing 99% perfect jobs
-    # Bug fix: Enforce hard fail for sync drift and wrong language
+    
     sync_valid = max_drift == 0
     passed = (
         score >= 60 
@@ -135,6 +137,8 @@ def qa_gate(
         and len(real_untranslated_ids) == 0
         and sync_valid
         and not wrong_language
+        and structure_valid
+        and len(translated_subs) == len(source_subs)
     )
     
     return {
@@ -637,10 +641,14 @@ class SubtitlePipeline:
                                 chunk_size = 20
                                 for i in range(0, len(recovery_payload), chunk_size):
                                     chunk = recovery_payload[i:i + chunk_size]
-                                    chunk_res = await self.translator.classify_and_recover_identical(
-                                        chunk, lang_name, title or ""
-                                    )
-                                    recovery_results.extend(chunk_res)
+                                    try:
+                                        chunk_res = await self.translator.classify_and_recover_identical(
+                                            chunk, lang_name, title or ""
+                                        )
+                                        recovery_results.extend(chunk_res)
+                                    except Exception as e:
+                                        append_job_log(job_id, f"QA Recovery chunk failed: {e}")
+                                        continue
                                 
                                 for r in recovery_results:
                                     idx = r.get("id")
@@ -659,10 +667,14 @@ class SubtitlePipeline:
                                 chunk_size = 20
                                 for i in range(0, len(recovery_payload), chunk_size):
                                     chunk = recovery_payload[i:i + chunk_size]
-                                    chunk_res = await self.translator.translate_batch(
-                                        chunk, target_language=lang_name, show_title=title or ""
-                                    )
-                                    recovery_results.extend(chunk_res)
+                                    try:
+                                        chunk_res = await self.translator.translate_batch(
+                                            chunk, target_language=lang_name, show_title=title or ""
+                                        )
+                                        recovery_results.extend(chunk_res)
+                                    except Exception as e:
+                                        append_job_log(job_id, f"QA Recovery chunk failed (DeepL): {e}")
+                                        continue
                                 
                                 res_dict = {r["id"]: r["text"] for r in recovery_results if "id" in r and "text" in r}
                                 for idx, text in res_dict.items():
@@ -816,6 +828,14 @@ class SubtitlePipeline:
                 "output_files": output_files
             }
 
+        except ProviderUnavailableError as e:
+            if os.path.exists(temp_extracted_srt):
+                try: os.remove(temp_extracted_srt)
+                except: pass
+            total_duration = round(time.time() - start_time, 2)
+            append_job_log(job_id, f"PROVIDER ERROR: {str(e)}. Will retry later.")
+            update_job(job_id, status="WAITING_PROVIDER", error_message=str(e), duration_seconds=total_duration)
+            return {"status": "waiting_provider", "error": str(e), "job_id": job_id}
         except Exception as e:
             if os.path.exists(temp_extracted_srt):
                 try: os.remove(temp_extracted_srt)

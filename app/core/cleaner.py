@@ -3,7 +3,11 @@ from typing import List, Tuple
 import srt
 
 # Regex for SDH descriptions: [door closes], (chuckles), [SIGHING], etc.
-SDH_BRACKET_REGEX = re.compile(r'\[.*?\]|\(.*?\)', re.DOTALL)
+SDH_BRACKET_REGEX = re.compile(r'\[.*?\]', re.DOTALL)
+# Only remove parentheticals if they contain typical SDH keywords, or are all caps, or stand alone on a line.
+SDH_PAREN_REGEX = re.compile(r'^\([^a-z0-9]*[A-Z\s]+[^a-z0-9]*\)$|^\(.*?\)$', re.DOTALL)
+# Also remove inline parentheticals if they contain known SDH words
+SDH_KEYWORDS_REGEX = re.compile(r'\((laughing|laughs|sighs|sighing|gasps|groans|grunts|chuckles|clears throat|music playing|speaking|whispers|shouts).*?\)', re.IGNORECASE)
 
 # Regex for music notes and signs: ♪, ♫, ♬, ♩
 MUSIC_NOTES_REGEX = re.compile(r'[♪♫♬♩]+')
@@ -20,8 +24,19 @@ def clean_subtitle_text(text: str) -> str:
     if not text:
         return EMPTY_PLACEHOLDER
 
-    # Remove SDH brackets [ ... ] and ( ... )
+    # Remove standard SDH brackets [ ... ]
     cleaned = SDH_BRACKET_REGEX.sub('', text)
+    # Remove conservative parentheticals
+    cleaned = SDH_KEYWORDS_REGEX.sub('', cleaned)
+    
+    # Process line by line for full-line parentheticals
+    processed_lines = []
+    for line in cleaned.split('\n'):
+        line_stripped = line.strip()
+        if SDH_PAREN_REGEX.match(line_stripped):
+            continue
+        processed_lines.append(line)
+    cleaned = '\n'.join(processed_lines)
 
     # Remove music notes
     cleaned = MUSIC_NOTES_REGEX.sub('', cleaned)
@@ -43,21 +58,14 @@ def sanitize_srt_content(srt_content: str) -> Tuple[List[srt.Subtitle], int]:
     subs = list(srt.parse(srt_content))
     cleaned_count = 0
 
-    valid_subs = []
     for sub in subs:
-        duration_ms = (sub.end - sub.start).total_seconds() * 1000
-        if duration_ms < 100:
-            continue
-            
         original = sub.content
         cleaned = clean_subtitle_text(original)
         if original != cleaned:
             cleaned_count += 1
-            
         sub.content = cleaned
-        valid_subs.append(sub)
 
-    return valid_subs, cleaned_count
+    return subs, cleaned_count
 
 def subs_to_srt_string(subs: List[srt.Subtitle]) -> str:
     """Formats subtitle objects back to valid SRT text, ensuring sequential numbering."""

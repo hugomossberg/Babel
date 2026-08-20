@@ -76,6 +76,8 @@ def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[
                             has_target_sub = False
                             for sub in subs:
                                 fname_lower = sub["filename"].lower()
+                                if "forced" in fname_lower or "signs" in fname_lower or "songs" in fname_lower:
+                                    continue
                                 if any(f".{lang}." in fname_lower for lang in target_langs):
                                     has_target_sub = True
                                     break
@@ -136,6 +138,8 @@ def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[
                         has_target_sub = False
                         for sub in subs:
                             fname_lower = sub["filename"].lower()
+                            if "forced" in fname_lower or "signs" in fname_lower or "songs" in fname_lower:
+                                continue
                             if any(f".{lang}." in fname_lower for lang in target_langs):
                                 has_target_sub = True
                                 break

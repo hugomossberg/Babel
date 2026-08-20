@@ -1,5 +1,35 @@
 import asyncio
 import json
+import asyncio
+import logging
+import functools
+
+logger = logging.getLogger("babel.translator")
+
+class ProviderUnavailableError(Exception):
+    pass
+
+def with_retry(func):
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        retries = 3
+        backoffs = [5, 15, 30]
+        for attempt in range(retries + 1):
+            try:
+                return await func(*args, **kwargs)
+            except Exception as e:
+                err_str = str(e).lower()
+                recoverable = any(x in err_str for x in ["429", "500", "502", "503", "504", "timeout", "connection", "rate limit", "quota"])
+                if not recoverable or attempt == retries:
+                    if recoverable:
+                        raise ProviderUnavailableError(f"Provider unavailable after {retries} retries: {str(e)}")
+                    raise e
+                
+                wait_time = backoffs[attempt]
+                logger.warning(f"Transient provider error in {func.__name__} (Attempt {attempt+1}/{retries}): {e}. Waiting {wait_time}s...")
+                await asyncio.sleep(wait_time)
+    return wrapper
+
 import logging
 import re
 from typing import List, Optional
@@ -9,7 +39,7 @@ import openai
 import httpx
 import srt
 
-from app.core.db import get_setting, update_job, append_job_log
+from app.core.db import get_setting, update_job, append_job_log, save_translation_memory, get_translation_memory
 
 logger = logging.getLogger("babel.translator")
 
@@ -100,6 +130,7 @@ def get_provider_capabilities(provider: str) -> dict:
     }
 
 class SubtitleTranslator:
+    @with_retry
     async def classify_and_recover_identical(self, items: list, target_language: str, show_title: str) -> list:
         provider = get_setting("ai_provider", "gemini").lower()
         if provider == "deepl":
@@ -110,21 +141,50 @@ The following lines were identical in English and {target_language}.
 Decide for each line whether it should be KEPT identical (e.g. proper nouns, brands, numbers, untranslatable sounds) or TRANSLATED.
 If a line is a song lyric, classify it as TRANSLATE. Do not keep song lyrics in English unless it is an untranslatable proper noun.
 
-Return ONLY a JSON array with this exact structure:
-[
-  {{
-    "id": 123,
-    "action": "keep",
-    "reason": "proper_noun",
-    "text": "Seth Cohen"
-  }},
-  {{
-    "id": 124,
-    "action": "translate",
-    "text": "The translated text here"
-  }}
-]"""
+Return ONLY a JSON object with a single key 'results' containing an array of objects.
+Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
+"""
         prompt = f"Context: {show_title}\n\nLines:\n" + json.dumps(items, ensure_ascii=False)
+        
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "results": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "id": {"type": "INTEGER"},
+                            "action": {"type": "STRING", "enum": ["keep", "translate"]},
+                            "reason": {"type": "STRING", "enum": ["proper_noun", "brand", "acronym", "number", "symbol", "non_verbal", "none"]},
+                            "text": {"type": "STRING"}
+                        },
+                        "required": ["id", "action", "text"]
+                    }
+                }
+            },
+            "required": ["results"]
+        }
+
+        def validate_classifier_output(raw_text: str) -> list:
+            valid_results = []
+            try:
+                data = json.loads(raw_text)
+                results = data.get("results", [])
+                expected_ids = {item["id"] for item in items}
+                allowed_reasons = {"proper_noun", "brand", "acronym", "number", "symbol", "non_verbal", "none"}
+                for r in results:
+                    rid = r.get("id")
+                    act = r.get("action", "").lower()
+                    if rid not in expected_ids: continue
+                    if act == "keep":
+                        reason = r.get("reason", "none").lower()
+                        if reason not in allowed_reasons:
+                            act = "translate" # Invalid reason, downgrade to translate
+                    valid_results.append({"id": rid, "action": act, "reason": r.get("reason", ""), "text": r.get("text", "")})
+            except Exception:
+                pass
+            return valid_results
         
         # We will reuse the client calls directly here to keep it self-contained
         if provider == "gemini":
@@ -208,6 +268,7 @@ Return ONLY a JSON array with this exact structure:
             raise ValueError("OpenAI API Key is not configured in settings.")
         return openai.OpenAI(api_key=api_key)
 
+    @with_retry
     async def escalate_single_line(self, target_idx: int, target_text: str, prev_text: str, next_text: str, target_language: str, show_title: str) -> str:
         provider = get_setting("ai_provider", "gemini").lower()
         
@@ -219,8 +280,16 @@ Return ONLY a JSON array with this exact structure:
         if provider == "deepl":
             return target_text
 
-        system_prompt = f"You are a subtitle translator. Translate the TARGET line to {target_language}. The Previous and Next lines are for context only. Return ONLY the translated string for the TARGET line, no JSON, no quotes."
+        system_prompt = f"You are a subtitle translator. Translate the TARGET line to {target_language}. The Previous and Next lines are for context only. Return a JSON object with a single key 'translation' containing the translated string."
         prompt = f"Context: {show_title}\n\nPrevious: {prev_text}\nTARGET: {target_text}\nNext: {next_text}\n\nTranslate TARGET:"
+
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "translation": {"type": "STRING"}
+            },
+            "required": ["translation"]
+        }
 
         try:
             if provider == "gemini":
@@ -239,10 +308,16 @@ Return ONLY a JSON array with this exact structure:
                 config = types.GenerateContentConfig(
                     system_instruction=system_prompt,
                     temperature=0.1,
+                    response_mime_type="application/json",
+                    response_schema=schema,
                 )
                 loop = asyncio.get_event_loop()
                 resp = await loop.run_in_executor(None, lambda: client.models.generate_content(model=model_name, contents=prompt, config=config))
-                return resp.text.strip()
+                try:
+                    data = json.loads(resp.text)
+                    return data.get("translation", target_text).strip()
+                except Exception:
+                    return target_text
             elif provider == "openai":
                 import openai
                 import asyncio
@@ -257,12 +332,21 @@ Return ONLY a JSON array with this exact structure:
                 client = openai.OpenAI(api_key=api_key)
                 loop = asyncio.get_event_loop()
                 resp = await loop.run_in_executor(None, lambda: client.chat.completions.create(
-                    model=model, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}], temperature=0.1))
-                return resp.choices[0].message.content.strip()
+                    model=model, 
+                    messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}], 
+                    temperature=0.1,
+                    response_format={"type": "json_schema", "json_schema": {"name": "esc", "schema": schema, "strict": True}}
+                ))
+                try:
+                    data = json.loads(resp.choices[0].message.content)
+                    return data.get("translation", target_text).strip()
+                except Exception:
+                    return target_text
         except Exception as e:
             return target_text
         return target_text
 
+    @with_retry
     async def translate_batch_gemini(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
         client = self.get_gemini_client()
         
@@ -329,6 +413,7 @@ Return ONLY a JSON array with this exact structure:
 
         return extract_json_safely(response.text)
 
+    @with_retry
     async def translate_batch_openai(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
         client = self.get_openai_client()
         
@@ -365,6 +450,7 @@ Return ONLY a JSON array with this exact structure:
 
         return extract_json_safely(response.choices[0].message.content)
 
+    @with_retry
     async def translate_batch_deepl(self, items: List[dict], target_language: str, context_lines: List[dict] = None) -> List[dict]:
         api_key = get_setting("deepl_api_key", "")
         if not api_key:
@@ -395,6 +481,7 @@ Return ONLY a JSON array with this exact structure:
                 raise ValueError(f"DeepL returned {len(translations)} translations, but expected {len(items)}.")
             return [{"id": items[i]["id"], "text": translations[i]["text"]} for i in range(len(items))]
 
+    @with_retry
     async def translate_batch_ollama(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
         ollama_url = get_setting("ollama_url", "http://localhost:11434").rstrip("/")
         
@@ -454,6 +541,13 @@ Return ONLY a JSON array with this exact structure:
         processed_count = 0
         context_window_size = 5
         previous_context = []
+        if show_title:
+            try:
+                tm_context = get_translation_memory(show_title, limit=10)
+                if tm_context:
+                    previous_context.extend(tm_context)
+            except Exception:
+                pass
 
         for batch_idx, (start_idx, chunk, payload) in enumerate(batches):
             end_idx = min(start_idx + len(payload), total_lines)
@@ -465,87 +559,73 @@ Return ONLY a JSON array with this exact structure:
                     update_job(job_id, processed_lines=processed_count, current_batch=f"Lines {start_idx + 1}-{end_idx} / {total_lines}")
                 continue
 
-            retry_count = 0
-            max_retries = 3
-            while retry_count < max_retries:
-                try:
-                    if job_id:
-                        update_job(job_id, current_batch=f"Translating lines {start_idx + 1}-{end_idx} of {total_lines}")
+            if job_id:
+                update_job(job_id, current_batch=f"Translating lines {start_idx + 1}-{end_idx} of {total_lines}")
 
-                    results = await self.translate_batch(
-                        payload,
-                        target_language=target_language,
-                        context_lines=previous_context if previous_context else None,
-                        show_title=show_title or ""
-                    )
-                    res_dict = {r["id"]: r["text"] for r in results if "id" in r and "text" in r}
+            try:
+                results = await self.translate_batch(
+                    payload,
+                    target_language=target_language,
+                    context_lines=previous_context if previous_context else None,
+                    show_title=show_title or ""
+                )
+                res_dict = {r["id"]: r["text"] for r in results if "id" in r and "text" in r}
+                
+                # --- BABEL SMART RECOVERY (QA ENGINE) ---
+                missing_ids = [p["id"] for p in payload if p["id"] not in res_dict]
+                if missing_ids:
+                    logger.warning(f"QA: AI dropped {len(missing_ids)} lines in batch. Triggering Smart Recovery.")
+                    if job_id:
+                        append_job_log(job_id, f"QA Alert: AI skipped {len(missing_ids)} lines. Triggering Smart Recovery for IDs: {missing_ids[:5]}...")
                     
-                    # --- BABEL SMART RECOVERY (QA ENGINE) ---
-                    missing_ids = [p["id"] for p in payload if p["id"] not in res_dict]
-                    if missing_ids:
-                        logger.warning(f"QA: AI dropped {len(missing_ids)} lines in batch. Triggering Smart Recovery.")
+                    missing_payload = [p for p in payload if p["id"] in missing_ids]
+                    
+                    # Micro-request for ONLY the missing lines
+                    try:
+                        recovery_results = await self.translate_batch(
+                            missing_payload,
+                            target_language=target_language,
+                            context_lines=previous_context if previous_context else None,
+                            show_title=show_title or ""
+                        )
+                        for r in recovery_results:
+                            if "id" in r and "text" in r:
+                                res_dict[r["id"]] = r["text"]
+                        
+                        still_missing = [p["id"] for p in payload if p["id"] not in res_dict]
+                        if not still_missing and job_id:
+                            append_job_log(job_id, f"QA Success: Smart Recovery successfully translated the missing lines!")
+                    except Exception as e:
+                        logger.error(f"Smart recovery failed: {e}")
                         if job_id:
-                            append_job_log(job_id, f"QA Alert: AI skipped {len(missing_ids)} lines. Triggering Smart Recovery for IDs: {missing_ids[:5]}...")
-                        
-                        missing_payload = [p for p in payload if p["id"] in missing_ids]
-                        
-                        # Micro-request for ONLY the missing lines
-                        try:
-                            recovery_results = await self.translate_batch(
-                                missing_payload,
-                                target_language=target_language,
-                                context_lines=previous_context if previous_context else None,
-                                show_title=show_title or ""
-                            )
-                            for r in recovery_results:
-                                if "id" in r and "text" in r:
-                                    res_dict[r["id"]] = r["text"]
-                            
-                            still_missing = [p["id"] for p in payload if p["id"] not in res_dict]
-                            if not still_missing and job_id:
-                                append_job_log(job_id, f"QA Success: Smart Recovery successfully translated the missing lines!")
-                        except Exception as e:
-                            logger.error(f"Smart recovery failed: {e}")
-                            if job_id:
-                                append_job_log(job_id, f"QA Warning: Smart recovery failed ({e}). Some lines will remain original.")
-                    # ----------------------------------------
+                            append_job_log(job_id, f"QA Warning: Smart Recovery failed ({e}). Proceeding anyway.")
+                # ----------------------------------------
+                
+                for p in payload:
+                    idx = p["id"]
+                    if p["text"].strip() == "<i></i>":
+                        translated_subs[idx].content = "<i></i>"
+                    elif idx in res_dict:
+                        translated_subs[idx].content = res_dict[idx]
 
-                    for p in payload:
-                        idx = p["id"]
-                        if idx in res_dict:
-                            translated_subs[idx].content = res_dict[idx]
+                valid_translations = [
+                    {"original": p["text"], "translated": res_dict[p["id"]]}
+                    for p in payload if p["id"] in res_dict and p["text"].strip() != "<i></i>"
+                ]
+                if valid_translations:
+                    previous_context = valid_translations[-context_window_size:]
+                    if show_title:
+                        for vt in valid_translations:
+                            try: save_translation_memory(show_title, vt["original"], vt["translated"])
+                            except Exception: pass
 
-                    processed_count += len(payload)
-                    if job_id:
-                        pct = int((processed_count / total_lines) * 100) if total_lines > 0 else 100
-                        update_job(job_id, processed_lines=processed_count, current_batch=f"{pct}% ({processed_count}/{total_lines} lines)")
-                        append_job_log(job_id, f"Progress {pct}%: Translated lines {start_idx + 1} to {end_idx} ({target_language})")
-
-                    # Build context for next batch from last N translated lines
-                    context_candidates = []
-                    for p in payload[-context_window_size:]:
-                        idx = p["id"]
-                        if idx in res_dict:
-                            context_candidates.append({"id": idx, "original": p["text"], "translated": res_dict[idx]})
-                    previous_context = context_candidates
-
-                    break
-                except Exception as err:
-                    retry_count += 1
-                    err_str = str(err).lower()
-                    if "429" in err_str or "503" in err_str or "504" in err_str or "quota" in err_str or "overloaded" in err_str:
-                        backoff = [5, 15, 30][min(retry_count - 1, 2)]
-                    else:
-                        backoff = 2 * retry_count
-
-                    logger.warning(f"Batch {start_idx + 1}-{end_idx} retry {retry_count}/{max_retries} (Waiting {backoff}s): {err}")
-                    if job_id:
-                        append_job_log(job_id, f"Notice: Retrying lines {start_idx + 1}-{end_idx} in {backoff}s (Attempt {retry_count}/{max_retries})")
-                    await asyncio.sleep(backoff)
-            else:
-                logger.error(f"Batch {start_idx} failed all retries.")
+            except ProviderUnavailableError as e:
+                # Let pipeline handle WAITING_PROVIDER
+                raise e
+            except Exception as e:
+                logger.error(f"Batch {start_idx} failed: {e}")
                 if job_id:
-                    append_job_log(job_id, f"Warning: Lines {start_idx + 1}-{end_idx} could not be translated. Keeping original text. (QA Recovery will attempt to fix this later)")
+                    append_job_log(job_id, f"Warning: Lines {start_idx + 1}-{end_idx} could not be translated: {e}. Keeping original text.")
 
         return translated_subs
 

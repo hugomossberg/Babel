@@ -21,12 +21,11 @@ services:
       - ./data:/app/data
       - ${TV_PATH:-/data/media/tv}:/tv
       - ${MOVIES_PATH:-/data/media/movies}:/movies
-      - /var/run/docker.sock:/var/run/docker.sock  # Optional: for Bazarr container control
     ports:
       - "${BABEL_PORT:-8765}:8765"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8765/api/stats || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8765/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

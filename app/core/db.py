@@ -12,6 +12,18 @@ def init_db():
         cursor = conn.cursor()
         cursor.execute("PRAGMA journal_mode=WAL;")
         cursor.execute("PRAGMA synchronous=NORMAL;")
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS translation_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            series_title TEXT NOT NULL,
+            original_text TEXT NOT NULL,
+            translated_text TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(series_title, original_text)
+        )
+        ''')
+
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -210,3 +222,41 @@ def get_job_stats() -> Dict[str, Any]:
             "failed": failed,
             "avg_duration_seconds": round(avg_dur, 1)
         }
+
+def get_jobs_by_status(statuses: list) -> list:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        placeholders = ",".join("?" * len(statuses))
+        cursor.execute(f"SELECT * FROM jobs WHERE status IN ({placeholders}) ORDER BY id ASC", tuple(statuses))
+        rows = cursor.fetchall()
+        results = []
+        for r in rows:
+            d = dict(r)
+            if d.get("logs"):
+                try: d["logs"] = json.loads(d["logs"])
+                except Exception: d["logs"] = []
+            else:
+                d["logs"] = []
+            results.append(d)
+        return results
+
+def save_translation_memory(series_title: str, original: str, translated: str):
+    if not series_title or not original or not translated: return
+    # only save short distinct phrases to avoid filling DB with whole lines
+    if len(original.split()) > 6: return
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO translation_memory (series_title, original_text, translated_text, created_at) VALUES (?, ?, ?, ?)", (series_title, original, translated, now))
+        conn.commit()
+
+def get_translation_memory(series_title: str, limit: int = 20) -> list:
+    if not series_title: return []
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT original_text, translated_text FROM translation_memory WHERE series_title = ? ORDER BY RANDOM() LIMIT ?", (series_title, limit))
+        rows = cursor.fetchall()
+        return [{"original": r["original_text"], "translated": r["translated_text"]} for r in rows]

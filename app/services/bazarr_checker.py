@@ -12,10 +12,10 @@ def find_external_subtitle(video_path: str, lang_code: str) -> Optional[str]:
     base_name = os.path.basename(base_path)
 
     lang_map = {
-        "sv": [".sv", ".swe", ".swedish", ".sv.default", ".sv.forced"],
-        "en": [".en", ".eng", ".english", ".en.default", ".en.forced"],
-        "de": [".de", ".ger", ".german", ".de.default", ".de.forced"],
-        "fr": [".fr", ".fre", ".french", ".fr.default", ".fr.forced"]
+        "sv": [".sv", ".swe", ".swedish", ".sv.default"],
+        "en": [".en", ".eng", ".english", ".en.default"],
+        "de": [".de", ".ger", ".german", ".de.default"],
+        "fr": [".fr", ".fre", ".french", ".fr.default"]
     }
 
     suffixes = lang_map.get(lang_code.lower(), [f".{lang_code.lower()}"])
@@ -24,7 +24,8 @@ def find_external_subtitle(video_path: str, lang_code: str) -> Optional[str]:
     for suffix in suffixes:
         p = f"{base_path}{suffix}.srt"
         if os.path.exists(p) and os.path.getsize(p) > 100:
-            return p
+            if "forced" not in p.lower() and "signs" not in p.lower() and "songs" not in p.lower():
+                return p
 
     # 2. Fuzzy glob search
     if os.path.exists(directory):
@@ -33,7 +34,8 @@ def find_external_subtitle(video_path: str, lang_code: str) -> Optional[str]:
             # Do NOT include bare .srt match. It must have the lang suffix.
             for suffix in suffixes:
                 if f"{suffix}." in fname and os.path.getsize(f) > 100:
-                    return f
+                    if "forced" not in fname.lower() and "signs" not in fname.lower() and "songs" not in fname.lower():
+                        return f
 
     return None
 

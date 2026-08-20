@@ -2,6 +2,10 @@ import logging
 import os
 import secrets
 import base64
+import asyncio
+from datetime import datetime, timezone
+from app.core.db import get_jobs_by_status
+from app.services.pipeline import pipeline
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -66,6 +70,32 @@ async def serve_ui():
     template_path = "/app/app/templates/index.html" if os.path.exists("/app/app/templates/index.html") else "app/templates/index.html"
     with open(template_path, "r", encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
+
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(retry_waiting_jobs())
+
+async def retry_waiting_jobs():
+    while True:
+        try:
+            jobs = get_jobs_by_status(["WAITING_PROVIDER"])
+            for job in jobs:
+                try:
+                    updated_at = datetime.fromisoformat(job["updated_at"])
+                    now = datetime.now(timezone.utc)
+                    if (now - updated_at).total_seconds() > 900: # 15 minutes
+                        logging.info(f"Retrying WAITING_PROVIDER job {job['id']}")
+                        asyncio.create_task(pipeline.process_video_file(
+                            job["video_path"],
+                            event_source="RETRY",
+                            title=job["title"]
+                        ))
+                except Exception as e:
+                    logging.error(f"Error checking retry for job {job['id']}: {e}")
+        except Exception as e:
+            logging.error(f"Error in retry loop: {e}")
+        await asyncio.sleep(60)
 
 @app.get("/health")
 async def health():

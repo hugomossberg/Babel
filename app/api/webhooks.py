@@ -1,8 +1,38 @@
 import logging
 import os
-from fastapi import APIRouter, BackgroundTasks, Request
-from pydantic import BaseModel
+
+from fastapi import APIRouter, BackgroundTasks, Request, HTTPException
+from pathlib import Path
 from typing import Optional
+
+def validate_webhook_token(request: Request):
+    token = get_setting("webhook_token", "").strip()
+    if token:
+        req_token = request.query_params.get("token")
+        if not req_token or req_token != token:
+            raise HTTPException(status_code=401, detail="Invalid webhook token")
+
+def validate_path(video_path: str) -> str:
+    from app.core.db import get_setting
+    series_path = get_setting("media_series_path", "/tv")
+    movies_path = get_setting("media_movies_path", "/movies")
+    allowed_roots = [Path(p).resolve() for p in [series_path, movies_path, "/media", "/data"] if p]
+    
+    try:
+        resolved_path = Path(video_path).resolve()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid path format")
+
+    for root in allowed_roots:
+        try:
+            if root in resolved_path.parents or root == resolved_path:
+                return str(resolved_path)
+        except Exception:
+            continue
+            
+    raise HTTPException(status_code=403, detail="Path traversal detected or path outside media roots")
+
+from pydantic import BaseModel
 
 from app.services.pipeline import pipeline
 
@@ -28,6 +58,7 @@ def translate_path(remote_path: str) -> str:
 
 @router.post("/sonarr")
 async def sonarr_webhook(request: Request, background_tasks: BackgroundTasks):
+    validate_webhook_token(request)
     try:
         payload = await request.json()
     except Exception:
@@ -64,6 +95,10 @@ async def sonarr_webhook(request: Request, background_tasks: BackgroundTasks):
 
         if video_path:
             video_path = translate_path(video_path)
+            try: video_path = validate_path(video_path)
+            except HTTPException as e:
+                logger.error(f"Webhook path validation failed: {e.detail}")
+                return {"status": "error", "reason": e.detail}
             logger.info(f"Queueing Babel processing for Sonarr episode: {video_path}")
             background_tasks.add_task(
                 pipeline.process_video_file,
@@ -77,6 +112,7 @@ async def sonarr_webhook(request: Request, background_tasks: BackgroundTasks):
 
 @router.post("/radarr")
 async def radarr_webhook(request: Request, background_tasks: BackgroundTasks):
+    validate_webhook_token(request)
     try:
         payload = await request.json()
     except Exception:
@@ -107,6 +143,10 @@ async def radarr_webhook(request: Request, background_tasks: BackgroundTasks):
 
         if video_path:
             video_path = translate_path(video_path)
+            try: video_path = validate_path(video_path)
+            except HTTPException as e:
+                logger.error(f"Webhook path validation failed: {e.detail}")
+                return {"status": "error", "reason": e.detail}
             logger.info(f"Queueing Babel processing for Radarr movie: {video_path}")
             background_tasks.add_task(
                 pipeline.process_video_file,
@@ -126,10 +166,7 @@ async def manual_process(req: ManualProcessRequest, background_tasks: Background
     movies_path = get_setting("media_movies_path", "/movies")
     norm_path = os.path.normpath(req.video_path)
     
-    allowed_roots = [os.path.normpath(p) for p in [series_path, movies_path, "/media", "/data"] if p]
-    if not any(norm_path.startswith(root) for root in allowed_roots):
-        from fastapi import HTTPException
-        raise HTTPException(status_code=403, detail=f"Path '{req.video_path}' is not under any configured media directory")
+    req.video_path = validate_path(req.video_path)
 
     title = req.title
     if not title:
