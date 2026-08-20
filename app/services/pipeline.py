@@ -672,8 +672,32 @@ class SubtitlePipeline:
                             
                             # Re-run QA after recovery with safe_ids context
                             qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
+                            
+                            # Escalation Stage: Contextual Single-Line Recovery
+                            if qa_result["untranslated_ids"]:
+                                append_job_log(job_id, f"Escalation Stage: {len(qa_result['untranslated_ids'])} lines still unresolved. Escalating to context-aware translation...")
+                                for idx in qa_result["untranslated_ids"]:
+                                    prev_idx = max(0, idx - 1)
+                                    next_idx = min(len(subs) - 1, idx + 1)
+                                    prev_text = translated_subs[prev_idx].content if prev_idx != idx else ""
+                                    next_text = subs[next_idx].content if next_idx != idx else ""
+                                    target_text = subs[idx].content
+                                    
+                                    try:
+                                        esc_text = await self.translator.escalate_single_line(
+                                            idx, target_text, prev_text, next_text, lang_name, title or ""
+                                        )
+                                        if esc_text and esc_text != target_text:
+                                            translated_subs[idx].content = esc_text
+                                            append_job_log(job_id, f"Escalation: Translated line {idx} using dialogue context")
+                                    except Exception as e:
+                                        append_job_log(job_id, f"Escalation failed for line {idx}: {e}")
+                                
+                                # Final QA rerun after escalation
+                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
+
                         except Exception as e:
-                            append_job_log(job_id, f"QA Recovery failed: {e}")
+                            append_job_log(job_id, f"QA Recovery/Escalation failed: {e}")
                 
                 # Final QA Log
                 score = qa_result["score"]

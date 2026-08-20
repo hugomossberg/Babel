@@ -208,6 +208,47 @@ Return ONLY a JSON array with this exact structure:
             raise ValueError("OpenAI API Key is not configured in settings.")
         return openai.OpenAI(api_key=api_key)
 
+    async def escalate_single_line(self, target_idx: int, target_text: str, prev_text: str, next_text: str, target_language: str, show_title: str) -> str:
+        provider = get_setting("ai_provider", "gemini").lower()
+        if provider == "deepl":
+            return target_text
+
+        system_prompt = f"You are a subtitle translator. Translate the TARGET line to {target_language}. The Previous and Next lines are for context only. Return ONLY the translated string for the TARGET line, no JSON, no quotes."
+        prompt = f"Context: {show_title}\n\nPrevious: {prev_text}\nTARGET: {target_text}\nNext: {next_text}\n\nTranslate TARGET:"
+
+        try:
+            if provider == "gemini":
+                from google import genai
+                from google.genai import types
+                import asyncio
+                api_key = get_setting("gemini_api_key", "")
+                model_name = get_setting("gemini_model", "gemini-3.5-flash-lite")
+                if "lite" in model_name:
+                    model_name = "gemini-3.6-flash"
+                client = genai.Client(api_key=api_key)
+                config = types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=0.1,
+                )
+                loop = asyncio.get_event_loop()
+                resp = await loop.run_in_executor(None, lambda: client.models.generate_content(model=model_name, contents=prompt, config=config))
+                return resp.text.strip()
+            elif provider == "openai":
+                import openai
+                import asyncio
+                api_key = get_setting("openai_api_key", "")
+                model = get_setting("openai_model", "gpt-4o-mini")
+                if "mini" in model:
+                    model = "gpt-4o"
+                client = openai.OpenAI(api_key=api_key)
+                loop = asyncio.get_event_loop()
+                resp = await loop.run_in_executor(None, lambda: client.chat.completions.create(
+                    model=model, messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}], temperature=0.1))
+                return resp.choices[0].message.content.strip()
+        except Exception as e:
+            return target_text
+        return target_text
+
     async def translate_batch_gemini(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
         client = self.get_gemini_client()
         
