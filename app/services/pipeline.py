@@ -110,7 +110,10 @@ def qa_gate(
         score -= 30
 
     score = max(0, score)
-    passed = score >= 60 and len(untranslated_ids) == 0 and dropped_count == 0
+    # Bug fix: Don't require untranslated_ids to be exactly 0, because names, numbers, 
+    # and short exclamations ("Oh!", "Wow") are identical in both languages. 
+    # The score already penalizes high percentages of identical lines.
+    passed = score >= 60 and dropped_count == 0
 
     if job_id:
         if passed:
@@ -625,31 +628,30 @@ class SubtitlePipeline:
                 # -------------------------------------------------------
                 qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id)
 
-                if not qa_result["passed"]:
-                    # Attempt recovery for untranslated lines
-                    if qa_result["untranslated_ids"]:
-                        append_job_log(job_id, f"QA Recovery: Retrying {len(qa_result['untranslated_ids'])} untranslated lines...")
-                        recovery_payload = [
-                            {"id": idx, "text": subs[idx].content}
-                            for idx in qa_result["untranslated_ids"]
-                            if subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>"
-                        ]
-                        if recovery_payload:
-                            try:
-                                recovery_results = await self.translator.translate_batch(
-                                    recovery_payload,
-                                    target_language=lang_name,
-                                    show_title=title or ""
-                                )
-                                res_dict = {r["id"]: r["text"] for r in recovery_results if "id" in r and "text" in r}
-                                for idx, text in res_dict.items():
-                                    if text != subs[idx].content:  # Only apply if actually different
-                                        translated_subs[idx].content = text
-                                
-                                # Re-run QA after recovery
-                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id)
-                            except Exception as e:
-                                append_job_log(job_id, f"QA Recovery failed: {e}")
+                # Attempt recovery for any untranslated lines (might just be identical names, but we try anyway)
+                if qa_result["untranslated_ids"]:
+                    append_job_log(job_id, f"QA Recovery: Retrying {len(qa_result['untranslated_ids'])} untranslated lines...")
+                    recovery_payload = [
+                        {"id": idx, "text": subs[idx].content}
+                        for idx in qa_result["untranslated_ids"]
+                        if subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>"
+                    ]
+                    if recovery_payload:
+                        try:
+                            recovery_results = await self.translator.translate_batch(
+                                recovery_payload,
+                                target_language=lang_name,
+                                show_title=title or ""
+                            )
+                            res_dict = {r["id"]: r["text"] for r in recovery_results if "id" in r and "text" in r}
+                            for idx, text in res_dict.items():
+                                if text != subs[idx].content:  # Only apply if actually different
+                                    translated_subs[idx].content = text
+                            
+                            # Re-run QA after recovery
+                            qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id)
+                        except Exception as e:
+                            append_job_log(job_id, f"QA Recovery failed: {e}")
 
                 # Bug #7: Track both start and end diff
                 sync_report = verify_sync(subs, translated_subs)
