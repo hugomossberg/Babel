@@ -223,8 +223,6 @@ Return ONLY a JSON array with this exact structure:
                 import asyncio
                 api_key = get_setting("gemini_api_key", "")
                 model_name = get_setting("gemini_model", "gemini-3.5-flash-lite")
-                if "lite" in model_name:
-                    model_name = "gemini-3.6-flash"
                 client = genai.Client(api_key=api_key)
                 config = types.GenerateContentConfig(
                     system_instruction=system_prompt,
@@ -238,8 +236,6 @@ Return ONLY a JSON array with this exact structure:
                 import asyncio
                 api_key = get_setting("openai_api_key", "")
                 model = get_setting("openai_model", "gpt-4o-mini")
-                if "mini" in model:
-                    model = "gpt-4o"
                 client = openai.OpenAI(api_key=api_key)
                 loop = asyncio.get_event_loop()
                 resp = await loop.run_in_executor(None, lambda: client.chat.completions.create(
