@@ -3,6 +3,7 @@ import os
 import secrets
 import base64
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from app.core.db import get_jobs_by_status
 from app.services.pipeline import pipeline
@@ -23,7 +24,19 @@ logging.basicConfig(
 
 init_db()
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(retry_waiting_jobs())
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
 app = FastAPI(
+
     title=APP_NAME,
     version=VERSION,
     description="Automated ultra-fast AI subtitle extractor, SDH-cleaner and translator for Servarr stack"
@@ -75,9 +88,6 @@ async def serve_ui():
         return HTMLResponse(content=html)
 
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(retry_waiting_jobs())
 
 async def retry_waiting_jobs():
     from app.core.db import claim_job_for_retry
