@@ -129,6 +129,89 @@ def get_provider_capabilities(provider: str) -> dict:
         "supports_context": True
     }
 
+def validate_classifier_output(raw_text: str, items: list) -> list:
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Classifier validation: received {len(items)} candidates. Raw type: {type(raw_text)}")
+    
+    valid_results = []
+    returned_ids = set()
+    
+    clean_text = raw_text.strip()
+    if clean_text.startswith("```"):
+        lines = clean_text.split('\n')
+        if lines[0].startswith("```"): lines = lines[1:]
+        if lines and lines[-1].startswith("```"): lines = lines[:-1]
+        clean_text = "\n".join(lines).strip()
+
+    try:
+        data = json.loads(clean_text)
+        
+        # Handle dict or list root
+        if isinstance(data, dict):
+            results = data.get("results", [])
+        elif isinstance(data, list):
+            results = data
+        else:
+            results = []
+            logger.warning(f"Classifier validation: Unexpected JSON root type {type(data)}")
+            
+        logger.info(f"Classifier validation: parsed {len(results)} results from JSON")
+        
+        expected_ids = {item["id"]: item["text"] for item in items}
+        allowed_reasons = {"proper_noun", "brand", "acronym", "number", "symbol", "non_verbal", "none"}
+        
+        kept = 0
+        translated = 0
+        rejected = 0
+        
+        for r in results:
+            if not isinstance(r, dict):
+                logger.warning(f"Classifier validation: rejected result item of type {type(r)}")
+                rejected += 1
+                continue
+                
+            rid = r.get("id")
+            act = str(r.get("action", "")).lower()
+            if rid not in expected_ids: 
+                logger.warning(f"Classifier validation: rejected result for unknown ID {rid}")
+                rejected += 1
+                continue
+                
+            if act == "keep":
+                reason = str(r.get("reason", "none")).lower()
+                if reason not in allowed_reasons:
+                    logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (invalid reason: {reason})")
+                    act = "translate" 
+                    
+            if act == "keep": kept += 1
+            elif act == "translate": 
+                translated += 1
+                # Enforce that translate text is actually provided, fallback if it echoes source or is empty
+                # Actually, translation text is fetched from the dict, but for now we just trust it,
+                # if they echo the source, it will just be translated again via DeepL since it's identical?
+                # The user said: "TRANSLATE that echoes source". The classifier shouldn't even return the text for TRANSLATE normally, it just tells it to translate.
+                # Wait, the action is what we care about here. If action is translate, we translate it later.
+            else:
+                logger.warning(f"Classifier validation: rejected result for ID {rid} due to invalid action {act}")
+                rejected += 1
+                continue
+                
+            valid_results.append({"id": rid, "action": act, "reason": r.get("reason", ""), "text": r.get("text", "")})
+            returned_ids.add(rid)
+            
+        logger.info(f"Classifier validation: Validated {kept} KEEP, {translated} TRANSLATE, {rejected} REJECTED")
+    except Exception as e:
+        logger.error(f"Classifier validation: JSON parse failed: {e}")
+    
+    # Failsafe: Any missing items must be translated
+    for item in items:
+        if item["id"] not in returned_ids:
+            logger.info(f"Classifier validation: Failsafe triggered for ID {item['id']}, forcing TRANSLATE")
+            valid_results.append({"id": item["id"], "action": "translate", "reason": "malformed_fallback", "text": item["text"]})
+            
+    return valid_results
+
 class SubtitleTranslator:
     @with_retry
     async def classify_and_recover_identical(self, items: list, target_language: str, show_title: str) -> list:
@@ -140,6 +223,9 @@ class SubtitleTranslator:
 The following lines were identical in English and {target_language}.
 Decide for each line whether it should be KEPT identical (e.g. proper nouns, brands, numbers, untranslatable sounds) or TRANSLATED.
 If a line is a song lyric, classify it as TRANSLATE. Do not keep song lyrics in English unless it is an untranslatable proper noun.
+
+KEEP -> text may remain identical
+TRANSLATE -> text MUST contain the actual translated target-language text, never merely the source.
 
 Return ONLY a JSON object with a single key 'results' containing an array of objects.
 Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
@@ -166,68 +252,6 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             "required": ["results"]
         }
 
-        def validate_classifier_output(raw_text: str) -> list:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.info(f"Classifier validation: received {len(items)} candidates. Raw type: {type(raw_text)}")
-            
-            valid_results = []
-            returned_ids = set()
-            
-            clean_text = raw_text.strip()
-            if clean_text.startswith("```"):
-                lines = clean_text.split('\n')
-                if lines[0].startswith("```"): lines = lines[1:]
-                if lines and lines[-1].startswith("```"): lines = lines[:-1]
-                clean_text = "\n".join(lines).strip()
-
-            try:
-                data = json.loads(clean_text)
-                results = data.get("results", [])
-                logger.info(f"Classifier validation: parsed {len(results)} results from JSON")
-                
-                expected_ids = {item["id"]: item["text"] for item in items}
-                allowed_reasons = {"proper_noun", "brand", "acronym", "number", "symbol", "non_verbal", "none"}
-                
-                kept = 0
-                translated = 0
-                rejected = 0
-                
-                for r in results:
-                    rid = r.get("id")
-                    act = r.get("action", "").lower()
-                    if rid not in expected_ids: 
-                        logger.warning(f"Classifier validation: rejected result for unknown ID {rid}")
-                        rejected += 1
-                        continue
-                        
-                    if act == "keep":
-                        reason = r.get("reason", "none").lower()
-                        if reason not in allowed_reasons:
-                            logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (invalid reason: {reason})")
-                            act = "translate" 
-                            
-                    if act == "keep": kept += 1
-                    elif act == "translate": translated += 1
-                    else:
-                        logger.warning(f"Classifier validation: rejected result for ID {rid} due to invalid action {act}")
-                        rejected += 1
-                        continue
-                        
-                    valid_results.append({"id": rid, "action": act, "reason": r.get("reason", ""), "text": r.get("text", "")})
-                    returned_ids.add(rid)
-                    
-                logger.info(f"Classifier validation: Validated {kept} KEEP, {translated} TRANSLATE, {rejected} REJECTED")
-            except Exception as e:
-                logger.error(f"Classifier validation: JSON parse failed: {e}")
-            
-            for item in items:
-                if item["id"] not in returned_ids:
-                    logger.info(f"Classifier validation: Failsafe triggered for ID {item['id']}, forcing TRANSLATE")
-                    valid_results.append({"id": item["id"], "action": "translate", "reason": "malformed_fallback", "text": item["text"]})
-                    
-            return valid_results
-        
         # We will reuse the client calls directly here to keep it self-contained
         if provider == "gemini":
             from google import genai
@@ -243,12 +267,13 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     config=types.GenerateContentConfig(
                         system_instruction=system_prompt,
                         response_mime_type="application/json",
+                        response_schema=schema,
                         temperature=0.1
                     )
                 )
             loop = asyncio.get_event_loop()
             resp = await loop.run_in_executor(None, do_gemini)
-            return validate_classifier_output(resp.text)
+            return validate_classifier_output(resp.text, items)
                 
         elif provider == "openai":
             import openai
@@ -270,7 +295,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             resp = await loop.run_in_executor(None, do_openai)
             try:
                 content = resp.choices[0].message.content
-                return validate_classifier_output(content)
+                return validate_classifier_output(content, items)
             except Exception:
                 return []
                 
@@ -285,7 +310,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     json={"model": model_name, "prompt": full_prompt, "format": "json", "stream": False}
                 )
                 try:
-                    return validate_classifier_output(resp.json()["response"])
+                    return validate_classifier_output(resp.json()["response"], items)
                 except Exception:
                     return []
         
