@@ -185,6 +185,11 @@
                           <i class="fa-solid fa-circle-exclamation"></i> FAILED
                         </span>
                       </template>
+                      <template x-if="job.status === 'CANCELLED'">
+                        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-zinc-900 text-zinc-400 border border-zinc-700/50">
+                          <i class="fa-solid fa-ban"></i> CANCELLED
+                        </span>
+                      </template>
                       <template x-if="job.status === 'WAITING_PROVIDER' || job.status === 'RETRY_PENDING'">
                         <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-orange-950 text-orange-400 border border-orange-800/50 animate-pulse">
                           <i class="fa-solid fa-triangle-exclamation"></i> <span x-text="job.status"></span>
@@ -586,11 +591,7 @@
                   <span class="text-xs text-slate-500 mt-1 block">50 lines per chunk is optimal.</span>
                 </div>
 
-                <div>
-                  <label class="block text-sm font-medium text-slate-300 mb-1.5">Batch Concurrency</label>
-                  <input type="number" x-model.number="settingsData.ai.max_concurrency" min="1" max="8" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
-                  <span class="text-xs text-slate-500 mt-1 block">Parallel chunks per video.</span>
-                </div>
+
 
                 <div>
                   <label class="block text-sm font-medium text-slate-300 mb-1.5">Simultaneous Videos</label>
@@ -611,8 +612,8 @@
                 <i class="fa-solid fa-circle-info text-purple-400 text-sm mt-0.5"></i>
                 <div class="space-y-1.5">
                   <div class="font-semibold text-slate-200">Rate Limit Guidelines (Google AI Studio Official):</div>
-                  <div>• <strong>Free Tier (15 RPM limit):</strong> Set <em>Batch Concurrency</em> to <code>2</code> (or <code>1</code>) and <em>Simultaneous Videos</em> to <code>1</code> to stay safely within Google's 15 requests/minute free threshold.</div>
-                  <div>• <strong>Pay-As-You-Go / Tier 1 (300+ RPM limit):</strong> Set <em>Batch Concurrency</em> to <code>4</code> and <em>Simultaneous Videos</em> to <code>3</code> (or higher) to translate entire seasons in parallel at ultra-speed.</div>
+                  <div>• <strong>Free Tier (15 RPM limit):</strong> Set <em>Simultaneous Videos</em> to <code>1</code> to stay safely within Google's 15 requests/minute free threshold.</div>
+                  <div>• <strong>Pay-As-You-Go / Tier 1 (300+ RPM limit):</strong> Set <em>Simultaneous Videos</em> to <code>3</code> (or higher) to translate entire seasons in parallel at ultra-speed.</div>
                   <div class="text-[11px] text-slate-500"><em>Tip: Flash-Lite and Flash start at 300 RPM on Tier 1 (scaling up to 1,000+ RPM as usage grows), while Pro models have stricter limits (150 RPM).</em></div>
                 </div>
               </div>
@@ -622,7 +623,7 @@
                 <i class="fa-solid fa-circle-info text-emerald-400 text-sm mt-0.5"></i>
                 <div class="space-y-1.5">
                   <div class="font-semibold text-slate-200">OpenAI Rate Limit Guidelines:</div>
-                  <div>• <strong>Tier 1+ Account:</strong> Set <em>Batch Concurrency</em> to <code>2-4</code> and <em>Simultaneous Videos</em> to <code>2</code>. GPT-4o Mini is fast and cost-effective for subtitle translations.</div>
+                  <div>• <strong>Tier 1+ Account:</strong> Set <em>Simultaneous Videos</em> to <code>2</code>. GPT-4o Mini is fast and cost-effective for subtitle translations.</div>
                 </div>
               </div>
 
@@ -1053,7 +1054,7 @@
             <div class="bg-slate-950 p-3 rounded-xl border border-slate-800">
               <span class="text-slate-500 block mb-1">Lines Processed</span>
               <div class="flex items-baseline gap-1">
-                <span class="font-bold text-sm text-slate-100" x-text="selectedJob.total_lines || 0"></span>
+                <span class="font-bold text-sm text-slate-100" x-text="(selectedJob.processed_lines || 0) + ' / ' + (selectedJob.total_lines || 0)"></span>
                 <span class="text-[10px] text-slate-500" x-show="selectedJob.cleaned_sdh_lines > 0" x-text="'(' + selectedJob.cleaned_sdh_lines + ' sdh)'"></span>
               </div>
             </div>
@@ -1140,6 +1141,7 @@
         mediaCategory: 'series',
         stats: {},
         jobs: [],
+        mediaLoaded: false,
         mediaData: { series: [], movies: [] },
         modalOpen: false,
         selectedJob: {},
@@ -1170,7 +1172,7 @@
             escalation_model: '',
             escalate_to_pro: false,
             batch_size: 50,
-            max_concurrency: 4,
+            max_concurrent_jobs: 1,
             glossary: ''
           },
           modules: {
@@ -1199,7 +1201,7 @@
             wait_time_seconds: 15,
             notify_jellyfin: false,
             jellyfin_url: '',
-            jellyfin_api_key: 'devtestkey1234567890abcdef'
+            jellyfin_api_key: ''
           }
         },
         pollTimer: null,
@@ -1214,16 +1216,6 @@
             if (this.currentTab === 'dashboard') {
               this.loadStats();
               this.loadJobs();
-            } else if (this.currentTab === 'media' && !this.scanningFolders) {
-              if (!this._mediaPollCount) this._mediaPollCount = 0;
-              this._mediaPollCount++;
-              if (this._mediaPollCount >= 3) { // 9 seconds
-                this._mediaPollCount = 0;
-                fetch('/api/media-files')
-                  .then(res => res.json())
-                  .then(data => { this.mediaData = data; })
-                  .catch(() => {});
-              }
             }
           }, 3000);
         },
@@ -1307,6 +1299,12 @@
           try {
             const res = await fetch('/api/jobs');
             this.jobs = await res.json();
+            if (this.modalOpen && this.selectedJob && this.selectedJob.id) {
+              const updatedJob = this.jobs.find(j => j.id === this.selectedJob.id);
+              if (updatedJob) {
+                this.selectedJob = { ...this.selectedJob, ...updatedJob };
+              }
+            }
           } catch(e) {}
         },
 
@@ -1535,11 +1533,12 @@
         },
 
         async loadMediaFiles(force = false) {
-          if (!force && (this.mediaData.series || this.mediaData.movies)) return;
+          if (!force && this.mediaLoaded) return;
           this.scanningFolders = true;
           try {
             const res = await fetch('/api/media-files');
             this.mediaData = await res.json();
+            this.mediaLoaded = true;
           } catch(e) {
           } finally {
             this.scanningFolders = false;

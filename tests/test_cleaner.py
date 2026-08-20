@@ -45,5 +45,6 @@ def test_cleaner_keeps_real_dialogue_parentheses():
 def test_cleaner_removes_known_sdh():
     from app.core.cleaner import clean_subtitle_text
     assert clean_subtitle_text("(laughing)") == "<i></i>"
-    assert clean_subtitle_text("(door closes)") == "(door closes)" # wait, door closes is not in keywords. Should it be bracket? Usually it's [door closes]. 
+    assert clean_subtitle_text("(door closes)") == "<i></i>"
+    assert clean_subtitle_text("(phone ringing)") == "<i></i>"
     assert clean_subtitle_text("[door closes]") == "<i></i>"

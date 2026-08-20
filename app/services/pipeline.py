@@ -600,17 +600,6 @@ class SubtitlePipeline:
                             primary_audio_lang = audio.get("language", "und").lower()
                             break
                 
-            AUDIO_LANG_MAP = {
-                "sv": ["swe", "sve", "sv"],
-                "da": ["dan", "da"],
-                "no": ["nor", "nob", "nno", "no"],
-                "fi": ["fin", "fi"],
-                "de": ["ger", "deu", "de"],
-                "es": ["spa", "es"],
-                "fr": ["fre", "fra", "fr"],
-                "en": ["eng", "en"]
-            }
-
             for lang_info in langs_needing_translation:
                 lang_name = lang_info["name"]
                 lang_code = lang_info["code"]
@@ -619,7 +608,10 @@ class SubtitlePipeline:
                 
                 # Check Original Language Guard
                 if original_language_guard:
-                    protected_langs = AUDIO_LANG_MAP.get(lang_code, [lang_code])
+                    from app.core.languages import get_language
+                    lang_obj = get_language(lang_code)
+                    protected_langs = lang_obj.aliases if lang_obj else [lang_code]
+                    
                     if primary_audio_lang in protected_langs:
                         append_job_log(job_id, f"Original Language Guard: Primary audio is '{primary_audio_lang}'. Skipping translation to {lang_name}.")
                         # Bug #31: Don't count guard-skipped as "successful translation"

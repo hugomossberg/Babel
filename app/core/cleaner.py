@@ -7,7 +7,7 @@ SDH_BRACKET_REGEX = re.compile(r'\[.*?\]', re.DOTALL)
 # Only remove parentheticals if they are all caps and stand alone on a line.
 SDH_PAREN_REGEX = re.compile(r'^\([^a-z0-9]*[A-Z\s]+[^a-z0-9]*\)$', re.DOTALL)
 # Also remove inline parentheticals if they contain known SDH words
-SDH_KEYWORDS_REGEX = re.compile(r'\((laughing|laughs|sighs|sighing|gasps|groans|grunts|chuckles|clears throat|music playing|speaking|whispers|shouts|crying|cries|sobs|panting|pants|cheering|cheers|applauding|applause|screaming|screams|yells|yelling|exhales|inhales|grunts).*?\)', re.IGNORECASE)
+SDH_KEYWORDS_REGEX = re.compile(r'\((laughing|laughs|sighs|sighing|gasps|groans|grunts|chuckles|clears throat|music playing|speaking|whispers|shouts|crying|cries|sobs|panting|pants|cheering|cheers|applauding|applause|screaming|screams|yells|yelling|exhales|inhales|grunts|door\s|phone\s|engine\s|birds\s|footsteps).*?\)', re.IGNORECASE)
 
 # Regex for music notes and signs: ♪, ♫, ♬, ♩
 MUSIC_NOTES_REGEX = re.compile(r'[♪♫♬♩]+')
@@ -26,16 +26,39 @@ def clean_subtitle_text(text: str) -> str:
 
     # Remove standard SDH brackets [ ... ]
     cleaned = SDH_BRACKET_REGEX.sub('', text)
-    # Remove conservative parentheticals
+    # Remove known keywords from inline parentheticals
     cleaned = SDH_KEYWORDS_REGEX.sub('', cleaned)
     
     # Process line by line for full-line parentheticals
     processed_lines = []
     for line in cleaned.split('\n'):
         line_stripped = line.strip()
-        if SDH_PAREN_REGEX.match(line_stripped):
+        
+        # Check if line is a full parenthetical
+        if line_stripped.startswith('(') and line_stripped.endswith(')'):
+            inner = line_stripped[1:-1].strip()
+            
+            # If it has sentence punctuation, it's likely dialogue
+            if any(p in inner for p in '.?!'):
+                processed_lines.append(line)
+                continue
+                
+            # If it's all caps, it's SDH
+            if inner.isupper():
+                continue
+                
+            # If it contains common conversational words, keep it
+            lower_words = set(inner.lower().split())
+            dialogue_words = {"i", "you", "he", "she", "we", "they", "it", "what", "how", "why", "who", "don't", "can't", "yes", "no", "yeah", "ok", "okay"}
+            if lower_words.intersection(dialogue_words):
+                processed_lines.append(line)
+                continue
+                
+            # Otherwise, assume it's SDH (e.g. "door closes", "phone ringing")
             continue
+            
         processed_lines.append(line)
+        
     cleaned = '\n'.join(processed_lines)
 
     # Remove music notes

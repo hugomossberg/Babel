@@ -99,13 +99,9 @@ def extract_embedded_srt(video_path: str, output_srt_path: str, preferred_lang: 
     
     selected_track_id = None
     selected_sub_index = None
-    # Look for matching language codes (e.g. 'eng', 'en', 'swe', 'sv')
-    lang_prefixes = [preferred_lang.lower()]
-    if preferred_lang.lower() in ["eng", "en"]:
-        lang_prefixes = ["eng", "en"]
-    elif preferred_lang.lower() in ["swe", "sv"]:
-        lang_prefixes = ["swe", "sv"]
-
+    from app.core.languages import get_language
+    lang_obj = get_language(preferred_lang)
+    lang_prefixes = lang_obj.aliases if lang_obj else [preferred_lang.lower()]
     TEXT_CODECS = {"SubRip/SRT", "S_TEXT/UTF8", "S_TEXT/ASS", "S_TEXT/SSA", "S_TEXT/WEBVTT", "SubStationAlpha", "WebVTT"}
 
     candidates = []

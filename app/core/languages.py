@@ -8,7 +8,7 @@ class Language:
         self.deepl_code = deepl_code or code.upper()
 
 LANGUAGES = [
-    Language("sv", ["swe", "swedish", "sve"], "Swedish", "SV"),
+    Language("sv", ["swe", "swedish", "sve", "svenska"], "Swedish", "SV"),
     Language("en", ["eng", "english"], "English", "EN-US"),
     Language("de", ["deu", "ger", "german"], "German", "DE"),
     Language("fr", ["fra", "fre", "french"], "French", "FR"),

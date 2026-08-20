@@ -11,14 +11,14 @@ def find_external_subtitle(video_path: str, lang_code: str) -> Optional[str]:
     directory = os.path.dirname(video_path)
     base_name = os.path.basename(base_path)
 
-    lang_map = {
-        "sv": [".sv", ".swe", ".swedish", ".sv.default"],
-        "en": [".en", ".eng", ".english", ".en.default"],
-        "de": [".de", ".ger", ".german", ".de.default"],
-        "fr": [".fr", ".fre", ".french", ".fr.default"]
-    }
-
-    suffixes = lang_map.get(lang_code.lower(), [f".{lang_code.lower()}"])
+    from app.core.languages import get_language
+    lang_obj = get_language(lang_code)
+    
+    if lang_obj:
+        suffixes = [f".{a}" for a in lang_obj.aliases]
+        suffixes.append(f".{lang_code.lower()}.default")
+    else:
+        suffixes = [f".{lang_code.lower()}", f".{lang_code.lower()}.default"]
 
     # 1. Exact matches
     for suffix in suffixes:

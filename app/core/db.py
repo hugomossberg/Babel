@@ -63,7 +63,7 @@ def init_db():
         cursor.execute("""
         UPDATE jobs 
         SET status = 'FAILED', error_message = 'Interrupted by server restart' 
-        WHERE status IN ('PENDING', 'PROCESSING', 'RUNNING', 'QUEUED')
+        WHERE status IN ('PENDING', 'PROCESSING', 'RUNNING')
         """)
         
         cursor.execute("""
@@ -90,7 +90,6 @@ def init_db():
             "gemini_api_key": "",
             "gemini_model": "gemini-3.5-flash-lite",
             "batch_size": "50",
-            "max_concurrency": "1",
             "max_concurrent_jobs": "1",
             "glossary": "",
             "enable_bazarr_check": "true",

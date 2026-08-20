@@ -14,9 +14,12 @@ services:
     image: babel:latest
     container_name: babel
     environment:
-      - TZ=${TZ:-Europe/Stockholm}
+      - TZ=${TZ:-UTC}
       - PORT=8765
       - BABEL_DB_PATH=/app/data/babel.db
+      - BABEL_AUTH_USERNAME=${BABEL_AUTH_USERNAME:-}
+      - BABEL_AUTH_PASSWORD=${BABEL_AUTH_PASSWORD:-}
+      - BABEL_WEBHOOK_SECRET=${BABEL_WEBHOOK_SECRET:-}
     volumes:
       - ./data:/app/data
       - ${TV_PATH:-/data/media/tv}:/tv

@@ -39,7 +39,7 @@ import openai
 import httpx
 import srt
 
-from app.core.db import get_setting, update_job, append_job_log, save_translation_memory, get_translation_memory
+from app.core.db import DB_PATH, get_setting, update_job, append_job_log, save_translation_memory, get_translation_memory
 
 logger = logging.getLogger("babel.translator")
 
@@ -193,9 +193,26 @@ def validate_classifier_output(raw_text: str, items: list) -> list:
                         logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason=number but no digits)")
                         is_valid_keep = False
                 elif reason in ["proper_noun", "brand"]:
-                    # If it's a long sentence, it's very unlikely to be purely a proper noun/brand
-                    if len(original_text.split()) >= 5:
-                        logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason={reason} but text is {len(original_text.split())} words)")
+                    # Check for conversational words leaking into proper_noun
+                    words = [w.strip(".,!?\"'()[]{}") for w in original_text.split()]
+                    lower_words = set(w.lower() for w in words if w)
+                    
+                    forbidden_words = {
+                        "get", "come", "go", "do", "know", "think", "what", "how", "why", "who", "where", "when", 
+                        "are", "is", "am", "was", "were", "be", "been", "have", "has", "had", "can", "could", 
+                        "would", "should", "will", "shall", "may", "might", "must", "the", "a", "an", "this", 
+                        "that", "these", "those", "it", "they", "he", "she", "we", "i", "you", "my", "your", 
+                        "his", "her", "their", "our", "me", "him", "us", "them", "yes", "no", "ok", "okay", 
+                        "yeah", "nah", "out", "in", "up", "down", "here", "there", "happened"
+                    }
+                    
+                    has_forbidden = bool(lower_words.intersection(forbidden_words))
+                    
+                    if len(words) >= 5:
+                        logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason={reason} but text is {len(words)} words)")
+                        is_valid_keep = False
+                    elif has_forbidden:
+                        logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason={reason} but contains conversational words)")
                         is_valid_keep = False
                 
                 if not is_valid_keep:
@@ -554,15 +571,9 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         if not api_key:
             raise ValueError("DeepL API Key is not configured.")
         
-        DEEPL_LANG_MAP = {
-            "swedish": "SV", "danish": "DA", "norwegian": "NB", "finnish": "FI",
-            "german": "DE", "french": "FR", "spanish": "ES", "italian": "IT",
-            "dutch": "NL", "polish": "PL", "portuguese": "PT-PT", "russian": "RU",
-            "japanese": "JA", "chinese": "ZH", "korean": "KO", "turkish": "TR",
-            "czech": "CS", "romanian": "RO", "hungarian": "HU", "bulgarian": "BG",
-            "greek": "EL", "indonesian": "ID", "arabic": "AR",
-        }
-        target_lang_code = DEEPL_LANG_MAP.get(target_language.lower(), target_language.upper()[:2])
+        from app.core.languages import get_language
+        lang_obj = get_language(target_language)
+        target_lang_code = lang_obj.deepl_code if lang_obj else target_language.upper()[:2]
         url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
         
         texts = [it["text"] for it in items]
@@ -636,6 +647,23 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             for sub in subs
         ]
 
+        import os
+        data_dir = os.path.dirname(DB_PATH)
+        partial_file = os.path.join(data_dir, f"job_{job_id}_partial.json") if job_id else None
+        
+        partial_dict = {}
+        if partial_file and os.path.exists(partial_file):
+            try:
+                with open(partial_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    partial_dict = {int(k): v for k, v in data.items()}
+                for k, v in partial_dict.items():
+                    if k < len(translated_subs):
+                        translated_subs[k].content = v
+                logger.info(f"Loaded partial progress for job {job_id} ({len(partial_dict)} lines)")
+            except Exception as e:
+                logger.error(f"Failed to load partial progress for job {job_id}: {e}")
+
         processed_count = 0
         context_window_size = 5
         previous_context = []
@@ -649,6 +677,14 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
 
         for batch_idx, (start_idx, chunk, payload) in enumerate(batches):
             end_idx = min(start_idx + len(payload), total_lines)
+
+            # --- ÄKTA RESUME: Skip batch if all lines are already translated ---
+            if payload and all(p["id"] in partial_dict for p in payload):
+                processed_count += len(payload)
+                if job_id:
+                    update_job(job_id, processed_lines=processed_count, current_batch=f"Skipping cached lines {start_idx + 1}-{end_idx} / {total_lines}")
+                continue
+            # -------------------------------------------------------------------
 
             all_empty = all(p["text"].strip() == "<i></i>" for p in payload)
             if all_empty:
@@ -705,6 +741,15 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                         translated_subs[idx].content = "<i></i>"
                     elif idx in res_dict:
                         translated_subs[idx].content = res_dict[idx]
+                    
+                    partial_dict[idx] = translated_subs[idx].content
+                
+                if partial_file:
+                    try:
+                        with open(partial_file, "w", encoding="utf-8") as f:
+                            json.dump(partial_dict, f, ensure_ascii=False)
+                    except Exception as e:
+                        logger.error(f"Failed to save partial progress for job {job_id}: {e}")
 
                 valid_translations = [
                     {"original": p["text"], "translated": res_dict[p["id"]]}

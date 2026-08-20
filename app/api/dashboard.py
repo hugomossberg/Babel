@@ -122,19 +122,11 @@ async def api_delete_subtitles(req: DeleteSubRequest):
     except Exception:
         target_codes = {"sv"}
     
-    # Also include common variants
-    LANG_VARIANTS = {
-        "sv": ["sv", "swe", "swedish"],
-        "da": ["da", "dan", "danish"],
-        "no": ["no", "nor", "nob", "norwegian"],
-        "de": ["de", "ger", "german"],
-        "fr": ["fr", "fre", "french"],
-        "es": ["es", "spa", "spanish"],
-        "fi": ["fi", "fin", "finnish"],
-    }
+    from app.core.languages import get_language
     delete_suffixes = set()
     for code in target_codes:
-        variants = LANG_VARIANTS.get(code, [code])
+        lang_obj = get_language(code)
+        variants = lang_obj.aliases if lang_obj else [code]
         for v in variants:
             delete_suffixes.add(f".{v}.srt")
     

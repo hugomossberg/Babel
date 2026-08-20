@@ -62,7 +62,7 @@ def test_evaluate_subtitle_health_empty_file(tmp_path):
     assert health['status'] == 'RED'
     assert 'empty or corrupted' in health['reason'].lower()
 
-def test_evaluate_subtitle_health_wrong_language(tmp_path):
+def test_evaluate_subtitle_health_wrong_language_dup(tmp_path):
     p = tmp_path / "wrong.srt"
     blocks = []
     for i in range(1, 21):
