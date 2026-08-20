@@ -29,7 +29,7 @@ def test_qa_wrong_language():
     trans = [srt.Subtitle(1, start=timedelta(seconds=1), end=timedelta(seconds=2), content="Hello this is a long text to trigger detection")]
     res = qa_gate(source, trans, target_lang_code="sv")
     assert res["passed"] == False
-    assert any("appears to be english" in issue.lower() for issue in res["issues"])
+    assert any("appears to be en" in issue.lower() for issue in res["issues"])
 
 def test_qa_sync_drift_hard_fail():
     source = [srt.Subtitle(1, start=timedelta(seconds=1), end=timedelta(seconds=2), content="Hello")]

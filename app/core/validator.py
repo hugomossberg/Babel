@@ -11,20 +11,36 @@ SWEDISH_COMMON_WORDS = {
 }
 
 import langdetect
+from langdetect import DetectorFactory
+from app.core.languages import get_language
 
-def detect_language_heuristics(text: str) -> str:
+# Seed for deterministic tests/results
+DetectorFactory.seed = 0
+
+def detect_language_heuristics(text: str) -> dict:
     """
     Robust language detection for all languages.
-    Returns the ISO 639-1 code (e.g. 'en', 'sv', 'zh-cn').
+    Returns a dict with 'lang' (normalized ISO code) and 'confidence'.
     """
     if not text or not text.strip():
-        return "unknown"
+        return {"lang": "unknown", "confidence": 0.0}
     
     try:
-        lang = langdetect.detect(text)
-        return lang.lower()
+        langs = langdetect.detect_langs(text)
+        if not langs:
+            return {"lang": "unknown", "confidence": 0.0}
+            
+        best_match = langs[0]
+        detected_code = best_match.lang.lower()
+        confidence = best_match.prob
+        
+        # Normalize via central language registry
+        registry_lang = get_language(detected_code)
+        normalized_code = registry_lang.code if registry_lang else detected_code
+        
+        return {"lang": normalized_code, "confidence": confidence}
     except Exception:
-        return "unknown"
+        return {"lang": "unknown", "confidence": 0.0}
 
 def parse_srt_safe(srt_text: str) -> List[srt.Subtitle]:
     try:
@@ -154,18 +170,34 @@ def evaluate_subtitle_health(
 
     # 1. Språkdetektering
     full_sample_text = " ".join([s.content for s in sub_blocks[:80]])
-    detected_lang = detect_language_heuristics(full_sample_text)
+    lang_info = detect_language_heuristics(full_sample_text)
+    detected_lang = lang_info["lang"]
+    confidence = lang_info["confidence"]
 
     if detected_lang != "unknown" and detected_lang != target_lang_code[:2].lower():
-        # Fallback tillåtelse om vi faktiskt inte kan särskilja bra eller användaren kräver nåt vi saknar,
-        # men om vi vet att den bad om sv och vi ser en -> RED. 
-        # Om den bad om de och vi ser en -> RED.
+        if confidence < 0.8:
+            return {
+                "status": "YELLOW",
+                "health_score": 50,
+                "reason": f"Low confidence language mismatch: Found {detected_lang} (conf: {confidence:.2f}), expected {target_lang_code}",
+                "lines": len(sub_blocks),
+                "detected_language": detected_lang
+            }
+        else:
+            return {
+                "status": "RED",
+                "health_score": 10,
+                "reason": f"Wrong language detected: Found {detected_lang} (conf: {confidence:.2f}), expected {target_lang_code}",
+                "lines": len(sub_blocks),
+                "detected_language": detected_lang
+            }
+    elif detected_lang == "unknown":
         return {
             "status": "RED",
-            "health_score": 10,
-            "reason": f"Wrong language detected: Found {detected_lang}, expected {target_lang_code}",
+            "health_score": 0,
+            "reason": "Language detection failed (unknown)",
             "lines": len(sub_blocks),
-            "detected_language": detected_lang
+            "detected_language": "unknown"
         }
 
     # 2. Tomma rader

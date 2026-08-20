@@ -103,15 +103,16 @@ def qa_gate(
         elif max_drift > 50:
             score -= 10
 
-    # 5. Language detection on translated output
+    # 5. Målspråkskontroll (Grov)
     wrong_language = False
     if translated_subs:
         sample_text = " ".join([s.content for s in translated_subs[:80] if s.content.strip() and s.content.strip() != "<i></i>"])
         if sample_text:
-            detected = detect_language_heuristics(sample_text)
-            if detected == "en" and target_lang_code != "en":
+            lang_info = detect_language_heuristics(sample_text)
+            detected = lang_info["lang"]
+            if detected != "unknown" and detected != target_lang_code[:2].lower():
                 wrong_language = True
-                issues.append(f"Target language detection failed: output appears to be English, expected {target_lang_code}")
+                issues.append(f"Target language detection failed: output appears to be {detected}, expected {target_lang_code}")
                 score -= 30
 
     # 6. Valid SRT structure
@@ -405,17 +406,26 @@ class SubtitlePipeline:
                         if extracted_target and os.path.exists(temp_target_path):
                             # Always validate extracted embedded target, regardless of auto_repair setting
                             health = evaluate_subtitle_health(temp_target_path, target_lang_code=lang_code)
-                            if health.get("status") == "RED":
-                                append_job_log(job_id, f"Extracted embedded {lang_name} track but it is unhealthy ({health['reason']}). Rejecting candidate.")
+                            status = health.get("status", "UNKNOWN")
+                            
+                            if status == "GREEN":
+                                os.replace(temp_target_path, target_output_path)
+                                append_job_log(job_id, f"Extracted healthy embedded {lang_name} track to {os.path.basename(target_output_path)}.")
+                                continue
+                            elif status == "YELLOW":
+                                append_job_log(job_id, f"Extracted embedded {lang_name} track is YELLOW ({health.get('reason')}). Queuing for deeper QA validation.")
                                 try:
                                     os.remove(temp_target_path)
                                 except Exception:
                                     pass
                                 # Fall through to append to langs_needing_translation
                             else:
-                                os.replace(temp_target_path, target_output_path)
-                                append_job_log(job_id, f"Extracted healthy embedded {lang_name} track to {os.path.basename(target_output_path)}.")
-                                continue
+                                append_job_log(job_id, f"Extracted embedded {lang_name} track rejected: {status} ({health.get('reason', 'Unknown error')}).")
+                                try:
+                                    os.remove(temp_target_path)
+                                except Exception:
+                                    pass
+                                # Fall through to append to langs_needing_translation
 
                 # This language needs translation
                 langs_needing_translation.append(lang_info)
