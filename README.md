@@ -45,3 +45,6 @@ If you want to run the project locally without Docker:
 - `data/` - SQLite database storage (ignored by git)
 - `tests/` - Pytest test suite
 - `docker-compose.yml` - Docker configuration
+
+## Author
+- Hugo Mossberg
