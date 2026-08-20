@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import httpx
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Query
@@ -253,15 +254,15 @@ async def api_container_action(req: ContainerActionRequest):
 async def api_save_ai_settings(req: AISettingsRequest):
     if req.ai_provider:
         set_setting("ai_provider", req.ai_provider)
-    if req.gemini_api_key is not None:
+    if req.gemini_api_key is not None and not req.gemini_api_key.startswith("••••••••"):
         set_setting("gemini_api_key", req.gemini_api_key.strip())
     if req.gemini_model:
         set_setting("gemini_model", req.gemini_model)
-    if req.openai_api_key is not None:
+    if req.openai_api_key is not None and not req.openai_api_key.startswith("••••••••"):
         set_setting("openai_api_key", req.openai_api_key.strip())
     if req.openai_model:
         set_setting("openai_model", req.openai_model)
-    if req.deepl_api_key is not None:
+    if req.deepl_api_key is not None and not req.deepl_api_key.startswith("••••••••"):
         set_setting("deepl_api_key", req.deepl_api_key.strip())
     if req.ollama_url:
         set_setting("ollama_url", req.ollama_url.strip())
@@ -383,12 +384,14 @@ async def api_save_folders(req: MediaFoldersSettingsRequest):
 async def api_save_integrations(req: IntegrationsSettingsRequest):
     set_setting("enable_bazarr_check", "true" if req.enable_bazarr_check else "false")
     set_setting("bazarr_url", req.bazarr_url)
-    set_setting("bazarr_api_key", req.bazarr_api_key)
+    if not req.bazarr_api_key.startswith("••••••••"):
+        set_setting("bazarr_api_key", req.bazarr_api_key)
     set_setting("bazarr_container_name", req.bazarr_container_name)
     set_setting("wait_time_seconds", str(req.wait_time_seconds))
     set_setting("notify_jellyfin", "true" if req.notify_jellyfin else "false")
     set_setting("jellyfin_url", req.jellyfin_url)
-    set_setting("jellyfin_api_key", req.jellyfin_api_key)
+    if not req.jellyfin_api_key.startswith("••••••••"):
+        set_setting("jellyfin_api_key", req.jellyfin_api_key)
     return {"status": "saved"}
 
 @router.get("/media-files")

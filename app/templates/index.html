@@ -295,7 +295,7 @@
                         <div class="flex items-center gap-2">
                           <span class="font-medium text-slate-100 text-sm" x-text="ep.filename"></span>
                           <span class="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700" x-text="ep.season"></span>
-                          <span x-show="!ep.has_any_sub" class="text-[10px] px-2 py-0.5 rounded bg-amber-950/50 text-amber-400 border border-amber-900/50 font-mono font-semibold">
+                          <span x-show="!ep.has_target_sub" class="text-[10px] px-2 py-0.5 rounded bg-amber-950/50 text-amber-400 border border-amber-900/50 font-mono font-semibold">
                             NO SUBTITLE
                           </span>
                         </div>
@@ -314,13 +314,13 @@
                     </div>
 
                     <div class="flex items-center space-x-2">
-                      <button x-show="ep.has_any_sub" @click="deleteSubtitles(ep)" class="px-3 py-1.5 bg-slate-800 hover:bg-rose-950/50 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-900/50 rounded-xl text-xs font-semibold transition flex items-center gap-1.5">
+                      <button x-show="ep.has_target_sub" @click="deleteSubtitles(ep)" class="px-3 py-1.5 bg-slate-800 hover:bg-rose-950/50 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-900/50 rounded-xl text-xs font-semibold transition flex items-center gap-1.5">
                         <i class="fa-solid fa-trash-can"></i> Delete Subs
                       </button>
 
-                      <button @click="triggerProcess(ep.path, ep.has_any_sub)" class="px-4 py-1.5 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5" :class="ep.has_any_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
-                        <i class="fa-solid" :class="ep.has_any_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles'"></i>
-                        <span x-text="ep.has_any_sub ? 'Re-translate (Force)' : 'Translate Now'"></span>
+                      <button @click="triggerProcess(ep.path, ep.has_target_sub)" class="px-4 py-1.5 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5" :class="ep.has_target_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
+                        <i class="fa-solid" :class="ep.has_target_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles'"></i>
+                        <span x-text="ep.has_target_sub ? 'Re-translate (Force)' : 'Translate Now'"></span>
                       </button>
                     </div>
                   </div>
@@ -345,7 +345,7 @@
                 <div>
                   <div class="flex items-center gap-2">
                     <span class="font-bold text-white text-base" x-text="movie.filename"></span>
-                    <span x-show="!movie.has_any_sub" class="text-[10px] px-2 py-0.5 rounded bg-amber-950/50 text-amber-400 border border-amber-900/50 font-mono font-semibold">
+                    <span x-show="!movie.has_target_sub" class="text-[10px] px-2 py-0.5 rounded bg-amber-950/50 text-amber-400 border border-amber-900/50 font-mono font-semibold">
                       NO SUBTITLE
                     </span>
                   </div>
@@ -364,13 +364,13 @@
               </div>
 
               <div class="flex items-center space-x-2">
-                <button x-show="movie.has_any_sub" @click="deleteSubtitles(movie)" class="px-3 py-2 bg-slate-800 hover:bg-rose-950/50 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-900/50 rounded-xl text-xs font-semibold transition flex items-center gap-1.5">
+                <button x-show="movie.has_target_sub" @click="deleteSubtitles(movie)" class="px-3 py-2 bg-slate-800 hover:bg-rose-950/50 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-900/50 rounded-xl text-xs font-semibold transition flex items-center gap-1.5">
                   <i class="fa-solid fa-trash-can"></i> Delete Subs
                 </button>
 
-                <button @click="triggerProcess(movie.path, movie.has_any_sub)" class="px-4 py-2 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5" :class="movie.has_any_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
-                  <i class="fa-solid" :class="movie.has_any_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles'"></i>
-                  <span x-text="movie.has_any_sub ? 'Re-translate (Force)' : 'Translate Now'"></span>
+                <button @click="triggerProcess(movie.path, movie.has_target_sub)" class="px-4 py-2 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5" :class="movie.has_target_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
+                  <i class="fa-solid" :class="movie.has_target_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles'"></i>
+                  <span x-text="movie.has_target_sub ? 'Re-translate (Force)' : 'Translate Now'"></span>
                 </button>
               </div>
             </div>
@@ -1517,12 +1517,12 @@
           if (this.mediaCategory === 'series' && this.mediaData.series) {
             for (const show of this.mediaData.series) {
               for (const ep of show.episodes) {
-                if (!ep.has_any_sub) count++;
+                if (!ep.has_target_sub) count++;
               }
             }
           } else if (this.mediaCategory === 'movies' && this.mediaData.movies) {
             for (const m of this.mediaData.movies) {
-              if (!m.has_any_sub) count++;
+              if (!m.has_target_sub) count++;
             }
           }
           return count;
@@ -1530,7 +1530,7 @@
 
         getShowMissingCount(show) {
           if (!show || !show.episodes) return 0;
-          return show.episodes.filter(ep => !ep.has_any_sub).length;
+          return show.episodes.filter(ep => !ep.has_target_sub).length;
         },
 
         async translateAllMissing() {
@@ -1538,12 +1538,12 @@
           if (this.mediaCategory === 'series' && this.mediaData.series) {
             for (const show of this.mediaData.series) {
               for (const ep of show.episodes) {
-                if (!ep.has_any_sub) missing.push(ep.path);
+                if (!ep.has_target_sub) missing.push(ep.path);
               }
             }
           } else if (this.mediaCategory === 'movies' && this.mediaData.movies) {
             for (const m of this.mediaData.movies) {
-              if (!m.has_any_sub) missing.push(m.path);
+              if (!m.has_target_sub) missing.push(m.path);
             }
           }
 
@@ -1567,7 +1567,7 @@
 
         async translateShowMissing(show) {
           if (!show || !show.episodes) return;
-          const missing = show.episodes.filter(ep => !ep.has_any_sub).map(ep => ep.path);
+          const missing = show.episodes.filter(ep => !ep.has_target_sub).map(ep => ep.path);
           if (missing.length === 0) return;
           
           const countText = missing.length === 1 ? 'the missing episode' : `all ${missing.length} missing episodes`;

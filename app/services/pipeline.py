@@ -65,10 +65,6 @@ def qa_gate(
         # siffror / symboler
         if not any(c.isalpha() for c in stripped):
             return True
-        # väldigt korta cues (t.ex. namn "Seth Cohen")
-        words = stripped.split()
-        if len(words) <= 2:
-            return True
         return False
 
     real_untranslated_ids = [
@@ -108,11 +104,13 @@ def qa_gate(
             score -= 10
 
     # 5. Language detection on translated output
+    wrong_language = False
     if translated_subs:
         sample_text = " ".join([s.content for s in translated_subs[:80] if s.content.strip() and s.content.strip() != "<i></i>"])
         if sample_text:
             detected = detect_language_heuristics(sample_text)
             if detected == "en" and target_lang_code != "en":
+                wrong_language = True
                 issues.append(f"Target language detection failed: output appears to be English, expected {target_lang_code}")
                 score -= 30
 
@@ -128,13 +126,15 @@ def qa_gate(
         score -= 30
 
     score = max(0, score)
-    # Bug fix: Use real_untranslated_ids to enforce hard fail on actual sentences
-    # but allow safe identical lines (names, numbers) to pass
     # Feature: Tolerate up to 3 unresolved English lines to avoid failing 99% perfect jobs
+    # Bug fix: Enforce hard fail for sync drift and wrong language
+    sync_valid = max_drift == 0
     passed = (
         score >= 60 
         and dropped_count == 0 
         and len(real_untranslated_ids) <= 3
+        and sync_valid
+        and not wrong_language
     )
     
     if len(real_untranslated_ids) > 0 and passed:
@@ -348,33 +348,6 @@ class SubtitlePipeline:
         force_retranslate: bool = False,
         title: Optional[str] = None
     ) -> Dict[str, Any]:
-        # Bug #38: Safer orphan cleanup — require exact episode match, not prefix
-        if event_source in ["SONARR", "RADARR"] and os.path.exists(os.path.dirname(video_path)):
-            dir_path = os.path.dirname(video_path)
-            base_name, _ = os.path.splitext(os.path.basename(video_path))
-            import re
-            
-            ep_match = re.search(r'(S\d+E\d+)', base_name, re.IGNORECASE)
-            if ep_match:
-                search_token = ep_match.group(1).lower()
-                try:
-                    for fname in os.listdir(dir_path):
-                        if fname.endswith(".srt"):
-                            f_base, _ = os.path.splitext(fname)
-                            # Only clean up if it matches the EXACT episode identifier but has a different base name
-                            if f_base != base_name and search_token in fname.lower():
-                                # Additional safety: the episode token must be surrounded by non-alphanumeric chars
-                                fname_lower = fname.lower()
-                                token_pos = fname_lower.find(search_token)
-                                if token_pos >= 0:
-                                    before_ok = token_pos == 0 or not fname_lower[token_pos - 1].isalnum()
-                                    after_pos = token_pos + len(search_token)
-                                    after_ok = after_pos >= len(fname_lower) or not fname_lower[after_pos].isalnum()
-                                    if before_ok and after_ok:
-                                        os.remove(os.path.join(dir_path, fname))
-                                        append_job_log(job_id, f"Cleaned up orphaned subtitle from previous version: {fname}")
-                except Exception:
-                    pass
 
         enable_bazarr = get_setting("enable_bazarr_check", "true").lower() == "true"
         extract_target_embedded = get_setting("extract_target_embedded", "true").lower() == "true"
@@ -623,6 +596,7 @@ class SubtitlePipeline:
                 lang_name = lang_info["name"]
                 lang_code = lang_info["code"]
                 target_output_path = f"{base_path}.{lang_code}.srt"
+                safe_ids = []
                 
                 # Check Original Language Guard
                 if original_language_guard:
@@ -666,8 +640,6 @@ class SubtitlePipeline:
                         try:
                             provider = get_setting("ai_provider", "gemini").lower()
                             caps = get_provider_capabilities(provider)
-                            safe_ids = []
-
                             if caps["supports_identical_classification"]:
                                 recovery_results = await self.translator.classify_and_recover_identical(
                                     recovery_payload, lang_name, title or ""
@@ -694,8 +666,8 @@ class SubtitlePipeline:
                                     if text != subs[idx].content:  # actually changed
                                         translated_subs[idx].content = text
                                     else:
-                                        # Ambiguous identical from DeepL - mark safe to avoid hard fail
-                                        safe_ids.append(idx)
+                                        # Ambiguous identical from DeepL - don't mark as safe, let it count against tolerated threshold
+                                        pass
                             
                             # Re-run QA after recovery with safe_ids context
                             qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
@@ -712,10 +684,11 @@ class SubtitlePipeline:
 
                 if qa_result["passed"]:
                     # Bug #16: Rename conflicting old subs instead of leaving duplicates
-                    if os.path.exists(target_output_path) and not force_retranslate:
-                        backup_path = target_output_path + ".babel-replaced"
+                    existing = find_external_subtitle(video_path, lang_code)
+                    if existing and not force_retranslate:
+                        backup_path = existing + ".babel-replaced"
                         try:
-                            os.rename(target_output_path, backup_path)
+                            os.rename(existing, backup_path)
                             append_job_log(job_id, f"Renamed existing subtitle to {os.path.basename(backup_path)}")
                         except Exception:
                             pass
@@ -771,10 +744,13 @@ class SubtitlePipeline:
             total_duration = round(time.time() - start_time, 2)
             
             # Bug #31: Determine correct final status
-            if successful_langs:
-                final_status = "TRANSLATED"
-            elif skipped_langs and not langs_needing_translation:
-                final_status = "SKIPPED"
+            if len(successful_langs) + len(skipped_langs) == len(langs_needing_translation):
+                if successful_langs:
+                    final_status = "TRANSLATED"
+                else:
+                    final_status = "SKIPPED"
+            elif successful_langs:
+                final_status = "PARTIAL"
             else:
                 final_status = "FAILED"
 
