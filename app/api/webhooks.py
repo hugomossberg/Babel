@@ -6,31 +6,18 @@ from pathlib import Path
 from typing import Optional
 
 def validate_webhook_token(request: Request):
-    token = get_setting("webhook_token", "").strip()
-    if token:
-        req_token = request.query_params.get("token")
-        if not req_token or req_token != token:
-            raise HTTPException(status_code=401, detail="Invalid webhook token")
+    from app.core.db import get_setting
+    expected = get_setting("webhook_secret", "").strip()
+    if not expected:
+        return # Auth not configured
+    
+    token = request.query_params.get("secret", "").strip()
+    if not token or token != expected:
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
 def validate_path(video_path: str) -> str:
-    from app.core.db import get_setting
-    series_path = get_setting("media_series_path", "/tv")
-    movies_path = get_setting("media_movies_path", "/movies")
-    allowed_roots = [Path(p).resolve() for p in [series_path, movies_path, "/media", "/data"] if p]
-    
-    try:
-        resolved_path = Path(video_path).resolve()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid path format")
-
-    for root in allowed_roots:
-        try:
-            if root in resolved_path.parents or root == resolved_path:
-                return str(resolved_path)
-        except Exception:
-            continue
-            
-    raise HTTPException(status_code=403, detail="Path traversal detected or path outside media roots")
+    from app.core.security import validate_media_path
+    return validate_media_path(video_path)
 
 from pydantic import BaseModel
 

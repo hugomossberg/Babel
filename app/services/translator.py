@@ -43,7 +43,7 @@ from app.core.db import get_setting, update_job, append_job_log, save_translatio
 
 logger = logging.getLogger("babel.translator")
 
-def get_system_instruction(target_language: str = "Swedish", glossary: str = "", show_title: str = "") -> str:
+def get_system_instruction(target_language: str, glossary: str = "", show_title: str = "") -> str:
     glossary_section = ""
     if glossary and glossary.strip():
         glossary_section = "\n\nGLOSSARY - Always use these exact translations:\n" + glossary.strip() + "\n"
@@ -63,7 +63,7 @@ STRICT RULES:
 5. You MUST return a JSON object with a key "translations" containing the array of objects with integer "id" and string "text".
 6. Keep translations concise. Split lines naturally using "\n" if a line exceeds 42 characters, but NEVER exceed 2 lines per subtitle block. Combine or condense text if necessary.
 Example:
-{{"translations": [{{"id": 1, "text": "Hej"}}, {{"id": 2, "text": "Världen"}}]}}
+{{"translations": [{{"id": 1, "text": "Translated text"}}, {{"id": 2, "text": "Translated text"}}]}}
 """
 
 def extract_json_safely(raw_text: str) -> List[dict]:
@@ -159,7 +159,7 @@ def validate_classifier_output(raw_text: str, items: list) -> list:
         logger.info(f"Classifier validation: parsed {len(results)} results from JSON")
         
         expected_ids = {item["id"]: item["text"] for item in items}
-        allowed_reasons = {"proper_noun", "brand", "acronym", "number", "symbol", "non_verbal", "none"}
+        allowed_reasons = {"proper_noun", "brand", "acronym", "number", "symbol", "non_verbal"}
         
         kept = 0
         translated = 0
@@ -178,20 +178,38 @@ def validate_classifier_output(raw_text: str, items: list) -> list:
                 rejected += 1
                 continue
                 
+            original_text = expected_ids[rid]
+                
             if act == "keep":
-                reason = str(r.get("reason", "none")).lower()
+                reason = str(r.get("reason", "")).lower()
+                
+                # Sanity checks
+                is_valid_keep = True
                 if reason not in allowed_reasons:
                     logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (invalid reason: {reason})")
+                    is_valid_keep = False
+                elif reason == "number":
+                    if not any(c.isdigit() for c in original_text):
+                        logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason=number but no digits)")
+                        is_valid_keep = False
+                elif reason in ["proper_noun", "brand"]:
+                    # If it's a long sentence, it's very unlikely to be purely a proper noun/brand
+                    if len(original_text.split()) >= 5:
+                        logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason={reason} but text is {len(original_text.split())} words)")
+                        is_valid_keep = False
+                
+                if not is_valid_keep:
                     act = "translate" 
                     
             if act == "keep": kept += 1
             elif act == "translate": 
                 translated += 1
-                # Enforce that translate text is actually provided, fallback if it echoes source or is empty
-                # Actually, translation text is fetched from the dict, but for now we just trust it,
-                # if they echo the source, it will just be translated again via DeepL since it's identical?
-                # The user said: "TRANSLATE that echoes source". The classifier shouldn't even return the text for TRANSLATE normally, it just tells it to translate.
-                # Wait, the action is what we care about here. If action is translate, we translate it later.
+                # Enforce that translate text is actually provided and doesn't just echo source
+                # We do this by checking if the text matches original. If so, we clear it so fallback logic triggers.
+                provided_text = str(r.get("text", "")).strip()
+                if provided_text and provided_text == original_text.strip():
+                    logger.info(f"Classifier validation: ID {rid} TRANSLATE echoes source, clearing text to force recovery")
+                    r["text"] = ""
             else:
                 logger.warning(f"Classifier validation: rejected result for ID {rid} due to invalid action {act}")
                 rejected += 1
@@ -584,7 +602,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             data = resp.json()
             return extract_json_safely(data.get("response", "{}"))
 
-    async def translate_batch(self, items: List[dict], target_language: str = "Swedish", context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
+    async def translate_batch(self, items: List[dict], target_language: str = "English", context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
         provider = get_setting("ai_provider", "gemini").lower()
         if provider == "openai":
             model = get_setting("openai_model", "gpt-4o-mini")
@@ -601,7 +619,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
     async def translate_srt_content(
         self,
         subs: List[srt.Subtitle],
-        target_language: str = "Swedish",
+        target_language: str = "English",
         batch_size: int = 50,
         job_id: Optional[int] = None,
         show_title: Optional[str] = None
@@ -694,18 +712,22 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 ]
                 if valid_translations:
                     previous_context = valid_translations[-context_window_size:]
-                    if show_title:
-                        for vt in valid_translations:
-                            try: save_translation_memory(show_title, vt["original"], vt["translated"])
-                            except Exception: pass
+
+                processed_count += len(payload)
+                if job_id:
+                    update_job(job_id, processed_lines=processed_count)
 
             except ProviderUnavailableError as e:
                 # Let pipeline handle WAITING_PROVIDER
+                if job_id:
+                    update_job(job_id, processed_lines=processed_count)
                 raise e
             except Exception as e:
                 logger.error(f"Batch {start_idx} failed: {e}")
+                processed_count += len(payload)
                 if job_id:
                     append_job_log(job_id, f"Warning: Lines {start_idx + 1}-{end_idx} could not be translated: {e}. Keeping original text.")
+                    update_job(job_id, processed_lines=processed_count)
 
         return translated_subs
 

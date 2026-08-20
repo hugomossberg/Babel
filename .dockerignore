@@ -1,0 +1,17 @@
+.git
+.git/
+.env
+data
+data/
+*.db
+*.db-shm
+*.db-wal
+.venv
+.venv/
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+scratch
+test_*.py
+get_svg.js

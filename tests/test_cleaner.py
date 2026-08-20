@@ -35,3 +35,15 @@ Hey, how are you? (laughs)
     assert subs[0].content == EMPTY_PLACEHOLDER
     assert subs[1].content == "Hey, how are you?"
     assert count == 2
+
+def test_cleaner_keeps_real_dialogue_parentheses():
+    from app.core.cleaner import clean_subtitle_text
+    assert clean_subtitle_text("(I mean it.)") == "(I mean it.)"
+    assert clean_subtitle_text("(Don't do that.)") == "(Don't do that.)"
+    assert clean_subtitle_text("This is (very) nice.") == "This is (very) nice."
+    
+def test_cleaner_removes_known_sdh():
+    from app.core.cleaner import clean_subtitle_text
+    assert clean_subtitle_text("(laughing)") == "<i></i>"
+    assert clean_subtitle_text("(door closes)") == "(door closes)" # wait, door closes is not in keywords. Should it be bracket? Usually it's [door closes]. 
+    assert clean_subtitle_text("[door closes]") == "<i></i>"

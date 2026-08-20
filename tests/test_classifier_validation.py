@@ -55,3 +55,35 @@ def test_classifier_markdown_wrapping():
     out = validate_classifier_output(raw, items)
     assert len(out) == 1
     assert out[0]["action"] == "keep"
+
+def test_classifier_keep_none():
+    items = [{"id": 1, "text": "Hello"}]
+    raw = '{"results": [{"id": 1, "action": "keep", "reason": "none"}]}'
+    out = validate_classifier_output(raw, items)
+    assert out[0]["action"] == "translate"
+
+def test_classifier_keep_proper_noun_sentence():
+    items = [{"id": 1, "text": "This is a very long sentence that is not a proper noun"}]
+    raw = '{"results": [{"id": 1, "action": "keep", "reason": "proper_noun"}]}'
+    out = validate_classifier_output(raw, items)
+    assert out[0]["action"] == "translate"
+
+def test_classifier_keep_number_no_digits():
+    items = [{"id": 1, "text": "Hello"}]
+    raw = '{"results": [{"id": 1, "action": "keep", "reason": "number"}]}'
+    out = validate_classifier_output(raw, items)
+    assert out[0]["action"] == "translate"
+
+def test_classifier_translate_echoes_source():
+    items = [{"id": 1, "text": "Hello"}]
+    raw = '{"results": [{"id": 1, "action": "translate", "text": "Hello"}]}'
+    out = validate_classifier_output(raw, items)
+    assert out[0]["action"] == "translate"
+    assert out[0]["text"] == ""
+
+def test_classifier_translate_valid():
+    items = [{"id": 1, "text": "Hello"}]
+    raw = '{"results": [{"id": 1, "action": "translate", "text": "Hej"}]}'
+    out = validate_classifier_output(raw, items)
+    assert out[0]["action"] == "translate"
+    assert out[0]["text"] == "Hej"

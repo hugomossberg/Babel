@@ -4,10 +4,10 @@ import srt
 
 # Regex for SDH descriptions: [door closes], (chuckles), [SIGHING], etc.
 SDH_BRACKET_REGEX = re.compile(r'\[.*?\]', re.DOTALL)
-# Only remove parentheticals if they contain typical SDH keywords, or are all caps, or stand alone on a line.
-SDH_PAREN_REGEX = re.compile(r'^\([^a-z0-9]*[A-Z\s]+[^a-z0-9]*\)$|^\(.*?\)$', re.DOTALL)
+# Only remove parentheticals if they are all caps and stand alone on a line.
+SDH_PAREN_REGEX = re.compile(r'^\([^a-z0-9]*[A-Z\s]+[^a-z0-9]*\)$', re.DOTALL)
 # Also remove inline parentheticals if they contain known SDH words
-SDH_KEYWORDS_REGEX = re.compile(r'\((laughing|laughs|sighs|sighing|gasps|groans|grunts|chuckles|clears throat|music playing|speaking|whispers|shouts).*?\)', re.IGNORECASE)
+SDH_KEYWORDS_REGEX = re.compile(r'\((laughing|laughs|sighs|sighing|gasps|groans|grunts|chuckles|clears throat|music playing|speaking|whispers|shouts|crying|cries|sobs|panting|pants|cheering|cheers|applauding|applause|screaming|screams|yells|yelling|exhales|inhales|grunts).*?\)', re.IGNORECASE)
 
 # Regex for music notes and signs: ♪, ♫, ♬, ♩
 MUSIC_NOTES_REGEX = re.compile(r'[♪♫♬♩]+')

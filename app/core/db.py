@@ -45,7 +45,10 @@ def init_db():
             processed_lines INTEGER DEFAULT 0,
             current_batch TEXT,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            retry_count INTEGER DEFAULT 0,
+            next_retry_at TEXT,
+            last_error TEXT
         )
         """)
         
@@ -60,8 +63,28 @@ def init_db():
         cursor.execute("""
         UPDATE jobs 
         SET status = 'FAILED', error_message = 'Interrupted by server restart' 
-        WHERE status IN ('PENDING', 'PROCESSING', 'RUNNING', 'TRANSLATING', 'QUEUED')
+        WHERE status IN ('PENDING', 'PROCESSING', 'RUNNING', 'QUEUED')
         """)
+        
+        cursor.execute("""
+        UPDATE jobs 
+        SET status = 'RETRY_PENDING', error_message = 'Recovered from restart' 
+        WHERE status IN ('TRANSLATING', 'RECOVERING', 'ESCALATING', 'WAITING_PROVIDER', 'RETRY_PENDING')
+        """)
+
+        # Add columns if not existing yet on old database files
+        try:
+            cursor.execute("ALTER TABLE jobs ADD COLUMN retry_count INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE jobs ADD COLUMN next_retry_at TEXT")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE jobs ADD COLUMN last_error TEXT")
+        except Exception:
+            pass
         
         defaults = {
             "gemini_api_key": "",
@@ -71,17 +94,18 @@ def init_db():
             "max_concurrent_jobs": "1",
             "glossary": "",
             "enable_bazarr_check": "true",
-            "bazarr_url": "http://dev-bazarr:6767",
+            "bazarr_url": "http://bazarr:6767",
             "bazarr_api_key": "",
             "wait_time_seconds": "15",
             "clean_sdh": "true",
-            "notify_jellyfin": "true",
-            "jellyfin_url": "http://dev-jellyfin:8096",
-            "jellyfin_api_key": "devtestkey1234567890abcdef",
+            "jellyfin_enabled": "false",
+            "jellyfin_url": "http://jellyfin:8096",
+            "jellyfin_api_key": "",
             "media_series_path": "/tv",
             "media_movies_path": "/movies",
+            "webhook_secret": os.getenv("BABEL_WEBHOOK_SECRET", ""),
             "languages": json.dumps([
-                {"name": "Swedish", "code": "sv", "enabled": True}
+                {"name": "English", "code": "en", "enabled": True}
             ])
         }
         for k, v in defaults.items():
@@ -168,6 +192,13 @@ def clear_all_jobs():
         cursor = conn.cursor()
         cursor.execute("DELETE FROM jobs")
         conn.commit()
+
+def claim_job_for_retry(job_id: int) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE jobs SET status = 'QUEUED' WHERE id = ? AND status IN ('WAITING_PROVIDER', 'RETRY_PENDING')", (job_id,))
+        conn.commit()
+        return cursor.rowcount > 0
 
 def get_job_by_id(job_id: int) -> Optional[Dict[str, Any]]:
     with sqlite3.connect(DB_PATH) as conn:

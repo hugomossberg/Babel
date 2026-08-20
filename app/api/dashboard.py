@@ -32,7 +32,6 @@ class AISettingsRequest(BaseModel):
     escalation_model: Optional[str] = ""
     escalate_to_pro: bool = False
     batch_size: int
-    max_concurrency: int
     max_concurrent_jobs: Optional[int] = 1
     glossary: Optional[str] = ""
 
@@ -108,8 +107,10 @@ async def api_clear_jobs() -> Dict[str, Any]:
 
 @router.delete("/subtitles")
 async def api_delete_subtitles(req: DeleteSubRequest):
-    base_no_ext, _ = os.path.splitext(req.video_path)
-    parent_dir = os.path.dirname(req.video_path)
+    from app.core.security import validate_media_path
+    video_path = validate_media_path(req.video_path)
+    base_no_ext, _ = os.path.splitext(video_path)
+    parent_dir = os.path.dirname(video_path)
     base_name = os.path.basename(base_no_ext)
     
     # Bug #37: Only delete target language SRTs, not source subtitles
@@ -191,6 +192,9 @@ async def api_get_all_settings() -> Dict[str, Any]:
         languages = [{"name": "Swedish", "code": "sv", "enabled": True}]
 
     docker_info = await docker_controller.get_container_status(get_setting("bazarr_container_name", "bazarr"))
+    
+    from app.core.languages import LANGUAGES
+    available_languages = [{"name": lang.display_name, "code": lang.code} for lang in LANGUAGES]
 
     return {
         "ai": {
@@ -208,7 +212,6 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "escalation_model": get_setting("escalation_model", ""),
             "escalate_to_pro": get_setting("escalate_to_pro", "false").lower() == "true",
             "batch_size": int(get_setting("batch_size", "50")),
-            "max_concurrency": int(get_setting("max_concurrency", "1")),
             "max_concurrent_jobs": int(get_setting("max_concurrent_jobs", "1")),
             "glossary": get_setting("glossary", "")
         },
@@ -221,6 +224,7 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "original_language_guard": get_setting("original_language_guard", "true").lower() == "true",
         },
         "languages": languages,
+        "available_languages": available_languages,
         "folders": {
             "media_series_path": get_setting("media_series_path", "/tv"),
             "media_movies_path": get_setting("media_movies_path", "/movies"),
@@ -273,7 +277,6 @@ async def api_save_ai_settings(req: AISettingsRequest):
         set_setting("escalation_model", req.escalation_model.strip())
     set_setting("escalate_to_pro", "true" if req.escalate_to_pro else "false")
     set_setting("batch_size", str(req.batch_size))
-    set_setting("max_concurrency", str(req.max_concurrency))
     if req.max_concurrent_jobs is not None:
         set_setting("max_concurrent_jobs", str(max(1, req.max_concurrent_jobs)))
     if req.glossary is not None:
@@ -413,15 +416,21 @@ async def api_save_integrations(req: IntegrationsSettingsRequest):
         set_setting("jellyfin_api_key", req.jellyfin_api_key)
     return {"status": "saved"}
 
+_scan_lock = asyncio.Lock()
+
 @router.get("/media-files")
 async def api_get_media_files():
-    series_path = get_setting("media_series_path", "/tv")
-    movies_path = get_setting("media_movies_path", "/movies")
+    if _scan_lock.locked():
+        raise HTTPException(status_code=429, detail="Scan in progress")
     
-    series_data = scan_library_folders(series_path, "series")
-    movies_data = scan_library_folders(movies_path, "movies")
-    
-    return {
-        "series": series_data,
-        "movies": movies_data
-    }
+    async with _scan_lock:
+        series_path = get_setting("media_series_path", "/tv")
+        movies_path = get_setting("media_movies_path", "/movies")
+        
+        series_data = await asyncio.to_thread(scan_library_folders, series_path, "series")
+        movies_data = await asyncio.to_thread(scan_library_folders, movies_path, "movies")
+        
+        return {
+            "series": series_data,
+            "movies": movies_data
+        }

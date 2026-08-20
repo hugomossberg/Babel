@@ -35,8 +35,8 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
         if not AUTH_USERNAME or not AUTH_PASSWORD:
             return await call_next(request)
         
-        # Don't require auth for webhooks (Sonarr/Radarr need access)
-        if request.url.path.startswith("/webhook/sonarr") or request.url.path.startswith("/webhook/radarr"):
+        # Don't require auth for webhooks or health check
+        if request.url.path.startswith("/webhook/") or request.url.path == "/health":
             return await call_next(request)
             
         auth_header = request.headers.get("Authorization")
@@ -67,9 +67,12 @@ app.include_router(dashboard_router, prefix="/api")
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
+    from app.config import VERSION
     template_path = "/app/app/templates/index.html" if os.path.exists("/app/app/templates/index.html") else "app/templates/index.html"
     with open(template_path, "r", encoding="utf-8") as f:
-        return HTMLResponse(content=f.read())
+        html = f.read()
+        html = html.replace("{{VERSION}}", VERSION)
+        return HTMLResponse(content=html)
 
 
 @app.on_event("startup")
@@ -77,25 +80,40 @@ async def startup_event():
     asyncio.create_task(retry_waiting_jobs())
 
 async def retry_waiting_jobs():
+    from app.core.db import claim_job_for_retry
     while True:
         try:
-            jobs = get_jobs_by_status(["WAITING_PROVIDER"])
+            jobs = get_jobs_by_status(["WAITING_PROVIDER", "RETRY_PENDING"])
             for job in jobs:
                 try:
-                    updated_at = datetime.fromisoformat(job["updated_at"])
+                    should_retry = False
                     now = datetime.now(timezone.utc)
-                    if (now - updated_at).total_seconds() > 900: # 15 minutes
-                        logging.info(f"Retrying WAITING_PROVIDER job {job['id']}")
-                        asyncio.create_task(pipeline.process_video_file(
-                            job["video_path"],
-                            event_source="RETRY",
-                            title=job["title"]
-                        ))
+                    if job["status"] == "RETRY_PENDING":
+                        should_retry = True
+                    elif job["status"] == "WAITING_PROVIDER":
+                        if job.get("next_retry_at"):
+                            next_retry_at = datetime.fromisoformat(job["next_retry_at"])
+                            if now >= next_retry_at:
+                                should_retry = True
+                        else:
+                            updated_at = datetime.fromisoformat(job["updated_at"])
+                            if (now - updated_at).total_seconds() > 900:
+                                should_retry = True
+                    
+                    if should_retry:
+                        if claim_job_for_retry(job["id"]):
+                            logging.info(f"Retrying job {job['id']}")
+                            asyncio.create_task(pipeline.process_video_file(
+                                job["video_path"],
+                                event_source="RETRY",
+                                title=job["title"],
+                                job_id=job["id"]
+                            ))
                 except Exception as e:
                     logging.error(f"Error checking retry for job {job['id']}: {e}")
         except Exception as e:
             logging.error(f"Error in retry loop: {e}")
-        await asyncio.sleep(60)
+        await asyncio.sleep(10)
 
 @app.get("/health")
 async def health():

@@ -270,7 +270,8 @@ class SubtitlePipeline:
         wait_seconds: Optional[int] = None,
         event_source: str = "MANUAL",
         title: Optional[str] = None,
-        force_retranslate: bool = False
+        force_retranslate: bool = False,
+        job_id: Optional[int] = None
     ) -> Dict[str, Any]:
         # Bug #17: Prevent duplicate processing of the same video
         async with self._video_lock:
@@ -280,7 +281,8 @@ class SubtitlePipeline:
                 return {"status": "skipped", "reason": "already_processing", "video_path": norm_path}
             self._active_video_paths.add(norm_path)
 
-        job_id = create_job(video_path=video_path, event_source=event_source, title=title)
+        if job_id is None:
+            job_id = create_job(video_path=video_path, event_source=event_source, title=title)
         
         current_task = asyncio.current_task()
         if current_task:
@@ -791,6 +793,18 @@ class SubtitlePipeline:
                     os.replace(temp_output, target_output_path)
                     output_files.append(target_output_path)
                     successful_langs.append(lang_code)
+                    
+                    # Save Translation Memory only after QA PASS
+                    if title:
+                        try:
+                            from app.core.db import save_translation_memory
+                            for idx in range(len(subs)):
+                                orig_t = subs[idx].content.strip()
+                                trans_t = translated_subs[idx].content.strip()
+                                if orig_t and trans_t and orig_t != "<i></i>" and trans_t != "<i></i>":
+                                    save_translation_memory(title, orig_t, trans_t)
+                        except Exception as e:
+                            logger.error(f"Failed to save translation memory: {e}")
 
                 # Build a detailed QA summary for the user
                 unresolved_count = len(qa_result.get("real_untranslated_ids", []))
@@ -866,8 +880,32 @@ class SubtitlePipeline:
                 try: os.remove(temp_extracted_srt)
                 except: pass
             total_duration = round(time.time() - start_time, 2)
-            append_job_log(job_id, f"PROVIDER ERROR: {str(e)}. Will retry later.")
-            update_job(job_id, status="WAITING_PROVIDER", error_message=str(e), duration_seconds=total_duration)
+            
+            from app.core.db import get_job_by_id
+            from datetime import datetime, timezone, timedelta
+            
+            job_data = get_job_by_id(job_id)
+            current_retries = job_data.get("retry_count", 0) if job_data else 0
+            
+            # Simple backoff: 2 minutes, then 5, then 15, max 30.
+            backoff_mins = 2
+            if current_retries == 1: backoff_mins = 5
+            elif current_retries == 2: backoff_mins = 15
+            elif current_retries > 2: backoff_mins = 30
+                
+            now = datetime.now(timezone.utc)
+            next_retry_at = (now + timedelta(minutes=backoff_mins)).isoformat()
+            
+            append_job_log(job_id, f"PROVIDER ERROR: {str(e)}. Will retry at {next_retry_at} (Retry {current_retries + 1}).")
+            update_job(
+                job_id, 
+                status="WAITING_PROVIDER", 
+                error_message=str(e), 
+                duration_seconds=total_duration,
+                retry_count=current_retries + 1,
+                next_retry_at=next_retry_at,
+                last_error=str(e)
+            )
             return {"status": "waiting_provider", "error": str(e), "job_id": job_id}
         except Exception as e:
             if os.path.exists(temp_extracted_srt):

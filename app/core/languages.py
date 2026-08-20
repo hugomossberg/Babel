@@ -10,20 +10,20 @@ class Language:
 LANGUAGES = [
     Language("sv", ["swe", "swedish", "sve"], "Swedish", "SV"),
     Language("en", ["eng", "english"], "English", "EN-US"),
-    Language("de", ["deu", "ger", "german", "tyska"], "German", "DE"),
-    Language("fr", ["fra", "fre", "french", "franska"], "French", "FR"),
-    Language("es", ["spa", "spanish", "spanska"], "Spanish", "ES"),
-    Language("it", ["ita", "italian", "italienska"], "Italian", "IT"),
-    Language("nl", ["nld", "dut", "dutch", "holländska"], "Dutch", "NL"),
-    Language("pl", ["pol", "polish", "polska"], "Polish", "PL"),
-    Language("pt", ["por", "portuguese", "portugisiska"], "Portuguese", "PT-PT"),
-    Language("ru", ["rus", "russian", "ryska"], "Russian", "RU"),
-    Language("ja", ["jpn", "japanese", "japanska"], "Japanese", "JA"),
-    Language("zh", ["zho", "chi", "chinese", "kinesiska"], "Chinese", "ZH"),
-    Language("ko", ["kor", "korean", "koreanska"], "Korean", "KO"),
-    Language("fi", ["fin", "finnish", "finska"], "Finnish", "FI"),
-    Language("da", ["dan", "danish", "danska"], "Danish", "DA"),
-    Language("no", ["nor", "nob", "nno", "norwegian", "norska"], "Norwegian", "NB")
+    Language("de", ["deu", "ger", "german"], "German", "DE"),
+    Language("fr", ["fra", "fre", "french"], "French", "FR"),
+    Language("es", ["spa", "spanish"], "Spanish", "ES"),
+    Language("it", ["ita", "italian"], "Italian", "IT"),
+    Language("nl", ["nld", "dut", "dutch"], "Dutch", "NL"),
+    Language("pl", ["pol", "polish"], "Polish", "PL"),
+    Language("pt", ["por", "portuguese"], "Portuguese", "PT-PT"),
+    Language("ru", ["rus", "russian"], "Russian", "RU"),
+    Language("ja", ["jpn", "japanese"], "Japanese", "JA"),
+    Language("zh", ["zho", "chi", "chinese"], "Chinese", "ZH"),
+    Language("ko", ["kor", "korean"], "Korean", "KO"),
+    Language("fi", ["fin", "finnish"], "Finnish", "FI"),
+    Language("da", ["dan", "danish"], "Danish", "DA"),
+    Language("no", ["nor", "nob", "nno", "norwegian"], "Norwegian", "NB")
 ]
 
 def get_language(query: str) -> Optional[Language]:

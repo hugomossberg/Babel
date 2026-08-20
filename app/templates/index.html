@@ -39,7 +39,7 @@
         </div>
         <div>
           <span class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400">Babel</span>
-          <span class="text-xs text-slate-400 ml-2 px-2 py-0.5 rounded bg-slate-800 border border-slate-700">v0.1.12</span>
+          <span class="text-xs text-slate-400 ml-2 px-2 py-0.5 rounded bg-slate-800 border border-slate-700">v{{VERSION}}</span>
         </div>
       </div>
 
@@ -967,7 +967,7 @@
                   </button>
                 </div>
                 <div class="text-[11px] text-slate-400">
-                  Inside Docker network you can also use: <code class="text-purple-300 font-mono">http://dev-babel:8765/webhook/sonarr</code>
+                  Inside Docker network you can also use: <code class="text-purple-300 font-mono">http://babel:8765/webhook/sonarr</code>
                 </div>
               </div>
 
@@ -987,7 +987,7 @@
                   </button>
                 </div>
                 <div class="text-[11px] text-slate-400">
-                  Inside Docker network you can also use: <code class="text-indigo-300 font-mono">http://dev-babel:8765/webhook/radarr</code>
+                  Inside Docker network you can also use: <code class="text-indigo-300 font-mono">http://babel:8765/webhook/radarr</code>
                 </div>
               </div>
 
@@ -996,7 +996,7 @@
                 <div>1. Go to <strong>Settings</strong> &rarr; <strong>Connect</strong> &rarr; click <strong>+</strong> &rarr; select <strong>Webhook</strong>.</div>
                 <div>2. Name: <strong>Babel</strong>.</div>
                 <div>3. Check triggers: <strong>On Download</strong> and <strong>On Upgrade</strong>.</div>
-                <div>4. URL: Paste the copied endpoint above (e.g. <code>http://dev-babel:8765/webhook/sonarr</code> or <code>http://10.0.0.75:18765/webhook/sonarr</code>).</div>
+                <div>4. URL: Paste the copied endpoint above (e.g. <code>http://babel:8765/webhook/sonarr?secret=your_secret_here</code>).</div>
                 <div>5. Method: <strong>POST</strong> &rarr; Click <strong>Test</strong> (will show green checkmark) &rarr; <strong>Save</strong>.</div>
               </div>
             </div>
@@ -1161,32 +1161,7 @@
         toastMessage: '',
         toastType: 'success',
         toastTimeout: null,
-        availableLanguages: [
-          {name: 'Swedish', code: 'sv'},
-          {name: 'Norwegian', code: 'no'},
-          {name: 'Danish', code: 'da'},
-          {name: 'Finnish', code: 'fi'},
-          {name: 'German', code: 'de'},
-          {name: 'Spanish', code: 'es'},
-          {name: 'French', code: 'fr'},
-          {name: 'Italian', code: 'it'},
-          {name: 'Dutch', code: 'nl'},
-          {name: 'Polish', code: 'pl'},
-          {name: 'Portuguese', code: 'pt'},
-          {name: 'Japanese', code: 'ja'},
-          {name: 'Korean', code: 'ko'},
-          {name: 'English', code: 'en'},
-          {name: 'Arabic', code: 'ar'},
-          {name: 'Chinese', code: 'zh'},
-          {name: 'Russian', code: 'ru'},
-          {name: 'Hindi', code: 'hi'},
-          {name: 'Turkish', code: 'tr'},
-          {name: 'Greek', code: 'el'},
-          {name: 'Hebrew', code: 'he'},
-          {name: 'Thai', code: 'th'},
-          {name: 'Vietnamese', code: 'vi'},
-          {name: 'Indonesian', code: 'id'}
-        ],
+        availableLanguages: [],
         settingsData: {
           ai: {
             gemini_api_key: '',
@@ -1302,6 +1277,8 @@
           this.settingsData.integrations.enable_bazarr_check = true;
           if (!this.settingsData.integrations.wait_time_seconds || this.settingsData.integrations.wait_time_seconds <= 0) {
             this.settingsData.integrations.wait_time_seconds = 15;
+            }
+            this.availableLanguages = this.settingsData.available_languages || [];
           }
         },
 
@@ -1382,6 +1359,7 @@
             if (this.settingsData.integrations.enable_bazarr_check && (!this.settingsData.integrations.wait_time_seconds || this.settingsData.integrations.wait_time_seconds <= 0)) {
               this.settingsData.integrations.wait_time_seconds = 15;
             }
+            this.availableLanguages = this.settingsData.available_languages || [];
           } catch(e) {}
         },
 
