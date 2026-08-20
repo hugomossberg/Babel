@@ -1,3 +1,15 @@
+from app.core.validator import evaluate_subtitle_health
+import os
+def test_evaluate_subtitle_health_wrong_language(tmp_path):
+    p = tmp_path / "wrong.srt"
+    blocks = []
+    for i in range(1, 21):
+        blocks.append(f"{i}\n00:00:0{i},000 --> 00:00:0{i},500\nThis is definitely an english sentence that will be detected as english.")
+    content = "\n\n".join(blocks)
+    p.write_text(content)
+    health = evaluate_subtitle_health(str(p), "sv")
+    assert health["status"] == "RED"
+    assert health["detected_language"] == "en"
 import pytest
 import srt
 from app.services.pipeline import qa_gate
@@ -39,3 +51,24 @@ def test_cleaner_conservative_sdh():
     text2 = "1\n00:00:01,000 --> 00:00:02,000\n(laughing)"
     subs2, _ = sanitize_srt_content(text2)
     assert subs2[0].content == "<i></i>"
+
+from app.core.validator import evaluate_subtitle_health
+import os
+
+def test_evaluate_subtitle_health_empty_file(tmp_path):
+    p = tmp_path / 'empty.srt'
+    p.write_text('')
+    health = evaluate_subtitle_health(str(p), 'sv')
+    assert health['status'] == 'RED'
+    assert 'empty or corrupted' in health['reason'].lower()
+
+def test_evaluate_subtitle_health_wrong_language(tmp_path):
+    p = tmp_path / "wrong.srt"
+    blocks = []
+    for i in range(1, 21):
+        blocks.append(f"{i}\n00:00:0{i},000 --> 00:00:0{i},500\nThis is definitely an english sentence that will be detected as english.")
+    content = "\n\n".join(blocks)
+    p.write_text(content)
+    health = evaluate_subtitle_health(str(p), "sv")
+    assert health["status"] == "RED"
+    assert health["detected_language"] == "en"

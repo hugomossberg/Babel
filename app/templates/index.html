@@ -184,6 +184,16 @@
                           <i class="fa-solid fa-circle-exclamation"></i> FAILED
                         </span>
                       </template>
+                      <template x-if="job.status === 'WAITING_PROVIDER' || job.status === 'RETRY_PENDING'">
+                        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-orange-950 text-orange-400 border border-orange-800/50 animate-pulse">
+                          <i class="fa-solid fa-triangle-exclamation"></i> <span x-text="job.status"></span>
+                        </span>
+                      </template>
+                      <template x-if="job.status === 'BLOCKED_QA'">
+                        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-red-950 text-red-400 border border-red-800/50">
+                          <i class="fa-solid fa-ban"></i> QA BLOCKED
+                        </span>
+                      </template>
                     </div>
                     <div x-show="hovered && !['TRANSLATING', 'PROCESSING', 'QUEUED'].includes(job.status)" style="display: none;">
                       <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-600 text-white border border-blue-500 shadow-lg shadow-blue-600/20 transition-transform active:scale-95">
