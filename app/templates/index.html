@@ -434,8 +434,12 @@
                     </span>
                   </div>
                   <select x-model="settingsData.ai.gemini_model" @change="aiTestResult = ''; aiTestSuccess = false;" :class="aiTestSuccess && settingsData.ai.ai_provider === 'gemini' ? 'border-emerald-500/70 text-emerald-300 ring-1 ring-emerald-500/30' : 'border-slate-700 text-slate-200'" class="w-full px-4 py-2.5 bg-slate-950 border rounded-xl focus:outline-none focus:border-purple-500 transition text-sm">
-                    <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Recommended)</option>
+                    <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Recommended for Primary)</option>
                     <option value="gemini-3.5-flash">gemini-3.5-flash</option>
+                    <option value="gemini-3.6-flash">gemini-3.6-flash</option>
+                    <option value="gemini-3.7-flash">gemini-3.7-flash (Recommended for Escalation)</option>
+                    <option value="gemini-3.5-pro">gemini-3.5-pro</option>
+                    <option value="gemini-4.0-flash">gemini-4.0-flash</option>
                   </select>
                 </div>
 
@@ -448,8 +452,10 @@
                     </span>
                   </div>
                   <select x-model="settingsData.ai.openai_model" @change="aiTestResult = ''; aiTestSuccess = false;" :class="aiTestSuccess && settingsData.ai.ai_provider === 'openai' ? 'border-emerald-500/70 text-emerald-300 ring-1 ring-emerald-500/30' : 'border-slate-700 text-slate-200'" class="w-full px-4 py-2.5 bg-slate-950 border rounded-xl focus:outline-none focus:border-purple-500 transition text-sm">
-                    <option value="gpt-4o-mini">gpt-4o-mini (Recommended)</option>
-                    <option value="gpt-4o">gpt-4o</option>
+                    <option value="gpt-4o-mini">gpt-4o-mini (Recommended for Primary)</option>
+                    <option value="gpt-4o">gpt-4o (Recommended for Escalation)</option>
+                    <option value="gpt-5.6-turbo">gpt-5.6-turbo</option>
+                    <option value="o1-mini">o1-mini</option>
                     <option value="gpt-4-turbo">gpt-4-turbo</option>
                   </select>
                 </div>
@@ -536,8 +542,10 @@
                   <div class="space-y-2" x-show="settingsData.ai.escalation_provider === 'gemini'">
                     <label class="block text-sm font-medium text-slate-300">Fallback Model</label>
                     <select x-model="settingsData.ai.escalation_model" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
-                      <option value="gemini-3.7-flash">gemini-3.7-flash (Recommended)</option>
+                      <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Recommended for Primary)</option>
+                      <option value="gemini-3.5-flash">gemini-3.5-flash</option>
                       <option value="gemini-3.6-flash">gemini-3.6-flash</option>
+                      <option value="gemini-3.7-flash">gemini-3.7-flash (Recommended for Escalation)</option>
                       <option value="gemini-3.5-pro">gemini-3.5-pro</option>
                       <option value="gemini-4.0-flash">gemini-4.0-flash</option>
                     </select>
@@ -545,7 +553,8 @@
                   <div class="space-y-2" x-show="settingsData.ai.escalation_provider === 'openai'">
                     <label class="block text-sm font-medium text-slate-300">Fallback Model</label>
                     <select x-model="settingsData.ai.escalation_model" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
-                      <option value="gpt-4o">gpt-4o (Recommended)</option>
+                      <option value="gpt-4o-mini">gpt-4o-mini (Recommended for Primary)</option>
+                      <option value="gpt-4o">gpt-4o (Recommended for Escalation)</option>
                       <option value="gpt-5.6-turbo">gpt-5.6-turbo</option>
                       <option value="o1-mini">o1-mini</option>
                     </select>
