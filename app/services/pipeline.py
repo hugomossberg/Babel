@@ -109,11 +109,30 @@ def qa_gate(
         issues.append(f"Invalid SRT structure: {e}")
         score -= 30
 
+    def is_safe_identical_line(text: str) -> bool:
+        stripped = text.strip()
+        # siffror / symboler
+        if not any(c.isalpha() for c in stripped):
+            return True
+        # väldigt korta cues (t.ex. namn "Seth Cohen")
+        words = stripped.split()
+        if len(words) <= 2:
+            return True
+        return False
+
+    real_untranslated_ids = [
+        i for i in untranslated_ids
+        if not is_safe_identical_line(source_subs[i].content)
+    ]
+
     score = max(0, score)
-    # Bug fix: Don't require untranslated_ids to be exactly 0, because names, numbers, 
-    # and short exclamations ("Oh!", "Wow") are identical in both languages. 
-    # The score already penalizes high percentages of identical lines.
-    passed = score >= 60 and dropped_count == 0
+    # Bug fix: Use real_untranslated_ids to enforce hard fail on actual sentences
+    # but allow safe identical lines (names, numbers) to pass
+    passed = (
+        score >= 60 
+        and dropped_count == 0 
+        and len(real_untranslated_ids) == 0
+    )
 
     if job_id:
         if passed:
@@ -125,7 +144,8 @@ def qa_gate(
         "passed": passed,
         "score": score,
         "issues": issues,
-        "untranslated_ids": untranslated_ids,
+        "untranslated_ids": untranslated_ids,  # Keep full list for recovery attempts
+        "real_untranslated_ids": real_untranslated_ids,
         "dropped_count": dropped_count,
         "sync_diff_ms": max_drift,
     }
