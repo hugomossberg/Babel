@@ -728,9 +728,33 @@ class SubtitlePipeline:
                     os.replace(temp_output, target_output_path)
                     output_files.append(target_output_path)
                     successful_langs.append(lang_code)
-                    append_job_log(job_id, f"Published {os.path.basename(target_output_path)} (QA Score: {qa_result['score']}/100, Sync: {this_max_diff}ms, Dropped: {dropped_count})")
+
+                # Build a detailed QA summary for the user
+                unresolved_count = len(qa_result.get("real_untranslated_ids", []))
+                identical_candidates = len(qa_result.get("untranslated_ids", []))
+                kept_count = len(safe_ids) if 'safe_ids' in locals() else 0
+                recovered_count = identical_candidates - kept_count - unresolved_count
+                if recovered_count < 0: recovered_count = 0
+
+                summary_status = "PASS" if qa_result["passed"] else "FAIL"
+                summary_lines = [
+                    "--- QA Summary ---",
+                    f"{dropped_count} dropped lines",
+                    f"{this_max_diff} ms sync drift",
+                    f"{identical_candidates} identical candidates",
+                    f"{kept_count} classified as KEEP (safe)",
+                    f"{recovered_count} translated on recovery",
+                    f"{unresolved_count} unresolved English lines",
+                    f"Result: {summary_status} (Score: {qa_result['score']}/100)",
+                    "------------------"
+                ]
+                for line in summary_lines:
+                    append_job_log(job_id, line)
+
+                if qa_result["passed"]:
+                    append_job_log(job_id, f"Published {os.path.basename(target_output_path)}")
                 else:
-                    append_job_log(job_id, f"BLOCKED: {lang_name} translation failed QA (Score: {qa_result['score']}/100). File NOT published. Issues: {'; '.join(qa_result['issues'])}")
+                    append_job_log(job_id, f"BLOCKED: {lang_name} translation failed QA. File NOT published.")
 
             # Clean up temp file
             if os.path.exists(temp_extracted_srt):
