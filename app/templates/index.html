@@ -1,0 +1,1604 @@
+<!DOCTYPE html>
+<html lang="sv" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Babel - AI Subtitle Hub</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><defs><linearGradient id='bg' x1='0%25' y1='0%25' x2='100%25' y2='100%25'><stop offset='0%25' stop-color='%236366f1'/><stop offset='100%25' stop-color='%239333ea'/></linearGradient></defs><rect width='512' height='512' rx='128' fill='url(%23bg)' /><g transform='translate(96, 114) scale(0.555)'><path fill='%23ffffff' d='M0 96C0 60.7 28.7 32 64 32l448 0c35.3 0 64 28.7 64 64l0 320c0 35.3-28.7 64-64 64L64 480c-35.3 0-64-28.7-64-64L0 96zM200 208c14.2 0 27 6.1 35.8 16c8.8 9.9 24 10.7 33.9 1.9s10.7-24 1.9-33.9c-17.5-19.6-43.1-32-71.5-32c-53 0-96 43-96 96s43 96 96 96c28.4 0 54-12.4 71.5-32c8.8-9.9 8-25-1.9-33.9s-25-8-33.9 1.9c-8.8 9.9-21.6 16-35.8 16c-26.5 0-48-21.5-48-48s21.5-48 48-48zm144 48c0-26.5 21.5-48 48-48c14.2 0 27 6.1 35.8 16c8.8 9.9 24 10.7 33.9 1.9s10.7-24 1.9-33.9c-17.5-19.6-43.1-32-71.5-32c-53 0-96 43-96 96s43 96 96 96c28.4 0 54-12.4 71.5-32c8.8-9.9 8-25-1.9-33.9s-25-8-33.9 1.9c-8.8 9.9-21.6 16-35.8 16c-26.5 0-48-21.5-48-48z'/></g></svg>" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f5f3ff',
+              500: '#8b5cf6',
+              600: '#7c3aed',
+              700: '#6d28d9',
+              900: '#4c1d95',
+            }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans" x-data="babelApp()" x-init="init()">
+
+  <!-- Top Navigation -->
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3 cursor-pointer" @click="currentTab = 'dashboard'">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-purple-500/20 hover:scale-105 transition">
+          <i class="fa-solid fa-closed-captioning text-xl text-white"></i>
+        </div>
+        <div>
+          <span class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400">Babel</span>
+          <span class="text-xs text-slate-400 ml-2 px-2 py-0.5 rounded bg-slate-800 border border-slate-700">v0.1.0</span>
+        </div>
+      </div>
+
+      <nav class="flex items-center space-x-1 sm:space-x-2">
+        <button @click="currentTab = 'dashboard'" :class="currentTab === 'dashboard' ? 'bg-purple-600/20 text-purple-300 border-purple-500/30' : 'text-slate-400 hover:text-white'" class="px-2 sm:px-3.5 py-1.5 rounded-lg border border-transparent text-sm font-medium transition flex items-center gap-2">
+          <i class="fa-solid fa-gauge"></i> <span class="hidden sm:inline">Activity</span>
+        </button>
+        <button @click="currentTab = 'media'; loadMediaFiles()" :class="currentTab === 'media' ? 'bg-purple-600/20 text-purple-300 border-purple-500/30' : 'text-slate-400 hover:text-white'" class="px-2 sm:px-3.5 py-1.5 rounded-lg border border-transparent text-sm font-medium transition flex items-center gap-2">
+          <i class="fa-solid fa-film"></i> <span class="hidden sm:inline">Library</span>
+        </button>
+        <button @click="currentTab = 'settings'" :class="currentTab === 'settings' ? 'bg-purple-600/20 text-purple-300 border-purple-500/30' : 'text-slate-400 hover:text-white'" class="px-2 sm:px-3.5 py-1.5 rounded-lg border border-transparent text-sm font-medium transition flex items-center gap-2">
+          <i class="fa-solid fa-sliders"></i> <span class="hidden sm:inline">Settings</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+
+    <!-- 1. DASHBOARD TAB -->
+    <section x-show="currentTab === 'dashboard'" x-cloak>
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+        <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 backdrop-blur">
+          <div class="flex items-center justify-between text-slate-400 mb-2">
+            <span class="text-sm font-medium">Total Jobs</span>
+            <i class="fa-solid fa-list-check text-purple-400"></i>
+          </div>
+          <div class="text-3xl font-bold" x-text="stats.total || 0"></div>
+        </div>
+
+        <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 backdrop-blur">
+          <div class="flex items-center justify-between text-slate-400 mb-2">
+            <span class="text-sm font-medium">Translated</span>
+            <i class="fa-solid fa-wand-magic-sparkles text-emerald-400"></i>
+          </div>
+          <div class="text-3xl font-bold text-emerald-400" x-text="stats.translated || 0"></div>
+        </div>
+
+        <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 backdrop-blur">
+          <div class="flex items-center justify-between text-slate-400 mb-2">
+            <span class="text-sm font-medium">Existing / Skipped</span>
+            <i class="fa-solid fa-circle-check text-slate-400"></i>
+          </div>
+          <div class="text-3xl font-bold text-slate-300" x-text="stats.healthy || 0"></div>
+        </div>
+
+        <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 backdrop-blur">
+          <div class="flex items-center justify-between text-slate-400 mb-2">
+            <span class="text-sm font-medium">Avg Speed</span>
+            <i class="fa-solid fa-bolt text-amber-400"></i>
+          </div>
+          <div class="text-3xl font-bold text-amber-400" x-text="(stats.avg_duration_seconds || 0) + 's'"></div>
+        </div>
+      </div>
+
+      <!-- Activity Feed Table -->
+      <div class="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+        <div class="p-5 border-b border-slate-800 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <h2 class="text-lg font-semibold">Activity Feed</h2>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-900/50 text-purple-300 border border-purple-700/50">Live Sync</span>
+          </div>
+          <div class="flex items-center space-x-3">
+            <button @click="clearAllJobs()" x-show="jobs.length > 0" class="text-xs text-rose-400 hover:text-rose-300 px-3 py-1.5 rounded-lg border border-rose-900/50 hover:bg-rose-950/40 transition flex items-center gap-1.5">
+              <i class="fa-solid fa-trash-can"></i> Clear History
+            </button>
+            <button @click="manualRefreshActivity()" :disabled="refreshingActivity" class="text-slate-400 hover:text-white text-sm flex items-center gap-1.5 transition active:scale-95 px-2.5 py-1 rounded-lg hover:bg-slate-800">
+              <i class="fa-solid fa-rotate" :class="refreshingActivity ? 'fa-spin text-purple-400' : ''"></i>
+              <span x-text="refreshingActivity ? 'Refreshing...' : 'Refresh'"></span>
+            </button>
+          </div>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-sm text-slate-300">
+            <thead class="bg-slate-800/50 text-xs uppercase text-slate-400 border-b border-slate-800">
+              <tr>
+                <th class="px-5 py-3">Title / Video</th>
+                <th class="px-5 py-3">Source</th>
+                <th class="px-5 py-3">Status</th>
+                <th class="px-5 py-3">Lines</th>
+                <th class="px-5 py-3">Duration</th>
+                <th class="px-5 py-3">Time</th>
+                <th class="px-5 py-3 text-right"></th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/60">
+              <template x-if="jobs.length === 0">
+                <tr>
+                  <td colspan="7" class="px-5 py-8 text-center text-slate-500">
+                    <i class="fa-solid fa-inbox text-3xl mb-2 block"></i>
+                    No activity recorded yet.
+                  </td>
+                </tr>
+              </template>
+              <template x-for="job in jobs" :key="job.id">
+                <tr class="hover:bg-slate-800/30 transition cursor-pointer" @click="openJobModal(job)">
+                  <td class="px-5 py-4 font-medium text-white max-w-xs truncate" :title="job.video_path">
+                    <div class="flex items-center gap-2">
+                      <span class="hover:text-purple-300 font-semibold text-slate-100" x-text="job.title || job.video_path"></span>
+                      <i class="fa-solid fa-magnifying-glass text-xs text-slate-500"></i>
+                    </div>
+                    <span class="block text-xs text-slate-500 font-normal truncate" x-text="job.video_path"></span>
+                  </td>
+                  <td class="px-5 py-4">
+                    <span class="px-2 py-0.5 rounded text-xs font-medium bg-slate-800 border border-slate-700 text-slate-300" x-text="job.event_source"></span>
+                  </td>
+                  <td class="px-5 py-4">
+                    <template x-if="job.status === 'TRANSLATED' || job.status === 'SUCCESS'">
+                      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800/50">
+                        <i class="fa-solid fa-check"></i> TRANSLATED
+                      </span>
+                    </template>
+                    <template x-if="job.status === 'REPAIRED'">
+                      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-950 text-purple-300 border border-purple-800/50">
+                        <i class="fa-solid fa-wrench"></i> REPAIRED
+                      </span>
+                    </template>
+                    <template x-if="job.status === 'BAZARR MATCH' || job.status === 'BAZARR'">
+                      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-cyan-950 text-cyan-300 border border-cyan-700/50" :title="job.reason">
+                        <i class="fa-solid fa-cloud-arrow-down"></i> BAZARR MATCH
+                      </span>
+                    </template>
+                    <template x-if="job.status === 'ALREADY EXISTS' || job.status === 'HEALTHY' || job.status === 'SKIPPED' || job.status === 'EXISTING / SKIPPED'">
+                      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-800 text-slate-300 border border-slate-700" :title="job.reason">
+                        <i class="fa-solid fa-circle-check"></i> ALREADY EXISTS
+                      </span>
+                    </template>
+                    <template x-if="job.status === 'TRANSLATING' || job.status === 'PROCESSING'">
+                      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-950 text-amber-400 border border-amber-800/50 animate-pulse">
+                        <i class="fa-solid fa-spinner fa-spin"></i> TRANSLATING
+                      </span>
+                    </template>
+                    <template x-if="job.status === 'QUEUED'">
+                      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-indigo-950 text-indigo-400 border border-indigo-800/50">
+                        <i class="fa-solid fa-clock"></i> QUEUED
+                      </span>
+                    </template>
+                    <template x-if="job.status === 'FAILED'">
+                      <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-950 text-rose-400 border border-rose-800/50" :title="job.error_message">
+                        <i class="fa-solid fa-circle-exclamation"></i> FAILED
+                      </span>
+                    </template>
+                  </td>
+                  <td class="px-5 py-4">
+                    <template x-if="job.status === 'TRANSLATING' || job.status === 'PROCESSING'">
+                      <div class="space-y-1 min-w-[130px]">
+                        <div class="flex items-center justify-between text-[11px] font-mono">
+                          <span class="text-amber-300" x-text="(job.processed_lines || 0) + '/' + (job.total_lines || '?')"></span>
+                          <span class="text-slate-400 font-bold" x-text="job.total_lines > 0 ? Math.round(((job.processed_lines || 0) / job.total_lines) * 100) + '%' : '0%'"></span>
+                        </div>
+                        <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                          <div class="bg-gradient-to-r from-amber-500 to-purple-500 h-1.5 rounded-full transition-all duration-300" :style="'width: ' + (job.total_lines > 0 ? Math.min(100, Math.round(((job.processed_lines || 0) / job.total_lines) * 100)) : 0) + '%'"></div>
+                        </div>
+                      </div>
+                    </template>
+                    <template x-if="job.status !== 'TRANSLATING' && job.status !== 'PROCESSING'">
+                      <div>
+                        <span x-text="job.total_lines || 0"></span>
+                        <span class="text-xs text-slate-500" x-show="job.cleaned_sdh_lines > 0" x-text="'(' + job.cleaned_sdh_lines + ' sdh)'"></span>
+                      </div>
+                    </template>
+                  </td>
+                  <td class="px-5 py-4 font-mono text-xs" x-text="job.duration_seconds > 0 ? job.duration_seconds + 's' : '-'"></td>
+                  <td class="px-5 py-4 text-xs text-slate-500" x-text="formatDate(job.created_at)"></td>
+                  <td class="px-5 py-4 text-right" @click.stop>
+                    <button @click="deleteJob(job.id)" class="text-slate-500 hover:text-rose-400 p-1.5 transition">
+                      <i class="fa-solid fa-xmark"></i>
+                    </button>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. MEDIA FILES TAB -->
+    <section x-show="currentTab === 'media'" x-cloak>
+      <div class="space-y-6">
+        
+        <!-- Header Controls -->
+        <div class="flex items-center justify-between bg-slate-900/60 border border-slate-800 rounded-2xl p-5 shadow-xl flex-wrap gap-4">
+          <div class="flex items-center space-x-3">
+            <button @click="mediaCategory = 'series'" :class="mediaCategory === 'series' ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/30' : 'bg-slate-800 text-slate-300 hover:text-white'" class="px-4 py-2 rounded-xl text-sm font-semibold transition flex items-center gap-2">
+              <i class="fa-solid fa-tv"></i> TV Series (<span x-text="mediaData.series ? mediaData.series.length : 0"></span>)
+            </button>
+            <button @click="mediaCategory = 'movies'" :class="mediaCategory === 'movies' ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/30' : 'bg-slate-800 text-slate-300 hover:text-white'" class="px-4 py-2 rounded-xl text-sm font-semibold transition flex items-center gap-2">
+              <i class="fa-solid fa-film"></i> Movies (<span x-text="mediaData.movies ? mediaData.movies.length : 0"></span>)
+            </button>
+          </div>
+
+          <div class="flex items-center space-x-3">
+            <button @click="translateAllMissing()" x-show="getMissingCount() > 0" class="px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white active:scale-95 rounded-xl text-sm font-semibold transition flex items-center gap-2 shadow-lg shadow-purple-600/20">
+              <i class="fa-solid fa-wand-magic-sparkles"></i>
+              <span>Translate All Missing (<span x-text="getMissingCount()"></span>)</span>
+            </button>
+
+            <button @click="loadMediaFiles()" :disabled="scanningFolders" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 active:scale-95 rounded-xl text-sm font-medium transition flex items-center gap-2 shadow-lg shadow-black/20">
+              <i class="fa-solid fa-rotate" :class="scanningFolders ? 'fa-spin text-purple-400' : ''"></i>
+              <span x-text="scanningFolders ? 'Scanning...' : 'Scan Folders'"></span>
+            </button>
+          </div>
+        </div>
+
+        <!-- TV Series Group View -->
+        <div x-show="mediaCategory === 'series'" class="space-y-4">
+          <template x-if="!mediaData.series || mediaData.series.length === 0">
+            <div class="p-8 text-center text-slate-500 bg-slate-900/60 border border-slate-800 rounded-2xl">
+              No TV series found in configured path.
+            </div>
+          </template>
+
+          <template x-for="show in mediaData.series" :key="show.title">
+            <div class="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden shadow-xl" x-data="{ open: true }">
+              <div @click="open = !open" class="p-5 bg-slate-800/40 border-b border-slate-800 flex items-center justify-between cursor-pointer hover:bg-slate-800/60 transition">
+                <div class="flex items-center space-x-3">
+                  <div class="w-9 h-9 rounded-xl bg-purple-900/40 border border-purple-700/50 text-purple-400 flex items-center justify-center">
+                    <i class="fa-solid fa-tv"></i>
+                  </div>
+                  <div>
+                    <h3 class="font-bold text-white text-base" x-text="show.title"></h3>
+                    <p class="text-xs text-slate-500" x-text="show.episodes.length + ' episode(s)'"></p>
+                  </div>
+                </div>
+                <div class="flex items-center space-x-3" @click.stop>
+                  <button @click="forceRetranslateShow(show)" class="px-3 py-1 bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 border border-rose-900/50">
+                    <i class="fa-solid fa-rotate"></i>
+                    <span>Retranslate All</span>
+                  </button>
+                  <button @click="translateShowMissing(show)" x-show="getShowMissingCount(show) > 0" class="px-3 py-1 bg-purple-600/80 hover:bg-purple-600 text-white rounded-lg text-xs font-semibold transition flex items-center gap-1.5 shadow-md shadow-purple-900/30">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i>
+                    <span>Translate Missing (<span x-text="getShowMissingCount(show)"></span>)</span>
+                  </button>
+                  <i class="fa-solid text-slate-400 text-sm transition-transform duration-200 cursor-pointer" @click="open = !open" :class="open ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
+                </div>
+              </div>
+
+              <div x-show="open" class="divide-y divide-slate-800/50 p-3 space-y-2">
+                <template x-for="ep in show.episodes" :key="ep.path">
+                  <div class="p-3.5 bg-slate-950/60 border border-slate-800/60 rounded-xl flex items-center justify-between hover:border-slate-700 transition">
+                    <div class="flex items-center space-x-3">
+                      <i class="fa-solid fa-video text-purple-400 text-lg"></i>
+                      <div>
+                        <div class="flex items-center gap-2">
+                          <span class="font-medium text-slate-100 text-sm" x-text="ep.filename"></span>
+                          <span class="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700" x-text="ep.season"></span>
+                          <span x-show="!ep.has_any_sub" class="text-[10px] px-2 py-0.5 rounded bg-amber-950/50 text-amber-400 border border-amber-900/50 font-mono font-semibold">
+                            NO SUBTITLE
+                          </span>
+                        </div>
+                        <div class="text-xs text-slate-500" x-text="ep.path + ' (' + ep.size_mb + ' MB)'"></div>
+
+                        <div class="flex items-center gap-1.5 mt-2 flex-wrap" x-show="ep.subtitles && ep.subtitles.length > 0">
+                          <template x-for="s in ep.subtitles" :key="s.filename">
+                            <div class="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md border font-mono bg-purple-950/60 border-purple-800/50 text-purple-300">
+                              <i class="fa-solid fa-closed-captioning text-[10px] text-purple-400"></i>
+                              <span x-text="s.filename"></span>
+                              <span class="text-[10px] opacity-75" x-text="'(' + s.lines + ' lines)'"></span>
+                            </div>
+                          </template>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="flex items-center space-x-2">
+                      <button x-show="ep.has_any_sub" @click="deleteSubtitles(ep)" class="px-3 py-1.5 bg-slate-800 hover:bg-rose-950/50 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-900/50 rounded-xl text-xs font-semibold transition flex items-center gap-1.5">
+                        <i class="fa-solid fa-trash-can"></i> Delete Subs
+                      </button>
+
+                      <button @click="triggerProcess(ep.path, ep.has_any_sub)" class="px-4 py-1.5 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5" :class="ep.has_any_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
+                        <i class="fa-solid" :class="ep.has_any_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles'"></i>
+                        <span x-text="ep.has_any_sub ? 'Re-translate (Force)' : 'Translate Now'"></span>
+                      </button>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <!-- Movies View -->
+        <div x-show="mediaCategory === 'movies'" class="space-y-3">
+          <template x-if="!mediaData.movies || mediaData.movies.length === 0">
+            <div class="p-8 text-center text-slate-500 bg-slate-900/60 border border-slate-800 rounded-2xl">
+              No movies found in configured Movies folder.
+            </div>
+          </template>
+
+          <template x-for="movie in mediaData.movies" :key="movie.path">
+            <div class="p-4 bg-slate-900/60 border border-slate-800 rounded-2xl flex items-center justify-between shadow-xl hover:border-purple-500/40 transition">
+              <div class="flex items-center space-x-3">
+                <i class="fa-solid fa-film text-2xl text-purple-400"></i>
+                <div>
+                  <div class="flex items-center gap-2">
+                    <span class="font-bold text-white text-base" x-text="movie.filename"></span>
+                    <span x-show="!movie.has_any_sub" class="text-[10px] px-2 py-0.5 rounded bg-amber-950/50 text-amber-400 border border-amber-900/50 font-mono font-semibold">
+                      NO SUBTITLE
+                    </span>
+                  </div>
+                  <div class="text-xs text-slate-500" x-text="movie.path + ' (' + movie.size_mb + ' MB)'"></div>
+
+                  <div class="flex items-center gap-1.5 mt-2 flex-wrap" x-show="movie.subtitles && movie.subtitles.length > 0">
+                    <template x-for="s in movie.subtitles" :key="s.filename">
+                      <div class="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md border font-mono bg-purple-950/60 border-purple-800/50 text-purple-300">
+                        <i class="fa-solid fa-closed-captioning text-[10px] text-purple-400"></i>
+                        <span x-text="s.filename"></span>
+                        <span class="text-[10px] opacity-75" x-text="'(' + s.lines + ' lines)'"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+
+              <div class="flex items-center space-x-2">
+                <button x-show="movie.has_any_sub" @click="deleteSubtitles(movie)" class="px-3 py-2 bg-slate-800 hover:bg-rose-950/50 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-900/50 rounded-xl text-xs font-semibold transition flex items-center gap-1.5">
+                  <i class="fa-solid fa-trash-can"></i> Delete Subs
+                </button>
+
+                <button @click="triggerProcess(movie.path, movie.has_any_sub)" class="px-4 py-2 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5" :class="movie.has_any_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
+                  <i class="fa-solid" :class="movie.has_any_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles'"></i>
+                  <span x-text="movie.has_any_sub ? 'Re-translate (Force)' : 'Translate Now'"></span>
+                </button>
+              </div>
+            </div>
+          </template>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- 3. SETTINGS TAB -->
+    <section x-show="currentTab === 'settings'" x-cloak>
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+        
+        <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 space-y-1 h-fit">
+          <button @click="settingsTab = 'ai'" :class="settingsTab === 'ai' ? 'bg-purple-600/20 text-purple-300 border-purple-500/30' : 'text-slate-400 hover:text-white'" class="w-full text-left px-4 py-2.5 rounded-xl border border-transparent text-sm font-medium transition flex items-center gap-3">
+            <i class="fa-solid fa-brain w-4"></i> AI Engine
+          </button>
+          <button @click="settingsTab = 'modules'" :class="settingsTab === 'modules' ? 'bg-purple-600/20 text-purple-300 border-purple-500/30' : 'text-slate-400 hover:text-white'" class="w-full text-left px-4 py-2.5 rounded-xl border border-transparent text-sm font-medium transition flex items-center gap-3">
+            <i class="fa-solid fa-sliders w-4"></i> Features & Modules
+          </button>
+          <button @click="settingsTab = 'languages'" :class="settingsTab === 'languages' ? 'bg-purple-600/20 text-purple-300 border-purple-500/30' : 'text-slate-400 hover:text-white'" class="w-full text-left px-4 py-2.5 rounded-xl border border-transparent text-sm font-medium transition flex items-center gap-3">
+            <i class="fa-solid fa-language w-4"></i> Target Languages
+          </button>
+          <button @click="settingsTab = 'folders'" :class="settingsTab === 'folders' ? 'bg-purple-600/20 text-purple-300 border-purple-500/30' : 'text-slate-400 hover:text-white'" class="w-full text-left px-4 py-2.5 rounded-xl border border-transparent text-sm font-medium transition flex items-center gap-3">
+            <i class="fa-solid fa-folder-tree w-4"></i> Media Folders
+          </button>
+          <button @click="settingsTab = 'integrations'" :class="settingsTab === 'integrations' ? 'bg-purple-600/20 text-purple-300 border-purple-500/30' : 'text-slate-400 hover:text-white'" class="w-full text-left px-4 py-2.5 rounded-xl border border-transparent text-sm font-medium transition flex items-center gap-3">
+            <i class="fa-solid fa-network-wired w-4"></i> Integrations & Pipeline
+          </button>
+          <button @click="settingsTab = 'webhooks'" :class="settingsTab === 'webhooks' ? 'bg-purple-600/20 text-purple-300 border-purple-500/30' : 'text-slate-400 hover:text-white'" class="w-full text-left px-4 py-2.5 rounded-xl border border-transparent text-sm font-medium transition flex items-center gap-3">
+            <i class="fa-solid fa-satellite-dish w-4"></i> Webhooks & Automation
+          </button>
+        </div>
+
+        <div class="md:col-span-3 bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-xl">
+          
+          <!-- SUB-TAB 1: AI ENGINE -->
+          <div x-show="settingsTab === 'ai'">
+            <h3 class="text-lg font-bold text-white mb-1">AI Translation Engine</h3>
+            <p class="text-xs text-slate-400 mb-6">Choose your AI provider (Google Gemini or OpenAI) and configure parameters.</p>
+
+            <div class="space-y-5">
+              <!-- Provider Selection -->
+              <div class="grid grid-cols-2 gap-4">
+                <div>
+                  <label class="block text-sm font-medium text-slate-300 mb-1.5">Translation Service</label>
+                  <select x-model="settingsData.ai.ai_provider" @change="aiTestResult = ''; aiTestSuccess = false;" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                    <option value="gemini">Google Gemini (Recommended)</option>
+                    <option value="openai">OpenAI (ChatGPT)</option>
+                    <option value="deepl">DeepL Translate</option>
+                    <option value="ollama">LocalAI / Ollama</option>
+                  </select>
+                </div>
+
+                <!-- Model Selection (Gemini) Pure Select Dropdown -->
+                <div x-show="settingsData.ai.ai_provider === 'gemini'">
+                  <div class="flex items-center justify-between mb-1.5">
+                    <label class="block text-sm font-medium text-slate-300">Gemini Model</label>
+                    <span x-show="aiTestSuccess && settingsData.ai.ai_provider === 'gemini'" class="text-[11px] text-emerald-400 font-semibold flex items-center gap-1">
+                      <i class="fa-solid fa-circle-check"></i> Verified
+                    </span>
+                  </div>
+                  <select x-model="settingsData.ai.gemini_model" @change="aiTestResult = ''; aiTestSuccess = false;" :class="aiTestSuccess && settingsData.ai.ai_provider === 'gemini' ? 'border-emerald-500/70 text-emerald-300 ring-1 ring-emerald-500/30' : 'border-slate-700 text-slate-200'" class="w-full px-4 py-2.5 bg-slate-950 border rounded-xl focus:outline-none focus:border-purple-500 transition text-sm">
+                    <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Recommended)</option>
+                    <option value="gemini-3.5-flash">gemini-3.5-flash</option>
+                  </select>
+                </div>
+
+                <!-- Model Selection (OpenAI) Pure Select Dropdown -->
+                <div x-show="settingsData.ai.ai_provider === 'openai'">
+                  <div class="flex items-center justify-between mb-1.5">
+                    <label class="block text-sm font-medium text-slate-300">OpenAI Model</label>
+                    <span x-show="aiTestSuccess && settingsData.ai.ai_provider === 'openai'" class="text-[11px] text-emerald-400 font-semibold flex items-center gap-1">
+                      <i class="fa-solid fa-circle-check"></i> Verified
+                    </span>
+                  </div>
+                  <select x-model="settingsData.ai.openai_model" @change="aiTestResult = ''; aiTestSuccess = false;" :class="aiTestSuccess && settingsData.ai.ai_provider === 'openai' ? 'border-emerald-500/70 text-emerald-300 ring-1 ring-emerald-500/30' : 'border-slate-700 text-slate-200'" class="w-full px-4 py-2.5 bg-slate-950 border rounded-xl focus:outline-none focus:border-purple-500 transition text-sm">
+                    <option value="gpt-4o-mini">gpt-4o-mini (Recommended)</option>
+                    <option value="gpt-4o">gpt-4o</option>
+                    <option value="gpt-4-turbo">gpt-4-turbo</option>
+                  </select>
+                </div>
+
+                <!-- Model Selection (Ollama) -->
+                <div x-show="settingsData.ai.ai_provider === 'ollama'">
+                  <label class="block text-sm font-medium text-slate-300 mb-1.5">Ollama Model</label>
+                  <input type="text" x-model="settingsData.ai.ollama_model" @input="aiTestResult = ''; aiTestSuccess = false;" placeholder="llama3, mistral, qwen..." class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                </div>
+              </div>
+
+              <!-- Gemini API Key -->
+              <div x-show="settingsData.ai.ai_provider === 'gemini'">
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">Google Gemini API Key</label>
+                <div class="flex gap-2">
+                  <input type="password" x-model="settingsData.ai.gemini_api_key" placeholder="Paste your Gemini API Key here..." class="flex-1 px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition">
+                  <button type="button" @click="testAIConnection()" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
+                    <i class="fa-solid" :class="testingAI ? 'fa-spinner fa-spin' : 'fa-plug'"></i> Test Connection
+                  </button>
+                </div>
+                <div x-show="aiTestResult" class="mt-2 text-xs font-medium" :class="aiTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="aiTestResult"></div>
+              </div>
+
+              <!-- OpenAI API Key -->
+              <div x-show="settingsData.ai.ai_provider === 'openai'">
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">OpenAI API Key</label>
+                <div class="flex gap-2">
+                  <input type="password" x-model="settingsData.ai.openai_api_key" placeholder="sk-proj-..." class="flex-1 px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition">
+                  <button type="button" @click="testAIConnection()" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
+                    <i class="fa-solid" :class="testingAI ? 'fa-spinner fa-spin' : 'fa-plug'"></i> Test Connection
+                  </button>
+                </div>
+                <div x-show="aiTestResult" class="mt-2 text-xs font-medium" :class="aiTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="aiTestResult"></div>
+              </div>
+
+              <!-- DeepL API Key -->
+              <div x-show="settingsData.ai.ai_provider === 'deepl'">
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">DeepL Authentication Key</label>
+                <div class="flex gap-2">
+                  <input type="password" x-model="settingsData.ai.deepl_api_key" placeholder="DeepL API Free / Pro Auth Key..." class="flex-1 px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition">
+                  <button type="button" @click="testAIConnection()" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
+                    <i class="fa-solid" :class="testingAI ? 'fa-spinner fa-spin' : 'fa-plug'"></i> Test Connection
+                  </button>
+                </div>
+                <div x-show="aiTestResult" class="mt-2 text-xs font-medium" :class="aiTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="aiTestResult"></div>
+              </div>
+
+              <!-- Ollama Server URL -->
+              <div x-show="settingsData.ai.ai_provider === 'ollama'">
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">Ollama Server Endpoint</label>
+                <div class="flex gap-2">
+                  <input type="text" x-model="settingsData.ai.ollama_url" placeholder="http://localhost:11434" class="flex-1 px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition">
+                  <button type="button" @click="testAIConnection()" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
+                    <i class="fa-solid" :class="testingAI ? 'fa-spinner fa-spin' : 'fa-plug'"></i> Test Connection
+                  </button>
+                </div>
+                <div x-show="aiTestResult" class="mt-2 text-xs font-medium" :class="aiTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="aiTestResult"></div>
+              </div>
+
+              <!-- Speed & Batch Parameters -->
+              <div class="grid grid-cols-3 gap-4">
+                <div>
+                  <label class="block text-sm font-medium text-slate-300 mb-1.5">Batch Size (Lines)</label>
+                  <input type="number" x-model.number="settingsData.ai.batch_size" min="10" max="100" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                  <span class="text-xs text-slate-500 mt-1 block">50 lines per chunk is optimal.</span>
+                </div>
+
+                <div>
+                  <label class="block text-sm font-medium text-slate-300 mb-1.5">Batch Concurrency</label>
+                  <input type="number" x-model.number="settingsData.ai.max_concurrency" min="1" max="8" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                  <span class="text-xs text-slate-500 mt-1 block">Parallel chunks per video.</span>
+                </div>
+
+                <div>
+                  <label class="block text-sm font-medium text-slate-300 mb-1.5">Simultaneous Videos</label>
+                  <input type="number" x-model.number="settingsData.ai.max_concurrent_jobs" min="1" max="10" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                  <span class="text-xs text-slate-500 mt-1 block">Videos translating simultaneously.</span>
+                </div>
+              </div>
+
+              <!-- Custom Glossary -->
+              <div>
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">Translation Glossary <span class="text-xs text-slate-500 font-normal">(Optional)</span></label>
+                <textarea x-model="settingsData.ai.glossary" rows="5" placeholder="(Leave empty if not needed)&#10;&#10;Example:&#10;Homelander = Homelander&#10;King's Landing = King's Landing" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm font-mono leading-relaxed resize-y"></textarea>
+                <span class="text-xs text-slate-500 mt-1 block">Optional. One rule per line: <code>English term = Target translation</code>. Use this to force the AI to keep specific names or places intact.</span>
+              </div>
+
+              <!-- API RATE LIMIT GUIDELINES NOTE (ONLY SHOWN FOR GEMINI) -->
+              <div x-show="settingsData.ai.ai_provider === 'gemini'" class="p-4 bg-slate-950/70 border border-slate-800/80 rounded-xl flex items-start gap-3 text-xs text-slate-400">
+                <i class="fa-solid fa-circle-info text-purple-400 text-sm mt-0.5"></i>
+                <div class="space-y-1.5">
+                  <div class="font-semibold text-slate-200">Rate Limit Guidelines (Google AI Studio Official):</div>
+                  <div>• <strong>Free Tier (15 RPM limit):</strong> Set <em>Batch Concurrency</em> to <code>2</code> (or <code>1</code>) and <em>Simultaneous Videos</em> to <code>1</code> to stay safely within Google's 15 requests/minute free threshold.</div>
+                  <div>• <strong>Pay-As-You-Go / Tier 1 (300+ RPM limit):</strong> Set <em>Batch Concurrency</em> to <code>4</code> and <em>Simultaneous Videos</em> to <code>3</code> (or higher) to translate entire seasons in parallel at ultra-speed.</div>
+                  <div class="text-[11px] text-slate-500"><em>Tip: Flash-Lite and Flash start at 300 RPM on Tier 1 (scaling up to 1,000+ RPM as usage grows), while Pro models have stricter limits (150 RPM).</em></div>
+                </div>
+              </div>
+
+              <!-- OPENAI GUIDELINES NOTE (ONLY SHOWN FOR OPENAI) -->
+              <div x-show="settingsData.ai.ai_provider === 'openai'" class="p-4 bg-slate-950/70 border border-slate-800/80 rounded-xl flex items-start gap-3 text-xs text-slate-400">
+                <i class="fa-solid fa-circle-info text-emerald-400 text-sm mt-0.5"></i>
+                <div class="space-y-1.5">
+                  <div class="font-semibold text-slate-200">OpenAI Rate Limit Guidelines:</div>
+                  <div>• <strong>Tier 1+ Account:</strong> Set <em>Batch Concurrency</em> to <code>2-4</code> and <em>Simultaneous Videos</em> to <code>2</code>. GPT-4o Mini is fast and cost-effective for subtitle translations.</div>
+                </div>
+              </div>
+
+              <div class="pt-2 flex justify-end">
+                <button @click="saveAISettings()" class="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium shadow-lg shadow-purple-600/30 transition text-sm">
+                  Save AI Settings
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- SUB-TAB 2: FEATURES & MODULES -->
+          <div x-show="settingsTab === 'modules'">
+            <h3 class="text-lg font-bold text-white mb-1">Features & Modules</h3>
+            <p class="text-xs text-slate-400 mb-6">Enable or disable subtitle extraction and processing modules.</p>
+
+            <div class="space-y-4">
+              <!-- Module 1: SDH & Noise Cleaner -->
+              <div class="p-4 bg-slate-950 rounded-2xl border border-slate-800 flex items-center justify-between">
+                <div>
+                  <h4 class="font-bold text-sm text-white flex items-center gap-2">
+                    <i class="fa-solid fa-broom text-purple-400"></i> SDH & Noise Cleaner
+                  </h4>
+                  <p class="text-xs text-slate-400 mt-0.5">
+                    Automatically cleans SDH sound descriptions, background noise, and musical notes while maintaining flawless sync.
+                  </p>
+                </div>
+                <input type="checkbox" x-model="settingsData.modules.clean_sdh" class="rounded bg-slate-800 border-slate-700 text-purple-600 focus:ring-purple-500 w-5 h-5">
+              </div>
+
+              <!-- Module 2: Extract Embedded Target Subtitles -->
+              <div class="p-4 bg-slate-950 rounded-2xl border border-slate-800 flex items-center justify-between">
+                <div>
+                  <h4 class="font-bold text-sm text-white flex items-center gap-2">
+                    <i class="fa-solid fa-file-export text-emerald-400"></i> Extract Embedded Target Subtitles
+                  </h4>
+                  <p class="text-xs text-slate-400 mt-0.5">
+                    If target language already exists inside the video, extracts it directly as an external <code>.[lang].srt</code> file.
+                  </p>
+                </div>
+                <input type="checkbox" x-model="settingsData.modules.extract_target_embedded" class="rounded bg-slate-800 border-slate-700 text-purple-600 focus:ring-purple-500 w-5 h-5">
+              </div>
+
+              <!-- Module 3: Extract Embedded Source Subtitles -->
+              <div class="p-4 bg-slate-950 rounded-2xl border border-slate-800 flex items-center justify-between">
+                <div>
+                  <h4 class="font-bold text-sm text-white flex items-center gap-2">
+                    <i class="fa-solid fa-file-video text-indigo-400"></i> Extract Embedded Source Subtitles
+                  </h4>
+                  <p class="text-xs text-slate-400 mt-0.5">
+                    Extracts embedded English subtitles from MKV/MP4 as source (Priority 1 for best sync accuracy).
+                  </p>
+                </div>
+                <input type="checkbox" x-model="settingsData.modules.extract_source_embedded" class="rounded bg-slate-800 border-slate-700 text-purple-600 focus:ring-purple-500 w-5 h-5">
+              </div>
+
+              <!-- Module 4: Auto-Repair Corrupted Subtitles -->
+              <div class="p-4 bg-slate-950 rounded-2xl border border-slate-800 flex items-center justify-between">
+                <div>
+                  <h4 class="font-bold text-sm text-white flex items-center gap-2">
+                    <i class="fa-solid fa-wrench text-amber-400"></i> Auto-Repair Corrupted Subtitles
+                  </h4>
+                  <p class="text-xs text-slate-400 mt-0.5">
+                    Inspects existing subtitles and re-translates if severe sync or line corruption is detected.
+                  </p>
+                </div>
+                <input type="checkbox" x-model="settingsData.modules.auto_repair_unhealthy" class="rounded bg-slate-800 border-slate-700 text-purple-600 focus:ring-purple-500 w-5 h-5">
+              </div>
+
+              <!-- Module 5: Strict Source Sync Lock -->
+              <div class="p-4 bg-slate-950 rounded-2xl border border-slate-800 flex items-center justify-between">
+                <div>
+                  <h4 class="font-bold text-sm text-white flex items-center gap-2">
+                    <i class="fa-solid fa-lock text-rose-400"></i> Strict Source Sync Lock
+                  </h4>
+                  <p class="text-xs text-slate-400 mt-0.5">
+                    Locks start and end timestamps directly to the source subtitle timing.
+                  </p>
+                </div>
+                <input type="checkbox" x-model="settingsData.modules.strict_sync_lock" class="rounded bg-slate-800 border-slate-700 text-purple-600 focus:ring-purple-500 w-5 h-5">
+              </div>
+
+              <!-- Module 6: Original Language Guard -->
+              <div class="p-4 bg-slate-950 rounded-2xl border border-slate-800 flex items-center justify-between">
+                <div>
+                  <h4 class="font-bold text-sm text-white flex items-center gap-2">
+                    <i class="fa-solid fa-shield-halved text-blue-400"></i> Original Language Guard
+                  </h4>
+                  <p class="text-xs text-slate-400 mt-0.5">
+                    Prevents AI translation if the video's primary audio already matches your target language. Protects domestic movies from bad round-trip translations.
+                  </p>
+                </div>
+                <input type="checkbox" x-model="settingsData.modules.original_language_guard" class="rounded bg-slate-800 border-slate-700 text-purple-600 focus:ring-purple-500 w-5 h-5">
+              </div>
+
+              <div class="pt-4 flex justify-end">
+                <button @click="saveModulesSettings()" class="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium shadow-lg shadow-purple-600/30 transition text-sm">
+                  Save Module Settings
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- SUB-TAB 3: TARGET LANGUAGES -->
+          <div x-show="settingsTab === 'languages'">
+            <h3 class="text-lg font-bold text-white mb-1">Target Languages & Priority</h3>
+            <p class="text-xs text-slate-400 mb-6">Select which languages to translate to and set their priority order.</p>
+
+            <div class="space-y-5">
+              <div class="flex gap-3 bg-slate-950 p-3 rounded-xl border border-slate-800">
+                <select x-model="newLangSelection" class="flex-1 px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-slate-200 focus:outline-none">
+                  <option value="">-- Choose language to add --</option>
+                  <template x-for="avail in availableLanguages" :key="avail.code">
+                    <option :value="avail.code" x-text="avail.name"></option>
+                  </template>
+                </select>
+                <button type="button" @click="addLanguage()" class="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-xs font-semibold transition">
+                  <i class="fa-solid fa-plus mr-1"></i> Add
+                </button>
+              </div>
+
+              <div class="space-y-2">
+                <template x-for="(lang, idx) in settingsData.languages" :key="lang.code">
+                  <div class="flex items-center justify-between p-3 rounded-xl border transition" :class="lang.enabled ? 'bg-slate-950 border-slate-700' : 'bg-slate-950/40 border-slate-800 opacity-50'">
+                    <div class="flex items-center space-x-3">
+                      <input type="checkbox" x-model="lang.enabled" class="rounded bg-slate-800 border-slate-700 text-purple-600 focus:ring-purple-500 w-4 h-4">
+                      <span class="font-semibold text-sm text-slate-200" x-text="lang.name"></span>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                      <button type="button" @click="moveLangUp(idx)" :disabled="idx === 0" class="p-1.5 text-slate-400 hover:text-white disabled:opacity-30">
+                        <i class="fa-solid fa-arrow-up text-xs"></i>
+                      </button>
+                      <button type="button" @click="moveLangDown(idx)" :disabled="idx === settingsData.languages.length - 1" class="p-1.5 text-slate-400 hover:text-white disabled:opacity-30">
+                        <i class="fa-solid fa-arrow-down text-xs"></i>
+                      </button>
+                      <button type="button" @click="removeLanguage(idx)" class="p-1.5 text-rose-400 hover:text-rose-300">
+                        <i class="fa-solid fa-trash-can text-xs"></i>
+                      </button>
+                    </div>
+                  </div>
+                </template>
+              </div>
+
+              <div class="pt-4 flex justify-end">
+                <button @click="saveLanguagesSettings()" class="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium shadow-lg shadow-purple-600/30 transition text-sm">
+                  Save Language Order
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- SUB-TAB 4: MEDIA FOLDERS -->
+          <div x-show="settingsTab === 'folders'">
+            <h3 class="text-lg font-bold text-white mb-1">Media Root Folders</h3>
+            <p class="text-xs text-slate-400 mb-6">Specify the paths inside the Babel container where your TV shows and Movies reside.</p>
+
+            <div class="space-y-5">
+              <div>
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">TV Series Path</label>
+                <input type="text" x-model="settingsData.folders.media_series_path" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                <span class="text-xs text-slate-500 mt-1 block">Default: <code>/tv</code> (or <code>/media/tv</code>)</span>
+              </div>
+
+              <div>
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">Movies Path</label>
+                <input type="text" x-model="settingsData.folders.media_movies_path" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                <span class="text-xs text-slate-500 mt-1 block">Default: <code>/movies</code> (or <code>/media/movies</code>)</span>
+              </div>
+              
+              <div class="pt-4 border-t border-slate-800">
+                <h4 class="text-sm font-bold text-white mb-1">Docker Path Mapping (Sonarr/Radarr Webhooks)</h4>
+                <p class="text-xs text-slate-400 mb-4">If Sonarr and Babel use different volume mounts, map the remote path to the local path.</p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label class="block text-xs font-medium text-slate-400 mb-1">Remote Path Prefix (e.g. /data/tv)</label>
+                    <input type="text" x-model="settingsData.folders.remote_path_prefix" placeholder="/data/tv/" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-slate-400 mb-1">Local Path Prefix (e.g. /tv)</label>
+                    <input type="text" x-model="settingsData.folders.local_path_prefix" placeholder="/tv/" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                  </div>
+                </div>
+              </div>
+
+              <div class="pt-4 flex justify-end">
+                <button @click="saveFoldersSettings()" class="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium shadow-lg shadow-purple-600/30 transition text-sm">
+                  Save Folder Paths
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- SUB-TAB 5: INTEGRATIONS (SMART MODE SWITCH) -->
+          <div x-show="settingsTab === 'integrations'">
+            <h3 class="text-lg font-bold text-white mb-1">Integrations & Pipeline Mode</h3>
+            <p class="text-xs text-slate-400 mb-6">Choose how Babel handles subtitles: Hybrid Mode with Bazarr, or Pure AI Direct.</p>
+
+            <div class="space-y-6">
+              
+              <!-- SMART PIPELINE MODE CARDS -->
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <!-- Mode 1: Hybrid Mode -->
+                <div @click="selectHybridMode()" class="p-5 rounded-2xl border cursor-pointer transition relative overflow-hidden" :class="settingsData.integrations.enable_bazarr_check ? 'bg-purple-950/30 border-purple-500 ring-1 ring-purple-500' : 'bg-slate-950 border-slate-800 hover:border-slate-700'">
+                  <div class="flex items-center justify-between mb-3">
+                    <div class="flex items-center space-x-3">
+                      <div class="w-10 h-10 rounded-xl bg-purple-900/40 border border-purple-700/50 text-purple-400 flex items-center justify-center">
+                        <i class="fa-solid fa-code-fork text-lg"></i>
+                      </div>
+                      <div>
+                        <h4 class="font-bold text-sm text-white">Hybrid Mode</h4>
+                        <span class="text-[10px] text-purple-300 font-mono">Bazarr Search Delay + AI Fallback</span>
+                      </div>
+                    </div>
+                    <div class="w-5 h-5 rounded-full border flex items-center justify-center" :class="settingsData.integrations.enable_bazarr_check ? 'border-purple-500 bg-purple-600' : 'border-slate-700 bg-slate-900'">
+                      <i class="fa-solid fa-check text-[10px] text-white" x-show="settingsData.integrations.enable_bazarr_check"></i>
+                    </div>
+                  </div>
+                  <p class="text-xs text-slate-400 leading-relaxed">
+                    Waits for Bazarr to search human subtitles first. If no subtitle is found within the grace period, Babel AI translates.
+                  </p>
+                </div>
+
+                <!-- Mode 2: Pure AI Mode -->
+                <div @click="selectPureAIMode()" class="p-5 rounded-2xl border cursor-pointer transition relative overflow-hidden" :class="!settingsData.integrations.enable_bazarr_check ? 'bg-emerald-950/30 border-emerald-500 ring-1 ring-emerald-500' : 'bg-slate-950 border-slate-800 hover:border-slate-700'">
+                  <div class="flex items-center justify-between mb-3">
+                    <div class="flex items-center space-x-3">
+                      <div class="w-10 h-10 rounded-xl bg-emerald-900/40 border border-emerald-700/50 text-emerald-400 flex items-center justify-center">
+                        <i class="fa-solid fa-wand-magic-sparkles text-lg"></i>
+                      </div>
+                      <div>
+                        <h4 class="font-bold text-sm text-white">Pure AI Mode</h4>
+                        <span class="text-[10px] text-emerald-300 font-mono">Instant 0s Delay / AI First</span>
+                      </div>
+                    </div>
+                    <div class="w-5 h-5 rounded-full border flex items-center justify-center" :class="!settingsData.integrations.enable_bazarr_check ? 'border-emerald-500 bg-emerald-600' : 'border-slate-700 bg-slate-900'">
+                      <i class="fa-solid fa-check text-[10px] text-white" x-show="!settingsData.integrations.enable_bazarr_check"></i>
+                    </div>
+                  </div>
+                  <p class="text-xs text-slate-400 leading-relaxed">
+                    Babel extracts embedded tracks and translates immediately. Runs completely standalone (no external dependencies).
+                  </p>
+                </div>
+              </div>
+
+              <!-- HYBRID MODE DETAILS (Shown when Hybrid is Selected) -->
+              <div class="p-5 bg-slate-950 rounded-2xl border border-slate-800 space-y-4" x-show="settingsData.integrations.enable_bazarr_check">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center space-x-2 text-sm font-bold text-white">
+                    <i class="fa-solid fa-server text-purple-400"></i>
+                    <span>Bazarr Integration Parameters</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs font-mono" :class="settingsData.integrations.bazarr_container_status && settingsData.integrations.bazarr_container_status.running ? 'text-emerald-400' : 'text-slate-500'" x-text="settingsData.integrations.bazarr_container_status && settingsData.integrations.bazarr_container_status.running ? '● Container Running' : '○ Container Stopped'"></span>
+                  </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-[11px] font-medium text-slate-400 mb-1">Bazarr Host URL</label>
+                    <input type="text" x-model="settingsData.integrations.bazarr_url" placeholder="http://bazarr:6767" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs">
+                  </div>
+                  <div>
+                    <label class="block text-[11px] font-medium text-slate-400 mb-1">Bazarr API Key (Optional)</label>
+                    <input type="password" x-model="settingsData.integrations.bazarr_api_key" placeholder="API Key" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs">
+                  </div>
+                </div>
+
+                <!-- Grace Delay Slider -->
+                <div>
+                  <div class="flex items-center justify-between mb-1">
+                    <label class="text-[11px] font-medium text-slate-400">Bazarr Search Grace Delay</label>
+                    <span class="font-mono text-purple-400 font-bold text-xs" x-text="settingsData.integrations.wait_time_seconds + ' seconds'"></span>
+                  </div>
+                  <input type="range" x-model.number="settingsData.integrations.wait_time_seconds" min="5" max="60" step="5" class="w-full accent-purple-500 bg-slate-800 rounded-lg h-2 cursor-pointer">
+                  <span class="text-[10px] text-slate-500 block mt-1">Seconds Babel gives Bazarr to fetch human subtitles before AI translates.</span>
+                </div>
+
+                <div class="flex justify-end pt-1">
+                  <button type="button" @click="testBazarrConnection()" :disabled="testingBazarr" class="text-xs text-purple-400 hover:text-purple-300 transition flex items-center gap-1">
+                    <i class="fa-solid fa-plug"></i> Test Connection
+                  </button>
+                </div>
+                <div x-show="bazarrTestResult" class="text-xs font-medium" :class="bazarrTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="bazarrTestResult"></div>
+              </div>
+
+              <!-- JELLYFIN INTEGRATION CARD -->
+              <div class="p-5 bg-slate-950 rounded-2xl border border-slate-800 space-y-4">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-xl bg-indigo-900/30 border border-indigo-700/50 text-indigo-400 flex items-center justify-center">
+                      <i class="fa-solid fa-tv text-lg"></i>
+                    </div>
+                    <div>
+                      <h4 class="font-bold text-sm text-white">Jellyfin Media Server</h4>
+                      <p class="text-xs text-slate-400">Instantly notify Jellyfin when a new subtitle is ready</p>
+                    </div>
+                  </div>
+                  <input type="checkbox" x-model="settingsData.integrations.notify_jellyfin" class="rounded bg-slate-800 border-slate-700 text-purple-600 focus:ring-purple-500 w-5 h-5">
+                </div>
+
+                <div class="grid grid-cols-2 gap-3" x-show="settingsData.integrations.notify_jellyfin">
+                  <div>
+                    <label class="block text-xs font-medium text-slate-400 mb-1">Jellyfin Server URL</label>
+                    <input type="text" x-model="settingsData.integrations.jellyfin_url" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs">
+                  </div>
+                  <div>
+                    <label class="block text-xs font-medium text-slate-400 mb-1">Jellyfin API Token</label>
+                    <input type="password" x-model="settingsData.integrations.jellyfin_api_key" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs">
+                  </div>
+                </div>
+              </div>
+
+              <div class="pt-2 flex justify-end">
+                <button @click="saveIntegrationsSettings()" class="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium shadow-lg shadow-purple-600/30 transition text-sm">
+                  Save Pipeline Settings
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- SUB-TAB 6: WEBHOOKS & ARRS -->
+          <div x-show="settingsTab === 'webhooks'">
+            <h3 class="text-lg font-bold text-white mb-1">Webhooks & Arr Automation</h3>
+            <p class="text-xs text-slate-400 mb-6">Sniper-Webhook URLs to trigger Babel automatically when Sonarr or Radarr finishes a download.</p>
+
+            <div class="space-y-4">
+              <!-- Sonarr Webhook -->
+              <div class="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
+                <div class="flex items-center justify-between">
+                  <span class="text-sm font-semibold text-white flex items-center gap-2">
+                    <i class="fa-solid fa-tv text-purple-400"></i> Sonarr Webhook Endpoint
+                  </span>
+                  <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-purple-950 text-purple-300 border border-purple-800">POST</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <input type="text" readonly :value="getWebhookUrl('sonarr')" class="flex-1 px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-purple-300 select-all">
+                  <button type="button" @click="copyWebhook('sonarr')" class="px-3.5 py-2 bg-slate-800 hover:bg-purple-600 text-slate-200 hover:text-white rounded-lg text-xs font-semibold transition flex items-center gap-1.5 border border-slate-700">
+                    <i class="fa-solid" :class="copiedWebhook === 'sonarr' ? 'fa-check text-emerald-400' : 'fa-copy'"></i>
+                    <span x-text="copiedWebhook === 'sonarr' ? 'Copied' : 'Copy'"></span>
+                  </button>
+                </div>
+                <div class="text-[11px] text-slate-400">
+                  Inside Docker network you can also use: <code class="text-purple-300 font-mono">http://dev-babel:8765/webhook/sonarr</code>
+                </div>
+              </div>
+
+              <!-- Radarr Webhook -->
+              <div class="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
+                <div class="flex items-center justify-between">
+                  <span class="text-sm font-semibold text-white flex items-center gap-2">
+                    <i class="fa-solid fa-film text-indigo-400"></i> Radarr Webhook Endpoint
+                  </span>
+                  <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800">POST</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <input type="text" readonly :value="getWebhookUrl('radarr')" class="flex-1 px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-indigo-300 select-all">
+                  <button type="button" @click="copyWebhook('radarr')" class="px-3.5 py-2 bg-slate-800 hover:bg-purple-600 text-slate-200 hover:text-white rounded-lg text-xs font-semibold transition flex items-center gap-1.5 border border-slate-700">
+                    <i class="fa-solid" :class="copiedWebhook === 'radarr' ? 'fa-check text-emerald-400' : 'fa-copy'"></i>
+                    <span x-text="copiedWebhook === 'radarr' ? 'Copied' : 'Copy'"></span>
+                  </button>
+                </div>
+                <div class="text-[11px] text-slate-400">
+                  Inside Docker network you can also use: <code class="text-indigo-300 font-mono">http://dev-babel:8765/webhook/radarr</code>
+                </div>
+              </div>
+
+              <div class="bg-slate-900/40 border border-slate-800/80 rounded-xl p-4 text-xs text-slate-300 space-y-1.5">
+                <div class="font-bold text-white mb-1">How to set up in Sonarr / Radarr:</div>
+                <div>1. Go to <strong>Settings</strong> &rarr; <strong>Connect</strong> &rarr; click <strong>+</strong> &rarr; select <strong>Webhook</strong>.</div>
+                <div>2. Name: <strong>Babel</strong>.</div>
+                <div>3. Check triggers: <strong>On Download</strong> and <strong>On Upgrade</strong>.</div>
+                <div>4. URL: Paste the copied endpoint above (e.g. <code>http://dev-babel:8765/webhook/sonarr</code> or <code>http://10.0.0.75:18765/webhook/sonarr</code>).</div>
+                <div>5. Method: <strong>POST</strong> &rarr; Click <strong>Test</strong> (will show green checkmark) &rarr; <strong>Save</strong>.</div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- TOAST NOTIFICATION -->
+    <div x-show="toastMessage" 
+         x-transition:enter="transition ease-out duration-300"
+         x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+         x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100"
+         x-transition:leave="transition ease-in duration-200"
+         x-transition:leave-start="opacity-100 translate-y-0 sm:scale-100"
+         x-transition:leave-end="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+         class="fixed bottom-5 right-5 z-50 flex items-center p-4 rounded-xl shadow-2xl border"
+         :class="toastType === 'error' ? 'bg-rose-950/90 border-rose-800 text-rose-200' : 'bg-emerald-950/90 border-emerald-800 text-emerald-200'"
+         x-cloak>
+      <i class="fa-solid mr-3" :class="toastType === 'error' ? 'fa-circle-exclamation text-rose-400' : 'fa-circle-check text-emerald-400'"></i>
+      <span class="text-sm font-medium" x-text="toastMessage"></span>
+    </div>
+
+    <!-- ENHANCED JOB DETAILS MODAL -->
+    <div x-show="modalOpen" x-cloak class="fixed inset-0 z-50 overflow-y-auto flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+      <div @click.outside="modalOpen = false" class="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-3xl overflow-hidden shadow-2xl">
+        <div class="p-6 border-b border-slate-800 flex items-center justify-between">
+          <div class="flex items-center space-x-3">
+            <div class="w-9 h-9 rounded-xl bg-purple-600/20 border border-purple-500/30 text-purple-400 flex items-center justify-center">
+              <i class="fa-solid fa-terminal text-sm"></i>
+            </div>
+            <div>
+              <h3 class="font-bold text-lg text-white" x-text="selectedJob.title || selectedJob.video_path"></h3>
+              <p class="text-xs text-slate-500 font-mono" x-text="selectedJob.video_path"></p>
+            </div>
+          </div>
+          <button @click="modalOpen = false" class="text-slate-400 hover:text-white p-2">
+            <i class="fa-solid fa-xmark text-lg"></i>
+          </button>
+        </div>
+
+        <div class="p-6 space-y-5">
+          <!-- Key Metrics Grid -->
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <div class="bg-slate-950 p-3 rounded-xl border border-slate-800">
+              <span class="text-slate-500 block mb-1">Status</span>
+              <span class="font-bold text-sm" :class="selectedJob.status === 'TRANSLATED' ? 'text-emerald-400' : (selectedJob.status === 'REPAIRED' ? 'text-purple-400' : 'text-slate-300')" x-text="selectedJob.status"></span>
+            </div>
+            <div class="bg-slate-950 p-3 rounded-xl border border-slate-800">
+              <span class="text-slate-500 block mb-1">Duration</span>
+              <span class="font-bold text-sm text-amber-400" x-text="(selectedJob.duration_seconds || 0) + 's'"></span>
+            </div>
+            <div class="bg-slate-950 p-3 rounded-xl border border-slate-800">
+              <span class="text-slate-500 block mb-1">Lines Processed</span>
+              <div class="flex items-baseline gap-1">
+                <span class="font-bold text-sm text-slate-100" x-text="selectedJob.total_lines || 0"></span>
+                <span class="text-[10px] text-slate-500" x-show="selectedJob.cleaned_sdh_lines > 0" x-text="'(' + selectedJob.cleaned_sdh_lines + ' sdh)'"></span>
+              </div>
+            </div>
+            <div class="bg-slate-950 p-3 rounded-xl border border-slate-800">
+              <span class="text-slate-500 block mb-1">Sync Drift & Dropped</span>
+              <div class="space-y-0.5">
+                <div class="font-mono text-xs font-semibold flex items-center gap-1.5" :class="selectedJob.sync_diff_ms === 0 ? 'text-emerald-400' : 'text-amber-400'">
+                  <i class="fa-solid fa-check text-emerald-400" x-show="selectedJob.sync_diff_ms === 0"></i>
+                  <i class="fa-solid fa-triangle-exclamation text-amber-400" x-show="selectedJob.sync_diff_ms > 0"></i>
+                  <span x-text="(selectedJob.sync_diff_ms || 0) + 'ms diff'"></span>
+                </div>
+                <div class="font-mono text-[11px] flex items-center gap-1.5" :class="selectedJob.dropped_lines === 0 ? 'text-emerald-400' : 'text-rose-400'">
+                  <i class="fa-solid fa-check text-emerald-400" x-show="selectedJob.dropped_lines === 0"></i>
+                  <i class="fa-solid fa-triangle-exclamation text-rose-400" x-show="selectedJob.dropped_lines > 0"></i>
+                  <span x-text="(selectedJob.dropped_lines || 0) + ' dropped'"></span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Step-by-Step Terminal Log -->
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-400">Step-by-Step Execution Log</h4>
+              <span class="text-[11px] text-purple-400 font-mono px-2 py-0.5 bg-purple-950/60 border border-purple-800/40 rounded-lg flex items-center gap-1.5">
+                <i class="fa-solid fa-microchip text-[10px]"></i>
+                <span x-text="selectedJob.ai_model || 'AI Engine'"></span>
+              </span>
+            </div>
+            <div class="bg-slate-950 rounded-xl p-4 font-mono text-xs text-slate-300 max-h-64 overflow-y-auto space-y-1.5 border border-slate-800 shadow-inner">
+              <template x-if="!selectedJob.logs || selectedJob.logs.length === 0">
+                <div class="text-slate-600">No detailed logs recorded for this job.</div>
+              </template>
+              <template x-for="line in selectedJob.logs" :key="line">
+                <div class="flex items-start gap-2">
+                  <span class="text-purple-400">›</span>
+                  <span x-text="line"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+
+        <div class="p-4 bg-slate-950/50 border-t border-slate-800 flex justify-end">
+          <button @click="modalOpen = false" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-medium text-white transition">
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- CONFIRMATION MODAL -->
+    <div x-show="confirmModalOpen" x-cloak class="fixed inset-0 z-[60] overflow-y-auto flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+      <div @click.outside="confirmModalOpen = false" class="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl relative">
+        <div class="p-6 border-b border-slate-800/50">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-full bg-purple-900/30 text-purple-400 flex items-center justify-center border border-purple-800/50">
+              <i class="fa-solid fa-circle-question"></i>
+            </div>
+            <h3 class="text-lg font-bold text-white" x-text="confirmTitle"></h3>
+          </div>
+        </div>
+        <div class="p-6">
+          <p class="text-sm text-slate-300 whitespace-pre-line leading-relaxed" x-text="confirmMessage"></p>
+        </div>
+        <div class="p-4 bg-slate-950/50 border-t border-slate-800 flex justify-end gap-3">
+          <button @click="confirmModalOpen = false" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-sm font-medium text-slate-300 transition">
+            Cancel
+          </button>
+          <button @click="executeConfirm()" class="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded-xl text-sm font-medium text-white shadow-lg shadow-purple-900/20 transition">
+            Confirm
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    function babelApp() {
+      return {
+        currentTab: 'dashboard',
+        settingsTab: 'ai',
+        mediaCategory: 'series',
+        stats: {},
+        jobs: [],
+        mediaData: { series: [], movies: [] },
+        modalOpen: false,
+        selectedJob: {},
+        confirmModalOpen: false,
+        confirmTitle: '',
+        confirmMessage: '',
+        confirmAction: null,
+        scanningFolders: false,
+        testingAI: false,
+        aiTestResult: '',
+        aiTestSuccess: false,
+        geminiDropdownOpen: false,
+        openaiDropdownOpen: false,
+        testingBazarr: false,
+        bazarrTestResult: '',
+        bazarrTestSuccess: false,
+        copiedWebhook: null,
+        newLangSelection: '',
+        toastMessage: '',
+        toastType: 'success',
+        toastTimeout: null,
+        availableLanguages: [
+          {name: 'Swedish', code: 'sv'},
+          {name: 'Norwegian', code: 'no'},
+          {name: 'Danish', code: 'da'},
+          {name: 'Finnish', code: 'fi'},
+          {name: 'German', code: 'de'},
+          {name: 'Spanish', code: 'es'},
+          {name: 'French', code: 'fr'},
+          {name: 'Italian', code: 'it'},
+          {name: 'Dutch', code: 'nl'},
+          {name: 'Polish', code: 'pl'},
+          {name: 'Portuguese', code: 'pt'},
+          {name: 'Japanese', code: 'ja'},
+          {name: 'Korean', code: 'ko'},
+          {name: 'English', code: 'en'},
+          {name: 'Arabic', code: 'ar'},
+          {name: 'Chinese', code: 'zh'},
+          {name: 'Russian', code: 'ru'},
+          {name: 'Hindi', code: 'hi'},
+          {name: 'Turkish', code: 'tr'},
+          {name: 'Greek', code: 'el'},
+          {name: 'Hebrew', code: 'he'},
+          {name: 'Thai', code: 'th'},
+          {name: 'Vietnamese', code: 'vi'},
+          {name: 'Indonesian', code: 'id'}
+        ],
+        settingsData: {
+          ai: {
+            gemini_api_key: '',
+            gemini_model: 'gemini-3.5-flash-lite',
+            batch_size: 50,
+            max_concurrency: 4,
+            glossary: ''
+          },
+          modules: {
+            clean_sdh: true,
+            extract_target_embedded: true,
+            extract_source_embedded: true,
+            auto_repair_unhealthy: true,
+            strict_sync_lock: true,
+            original_language_guard: true
+          },
+          languages: [
+            {name: 'Swedish', code: 'sv', enabled: true}
+          ],
+          folders: {
+            media_series_path: '/tv',
+            media_movies_path: '/movies',
+            remote_path_prefix: '',
+            local_path_prefix: ''
+          },
+          integrations: {
+            enable_bazarr_check: true,
+            bazarr_url: 'http://dev-bazarr:6767',
+            bazarr_api_key: '',
+            bazarr_container_name: 'bazarr',
+            bazarr_container_status: { running: true },
+            wait_time_seconds: 15,
+            notify_jellyfin: true,
+            jellyfin_url: 'http://dev-jellyfin:8096',
+            jellyfin_api_key: 'devtestkey1234567890abcdef'
+          }
+        },
+        pollTimer: null,
+
+        async init() {
+          await this.loadStats();
+          await this.loadJobs();
+          await this.loadAllSettings();
+          await this.loadMediaFiles();
+
+          this.pollTimer = setInterval(() => {
+            if (this.currentTab === 'dashboard') {
+              this.loadStats();
+              this.loadJobs();
+            }
+          }, 3000);
+        },
+
+        showToast(msg, type = 'success') {
+          this.toastMessage = msg;
+          this.toastType = type;
+          if (this.toastTimeout) clearTimeout(this.toastTimeout);
+          this.toastTimeout = setTimeout(() => {
+            this.toastMessage = '';
+          }, 3000);
+        },
+
+        showConfirm(title, message, actionCallback) {
+          this.confirmTitle = title;
+          this.confirmMessage = message;
+          this.confirmAction = actionCallback;
+          this.confirmModalOpen = true;
+        },
+
+        executeConfirm() {
+          if (this.confirmAction) this.confirmAction();
+          this.confirmModalOpen = false;
+        },
+
+        getWebhookUrl(type) {
+          const host = window.location.host || 'localhost:8765';
+          const proto = window.location.protocol || 'http:';
+          return `${proto}//${host}/webhook/${type}`;
+        },
+
+        copyWebhook(type) {
+          const url = this.getWebhookUrl(type);
+          if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(url);
+          } else {
+            const temp = document.createElement("input");
+            temp.value = url;
+            document.body.appendChild(temp);
+            temp.select();
+            document.execCommand("copy");
+            document.body.removeChild(temp);
+          }
+          this.copiedWebhook = type;
+          setTimeout(() => {
+            this.copiedWebhook = null;
+          }, 2000);
+        },
+
+        selectHybridMode() {
+          this.settingsData.integrations.enable_bazarr_check = true;
+          if (!this.settingsData.integrations.wait_time_seconds || this.settingsData.integrations.wait_time_seconds <= 0) {
+            this.settingsData.integrations.wait_time_seconds = 15;
+          }
+        },
+
+        selectPureAIMode() {
+          this.settingsData.integrations.enable_bazarr_check = false;
+          this.settingsData.integrations.wait_time_seconds = 0;
+        },
+
+        refreshingActivity: false,
+
+        async manualRefreshActivity() {
+          this.refreshingActivity = true;
+          try {
+            await Promise.all([this.loadJobs(), this.loadStats()]);
+          } finally {
+            setTimeout(() => { this.refreshingActivity = false; }, 400);
+          }
+        },
+
+        async loadStats() {
+          try {
+            const res = await fetch('/api/stats');
+            this.stats = await res.json();
+          } catch(e) {}
+        },
+
+        async loadJobs() {
+          try {
+            const res = await fetch('/api/jobs');
+            this.jobs = await res.json();
+          } catch(e) {}
+        },
+
+        openJobModal(job) {
+          this.selectedJob = job;
+          this.modalOpen = true;
+        },
+
+        async deleteJob(id) {
+          try {
+            await fetch('/api/jobs/' + id, { method: 'DELETE' });
+            await this.loadJobs();
+            await this.loadStats();
+          } catch(e) {}
+        },
+
+        async clearAllJobs() {
+          this.showConfirm('Clear History', 'Are you sure you want to clear all activity feed history?', async () => {
+            try {
+              await fetch('/api/jobs', { method: 'DELETE' });
+              await this.loadJobs();
+              await this.loadStats();
+            } catch(e) {}
+          });
+        },
+
+        async deleteSubtitles(file) {
+          this.showConfirm('Delete Subtitles', 'Delete all external .srt subtitles for "' + file.filename + '"?', async () => {
+            try {
+              await fetch('/api/subtitles', {
+                method: 'DELETE',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({video_path: file.path})
+              });
+              await this.loadMediaFiles();
+              await this.loadJobs();
+              await this.loadStats();
+            } catch(e) {
+              this.showToast('Error deleting subtitles: ' + e, 'error');
+            }
+          });
+        },
+
+        async loadAllSettings() {
+          try {
+            const res = await fetch('/api/settings/all');
+            this.settingsData = await res.json();
+            if (this.settingsData.integrations.enable_bazarr_check && (!this.settingsData.integrations.wait_time_seconds || this.settingsData.integrations.wait_time_seconds <= 0)) {
+              this.settingsData.integrations.wait_time_seconds = 15;
+            }
+          } catch(e) {}
+        },
+
+        async testAIConnection() {
+          this.testingAI = true;
+          this.aiTestResult = '';
+          const prov = this.settingsData.ai.ai_provider || 'gemini';
+          let apiKey = '';
+          let model = '';
+          let url = '';
+
+          if (prov === 'gemini') {
+            apiKey = this.settingsData.ai.gemini_api_key;
+            model = this.settingsData.ai.gemini_model;
+          } else if (prov === 'openai') {
+            apiKey = this.settingsData.ai.openai_api_key;
+            model = this.settingsData.ai.openai_model;
+          } else if (prov === 'deepl') {
+            apiKey = this.settingsData.ai.deepl_api_key;
+          } else if (prov === 'ollama') {
+            url = this.settingsData.ai.ollama_url;
+            model = this.settingsData.ai.ollama_model;
+          }
+
+          const payload = {
+            provider: prov,
+            api_key: apiKey,
+            model: model,
+            url: url
+          };
+          try {
+            const res = await fetch('/api/settings/test-ai', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            if (res.ok) {
+              this.aiTestSuccess = true;
+              this.aiTestResult = 'Connected: ' + (data.response || 'Success');
+            } else {
+              this.aiTestSuccess = false;
+              this.aiTestResult = 'Connection failed: ' + (data.detail || 'Error');
+            }
+          } catch(e) {
+            this.aiTestSuccess = false;
+            this.aiTestResult = 'Connection failed: ' + e;
+          } finally {
+            this.testingAI = false;
+          }
+        },
+
+        async testBazarrConnection() {
+          this.testingBazarr = true;
+          this.bazarrTestResult = '';
+          try {
+            const res = await fetch('/api/settings/test-bazarr', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({
+                bazarr_url: this.settingsData.integrations.bazarr_url,
+                bazarr_api_key: this.settingsData.integrations.bazarr_api_key
+              })
+            });
+            const data = await res.json();
+            if (res.ok) {
+              this.bazarrTestSuccess = true;
+              this.bazarrTestResult = 'Connected';
+            } else {
+              this.bazarrTestSuccess = false;
+              this.bazarrTestResult = 'Connection failed';
+            }
+          } catch(e) {
+            this.bazarrTestSuccess = false;
+            this.bazarrTestResult = 'Connection failed';
+          } finally {
+            this.testingBazarr = false;
+          }
+        },
+
+        async saveAISettings() {
+          try {
+            await fetch('/api/settings/ai', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify(this.settingsData.ai)
+            });
+            this.showToast('AI Settings saved!');
+            await this.loadAllSettings();
+          } catch(e) {
+            this.showToast('Error: ' + e, 'error');
+          }
+        },
+
+        async saveModulesSettings() {
+          try {
+            await fetch('/api/settings/modules', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify(this.settingsData.modules)
+            });
+            this.showToast('Module Settings saved!');
+            await this.loadAllSettings();
+          } catch(e) {
+            this.showToast('Error: ' + e, 'error');
+          }
+        },
+
+        addLanguage() {
+          if (!this.newLangSelection) return;
+          const found = this.availableLanguages.find(l => l.code === this.newLangSelection);
+          if (found && !this.settingsData.languages.some(l => l.code === found.code)) {
+            this.settingsData.languages.push({name: found.name, code: found.code, enabled: true});
+          }
+          this.newLangSelection = '';
+        },
+
+        removeLanguage(idx) {
+          this.settingsData.languages.splice(idx, 1);
+        },
+
+        moveLangUp(idx) {
+          if (idx <= 0) return;
+          const temp = this.settingsData.languages[idx];
+          this.settingsData.languages[idx] = this.settingsData.languages[idx - 1];
+          this.settingsData.languages[idx - 1] = temp;
+        },
+
+        moveLangDown(idx) {
+          if (idx >= this.settingsData.languages.length - 1) return;
+          const temp = this.settingsData.languages[idx];
+          this.settingsData.languages[idx] = this.settingsData.languages[idx + 1];
+          this.settingsData.languages[idx + 1] = temp;
+        },
+
+        async saveLanguagesSettings() {
+          try {
+            await fetch('/api/settings/languages', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({languages: this.settingsData.languages})
+            });
+            this.showToast('Target Languages saved!');
+          } catch(e) {
+            this.showToast('Error: ' + e, 'error');
+          }
+        },
+
+        async saveFoldersSettings() {
+          try {
+            await fetch('/api/settings/folders', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify(this.settingsData.folders)
+            });
+            this.showToast('Folder paths saved!');
+            await this.loadMediaFiles();
+          } catch(e) {
+            this.showToast('Error: ' + e, 'error');
+          }
+        },
+
+        async saveIntegrationsSettings() {
+          try {
+            await fetch('/api/settings/integrations', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify(this.settingsData.integrations)
+            });
+            this.showToast('Settings saved!');
+            await this.loadAllSettings();
+          } catch(e) {
+            this.showToast('Error: ' + e, 'error');
+          }
+        },
+
+        async loadMediaFiles() {
+          this.scanningFolders = true;
+          try {
+            const res = await fetch('/api/media-files');
+            this.mediaData = await res.json();
+          } catch(e) {
+          } finally {
+            this.scanningFolders = false;
+          }
+        },
+
+        async triggerProcess(path, force = false) {
+          this.currentTab = 'dashboard';
+          try {
+            fetch('/webhook/process', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({video_path: path, force_retranslate: force})
+            }).then(() => {
+              this.loadJobs();
+              this.loadStats();
+            });
+            setTimeout(() => { this.loadJobs(); }, 300);
+          } catch(e) {
+            this.showToast('Error triggering process: ' + e, 'error');
+          }
+        },
+
+        getMissingCount() {
+          let count = 0;
+          if (this.mediaCategory === 'series' && this.mediaData.series) {
+            for (const show of this.mediaData.series) {
+              for (const ep of show.episodes) {
+                if (!ep.has_any_sub) count++;
+              }
+            }
+          } else if (this.mediaCategory === 'movies' && this.mediaData.movies) {
+            for (const m of this.mediaData.movies) {
+              if (!m.has_any_sub) count++;
+            }
+          }
+          return count;
+        },
+
+        getShowMissingCount(show) {
+          if (!show || !show.episodes) return 0;
+          return show.episodes.filter(ep => !ep.has_any_sub).length;
+        },
+
+        async translateAllMissing() {
+          const missing = [];
+          if (this.mediaCategory === 'series' && this.mediaData.series) {
+            for (const show of this.mediaData.series) {
+              for (const ep of show.episodes) {
+                if (!ep.has_any_sub) missing.push(ep.path);
+              }
+            }
+          } else if (this.mediaCategory === 'movies' && this.mediaData.movies) {
+            for (const m of this.mediaData.movies) {
+              if (!m.has_any_sub) missing.push(m.path);
+            }
+          }
+
+          if (missing.length === 0) return;
+          const countText = missing.length === 1 ? 'the missing file' : `all ${missing.length} missing files`;
+          this.showConfirm('Translate All Missing', `Are you sure you want to translate ${countText}?`, async () => {
+            this.currentTab = 'dashboard';
+            for (const path of missing) {
+              fetch('/webhook/process', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({video_path: path, force_retranslate: false})
+              });
+            }
+            setTimeout(() => {
+              this.loadJobs();
+              this.loadStats();
+            }, 400);
+          });
+        },
+
+        async translateShowMissing(show) {
+          if (!show || !show.episodes) return;
+          const missing = show.episodes.filter(ep => !ep.has_any_sub).map(ep => ep.path);
+          if (missing.length === 0) return;
+          
+          const countText = missing.length === 1 ? 'the missing episode' : `all ${missing.length} missing episodes`;
+          this.showConfirm('Translate Missing', `Are you sure you want to translate ${countText} of "${show.title}"?`, async () => {
+            this.currentTab = 'dashboard';
+            for (const path of missing) {
+              fetch('/webhook/process', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({video_path: path, force_retranslate: false})
+              });
+            }
+            setTimeout(() => {
+              this.loadJobs();
+              this.loadStats();
+            }, 400);
+          });
+        },
+
+        async forceRetranslateShow(show) {
+          if (!show || !show.episodes) return;
+          const all_eps = show.episodes.map(ep => ep.path);
+          if (all_eps.length === 0) return;
+          
+          const countText = all_eps.length === 1 ? 'the only episode' : `all ${all_eps.length} episodes`;
+          this.showConfirm('Retranslate All', `Are you sure you want to retranslate ${countText} of "${show.title}"?\n\nThis will permanently delete the current AI subtitles for this show and start a fresh translation (using your active Glossary rules).`, async () => {
+            this.currentTab = 'dashboard';
+            for (const path of all_eps) {
+              fetch('/webhook/process', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({video_path: path, force_retranslate: true})
+              });
+            }
+            setTimeout(() => {
+              this.loadJobs();
+              this.loadStats();
+            }, 400);
+          });
+        },
+
+        formatDate(isoStr) {
+          if (!isoStr) return '-';
+          const d = new Date(isoStr);
+          return d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
+        }
+      }
+    }
+  </script>
+</body>
+</html>

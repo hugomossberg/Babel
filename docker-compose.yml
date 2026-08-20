@@ -1,0 +1,30 @@
+services:
+  babel:
+    build: .
+    image: babel:latest
+    container_name: dev-babel
+    ports:
+      - "18765:8765"
+    volumes:
+      - /home/dev/babel/app:/app/app
+      - /home/dev/babel/data:/app/data
+      - /home/dev/dev-stack/media/tv:/tv
+      - /home/dev/dev-stack/media/movies:/movies
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - PORT=8765
+      - BABEL_DB_PATH=/app/data/babel.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8765/api/stats || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - default
+
+networks:
+  default:
+    name: dev-stack_default
+    external: true
