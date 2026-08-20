@@ -28,6 +28,8 @@ class AISettingsRequest(BaseModel):
     deepl_api_key: Optional[str] = ""
     ollama_url: Optional[str] = "http://localhost:11434"
     ollama_model: Optional[str] = "llama3"
+    escalation_provider: Optional[str] = "none"
+    escalation_model: Optional[str] = ""
     batch_size: int
     max_concurrency: int
     max_concurrent_jobs: Optional[int] = 1
@@ -201,6 +203,8 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "deepl_api_key": mask_key(get_setting("deepl_api_key", "")),
             "ollama_url": get_setting("ollama_url", "http://localhost:11434"),
             "ollama_model": get_setting("ollama_model", "llama3"),
+            "escalation_provider": get_setting("escalation_provider", "none"),
+            "escalation_model": get_setting("escalation_model", ""),
             "batch_size": int(get_setting("batch_size", "50")),
             "max_concurrency": int(get_setting("max_concurrency", "1")),
             "max_concurrent_jobs": int(get_setting("max_concurrent_jobs", "1")),
@@ -262,6 +266,10 @@ async def api_save_ai_settings(req: AISettingsRequest):
         set_setting("ollama_url", req.ollama_url.strip())
     if req.ollama_model:
         set_setting("ollama_model", req.ollama_model.strip())
+    if req.escalation_provider:
+        set_setting("escalation_provider", req.escalation_provider)
+    if req.escalation_model is not None:
+        set_setting("escalation_model", req.escalation_model.strip())
     set_setting("batch_size", str(req.batch_size))
     set_setting("max_concurrency", str(req.max_concurrency))
     if req.max_concurrent_jobs is not None:

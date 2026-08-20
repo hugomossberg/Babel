@@ -509,6 +509,31 @@
                 <div x-show="aiTestResult" class="mt-2 text-xs font-medium" :class="aiTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="aiTestResult"></div>
               </div>
 
+
+              <!-- Escalation Model -->
+              <div class="pt-4 border-t border-slate-700/50 mt-4 mb-4">
+                <h4 class="text-sm font-semibold text-white mb-3 flex items-center gap-2">
+                  <i class="fa-solid fa-arrow-trend-up text-orange-400"></i> Fallback Escalation Model
+                </h4>
+                <p class="text-xs text-slate-400 mb-4">
+                  Configure a stronger model (e.g., gemini-3.7-flash or gpt-4o) to handle stubborn lines if "Escalate to Pro Model" is enabled in Modules.
+                </p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div class="space-y-2">
+                    <label class="block text-sm font-medium text-slate-300">Provider</label>
+                    <select x-model="settingsData.ai.escalation_provider" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                      <option value="none">Disabled</option>
+                      <option value="gemini">Google Gemini</option>
+                      <option value="openai">OpenAI</option>
+                    </select>
+                  </div>
+                  <div class="space-y-2" x-show="settingsData.ai.escalation_provider !== 'none'">
+                    <label class="block text-sm font-medium text-slate-300">Model Name</label>
+                    <input type="text" x-model="settingsData.ai.escalation_model" placeholder="e.g. gemini-3.7-flash or gpt-4o" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                  </div>
+                </div>
+              </div>
+
               <!-- Speed & Batch Parameters -->
               <div class="grid grid-cols-3 gap-4">
                 <div>
@@ -1132,6 +1157,8 @@
           ai: {
             gemini_api_key: '',
             gemini_model: 'gemini-3.5-flash-lite',
+            escalation_provider: 'none',
+            escalation_model: '',
             batch_size: 50,
             max_concurrency: 4,
             glossary: ''
