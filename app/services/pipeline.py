@@ -674,9 +674,17 @@ class SubtitlePipeline:
                             qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
                             
                             # Escalation Stage: Contextual Single-Line Recovery
-                            if qa_result["untranslated_ids"]:
-                                append_job_log(job_id, f"Escalation Stage: {len(qa_result['untranslated_ids'])} lines still unresolved. Escalating to context-aware translation...")
-                                for idx in qa_result["untranslated_ids"]:
+                            real_unresolved = qa_result.get("real_untranslated_ids", [])
+                            if real_unresolved:
+                                esc_enabled = get_setting("escalate_to_pro", "false").lower() == "true"
+                                esc_prov = get_setting("escalation_provider", "none")
+                                esc_mod = get_setting("escalation_model", "")
+                                if esc_enabled and esc_prov != "none" and esc_mod:
+                                    esc_info = f"{esc_prov} / {esc_mod}"
+                                else:
+                                    esc_info = "Primary Model (Contextual Mode)"
+                                append_job_log(job_id, f"Escalation Stage: {len(real_unresolved)} lines still unresolved. Escalating using {esc_info}...")
+                                for idx in real_unresolved:
                                     prev_idx = max(0, idx - 1)
                                     next_idx = min(len(subs) - 1, idx + 1)
                                     prev_text = translated_subs[prev_idx].content if prev_idx != idx else ""
