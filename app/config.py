@@ -4,7 +4,7 @@ import os
 # All application logic should read from SQLite via get_setting().
 
 APP_NAME = "Babel"
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 PORT = int(os.getenv("PORT", "8765"))
 
 # Bug #39: Authentication config
