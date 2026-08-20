@@ -206,10 +206,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 )
             loop = asyncio.get_event_loop()
             resp = await loop.run_in_executor(None, do_gemini)
-            try:
-                return json.loads(resp.text)
-            except Exception:
-                return []
+            return validate_classifier_output(resp.text)
                 
         elif provider == "openai":
             import openai
@@ -231,12 +228,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             resp = await loop.run_in_executor(None, do_openai)
             try:
                 content = resp.choices[0].message.content
-                data = json.loads(content)
-                if isinstance(data, dict):
-                    # In case they wrapped it
-                    for k, v in data.items():
-                        if isinstance(v, list): return v
-                return data
+                return validate_classifier_output(content)
             except Exception:
                 return []
                 
@@ -251,7 +243,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     json={"model": model_name, "prompt": full_prompt, "format": "json", "stream": False}
                 )
                 try:
-                    return json.loads(resp.json()["response"])
+                    return validate_classifier_output(resp.json()["response"])
                 except Exception:
                     return []
         

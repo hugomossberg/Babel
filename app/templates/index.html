@@ -39,7 +39,7 @@
         </div>
         <div>
           <span class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400">Babel</span>
-          <span class="text-xs text-slate-400 ml-2 px-2 py-0.5 rounded bg-slate-800 border border-slate-700">v0.1.10</span>
+          <span class="text-xs text-slate-400 ml-2 px-2 py-0.5 rounded bg-slate-800 border border-slate-700">v0.1.11</span>
         </div>
       </div>
 
@@ -257,7 +257,7 @@
               <span>Translate All Missing (<span x-text="getMissingCount()"></span>)</span>
             </button>
 
-            <button @click="loadMediaFiles()" :disabled="scanningFolders" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 active:scale-95 rounded-xl text-sm font-medium transition flex items-center gap-2 shadow-lg shadow-black/20">
+            <button @click="loadMediaFiles(true)" :disabled="scanningFolders" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 active:scale-95 rounded-xl text-sm font-medium transition flex items-center gap-2 shadow-lg shadow-black/20">
               <i class="fa-solid fa-rotate" :class="scanningFolders ? 'fa-spin text-purple-400' : ''"></i>
               <span x-text="scanningFolders ? 'Scanning...' : 'Scan Folders'"></span>
             </button>
@@ -1558,7 +1558,8 @@
           }
         },
 
-        async loadMediaFiles() {
+        async loadMediaFiles(force = false) {
+          if (!force && (this.mediaData.series || this.mediaData.movies)) return;
           this.scanningFolders = true;
           try {
             const res = await fetch('/api/media-files');
