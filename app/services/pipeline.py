@@ -678,7 +678,17 @@ class SubtitlePipeline:
                                     action = r.get("action")
                                     if action == "keep":
                                         safe_ids.append(idx)
-                                        reason_str = r.get("reason", "no reason").replace("_", " ").title()
+                                        raw_reason = r.get("reason", "none").lower()
+                                        reason_map = {
+                                            "proper_noun": "Name / Proper Noun",
+                                            "brand": "Brand Name",
+                                            "acronym": "Acronym / Abbreviation",
+                                            "number": "Number",
+                                            "symbol": "Symbol / Punctuation",
+                                            "non_verbal": "Non-verbal Sound",
+                                            "none": "Unspecified Reason"
+                                        }
+                                        reason_str = reason_map.get(raw_reason, raw_reason.replace("_", " ").title())
                                         append_job_log(job_id, f"QA Recovery: Model kept line {idx} ({reason_str})")
                                     elif action == "translate" and "text" in r:
                                         if r["text"] != subs[idx].content:
