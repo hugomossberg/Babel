@@ -43,12 +43,16 @@ async def sonarr_webhook(request: Request, background_tasks: BackgroundTasks):
         series = payload.get("series", {})
         episodes = payload.get("episodes", [])
         
-        video_path = episode_file.get("path")
-        if not video_path and series:
+        video_path = None
+        if series and episode_file:
             series_path = series.get("path", "")
             rel_path = episode_file.get("relativePath", "")
             if series_path and rel_path:
                 video_path = f"{series_path}/{rel_path}"
+        
+        # Fallback to episode_file.path if relativePath wasn't available
+        if not video_path:
+            video_path = episode_file.get("path")
 
         title = None
         if series and episodes:
@@ -86,7 +90,15 @@ async def radarr_webhook(request: Request, background_tasks: BackgroundTasks):
     if event_type in ["Download", "Upgrade", "Rename"]:
         movie_file = payload.get("movieFile", {})
         movie = payload.get("movie", {})
-        video_path = movie_file.get("path") or movie.get("path")
+        video_path = None
+        if movie and movie_file:
+            folder_path = movie.get("folderPath") or movie.get("path", "")
+            rel_path = movie_file.get("relativePath", "")
+            if folder_path and rel_path:
+                video_path = f"{folder_path}/{rel_path}"
+                
+        if not video_path:
+            video_path = movie_file.get("path") or movie.get("path")
         
         title = None
         if movie:
