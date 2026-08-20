@@ -678,7 +678,8 @@ class SubtitlePipeline:
                                     action = r.get("action")
                                     if action == "keep":
                                         safe_ids.append(idx)
-                                        append_job_log(job_id, f"QA Recovery: Model kept line {idx} ({r.get('reason', 'no reason')})")
+                                        reason_str = r.get("reason", "no reason").replace("_", " ").title()
+                                        append_job_log(job_id, f"QA Recovery: Model kept line {idx} ({reason_str})")
                                     elif action == "translate" and "text" in r:
                                         if r["text"] != subs[idx].content:
                                             translated_subs[idx].content = r["text"]
