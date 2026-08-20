@@ -476,14 +476,20 @@ Return ONLY a JSON array with this exact structure:
                     break
                 except Exception as err:
                     retry_count += 1
-                    logger.warning(f"Batch {start_idx + 1}-{end_idx} retry {retry_count}/{max_retries}: {err}")
+                    err_str = str(err).lower()
+                    if "429" in err_str or "503" in err_str or "504" in err_str or "quota" in err_str or "overloaded" in err_str:
+                        backoff = [5, 15, 30][min(retry_count - 1, 2)]
+                    else:
+                        backoff = 2 * retry_count
+
+                    logger.warning(f"Batch {start_idx + 1}-{end_idx} retry {retry_count}/{max_retries} (Waiting {backoff}s): {err}")
                     if job_id:
-                        append_job_log(job_id, f"Notice: Retrying lines {start_idx + 1}-{end_idx} (Attempt {retry_count}/{max_retries})")
-                    await asyncio.sleep(1.5 * retry_count)
+                        append_job_log(job_id, f"Notice: Retrying lines {start_idx + 1}-{end_idx} in {backoff}s (Attempt {retry_count}/{max_retries})")
+                    await asyncio.sleep(backoff)
             else:
                 logger.error(f"Batch {start_idx} failed all retries.")
                 if job_id:
-                    append_job_log(job_id, f"Warning: Lines {start_idx + 1}-{end_idx} could not be translated. Keeping original text.")
+                    append_job_log(job_id, f"Warning: Lines {start_idx + 1}-{end_idx} could not be translated. Keeping original text. (QA Recovery will attempt to fix this later)")
 
         return translated_subs
 

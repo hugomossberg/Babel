@@ -132,20 +132,11 @@ def qa_gate(
     passed = (
         score >= 60 
         and dropped_count == 0 
-        and len(real_untranslated_ids) <= 3
+        and len(real_untranslated_ids) == 0
         and sync_valid
         and not wrong_language
     )
     
-    if len(real_untranslated_ids) > 0 and passed:
-        issues.append(f"Tolerated {len(real_untranslated_ids)} unresolved lines to avoid blocking release.")
-
-    if job_id:
-        if passed:
-            append_job_log(job_id, f"QA Gate PASSED (Score: {score}/100)")
-        else:
-            append_job_log(job_id, f"QA Gate FAILED (Score: {score}/100) — Issues: {'; '.join(issues)}")
-
     return {
         "passed": passed,
         "score": score,
@@ -630,7 +621,7 @@ class SubtitlePipeline:
 
                 # Attempt recovery for any untranslated lines
                 if qa_result["untranslated_ids"]:
-                    append_job_log(job_id, f"QA Recovery: Retrying {len(qa_result['untranslated_ids'])} untranslated lines...")
+                    append_job_log(job_id, f"Initial QA: RECOVERY_REQUIRED ({len(qa_result['untranslated_ids'])} candidates need review)")
                     recovery_payload = [
                         {"id": idx, "text": subs[idx].content}
                         for idx in qa_result["untranslated_ids"]
@@ -641,9 +632,15 @@ class SubtitlePipeline:
                             provider = get_setting("ai_provider", "gemini").lower()
                             caps = get_provider_capabilities(provider)
                             if caps["supports_identical_classification"]:
-                                recovery_results = await self.translator.classify_and_recover_identical(
-                                    recovery_payload, lang_name, title or ""
-                                )
+                                recovery_results = []
+                                chunk_size = 20
+                                for i in range(0, len(recovery_payload), chunk_size):
+                                    chunk = recovery_payload[i:i + chunk_size]
+                                    chunk_res = await self.translator.classify_and_recover_identical(
+                                        chunk, lang_name, title or ""
+                                    )
+                                    recovery_results.extend(chunk_res)
+                                
                                 for r in recovery_results:
                                     idx = r.get("id")
                                     if idx is None: continue
@@ -656,23 +653,32 @@ class SubtitlePipeline:
                                             translated_subs[idx].content = r["text"]
                             else:
                                 # Deterministic fallback for DeepL
-                                recovery_results = await self.translator.translate_batch(
-                                    recovery_payload,
-                                    target_language=lang_name,
-                                    show_title=title or ""
-                                )
+                                recovery_results = []
+                                chunk_size = 20
+                                for i in range(0, len(recovery_payload), chunk_size):
+                                    chunk = recovery_payload[i:i + chunk_size]
+                                    chunk_res = await self.translator.translate_batch(
+                                        chunk, target_language=lang_name, show_title=title or ""
+                                    )
+                                    recovery_results.extend(chunk_res)
+                                
                                 res_dict = {r["id"]: r["text"] for r in recovery_results if "id" in r and "text" in r}
                                 for idx, text in res_dict.items():
                                     if text != subs[idx].content:  # actually changed
                                         translated_subs[idx].content = text
-                                    else:
-                                        # Ambiguous identical from DeepL - don't mark as safe, let it count against tolerated threshold
-                                        pass
                             
                             # Re-run QA after recovery with safe_ids context
                             qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
                         except Exception as e:
                             append_job_log(job_id, f"QA Recovery failed: {e}")
+                
+                # Final QA Log
+                score = qa_result["score"]
+                if qa_result["passed"]:
+                    append_job_log(job_id, f"QA Gate PASSED (Score: {score}/100)")
+                else:
+                    issues_str = "; ".join(qa_result.get("issues", []))
+                    append_job_log(job_id, f"QA Gate FAILED (Score: {score}/100) — Issues: {issues_str}")
 
                 # Bug #7: Track both start and end diff
                 sync_report = verify_sync(subs, translated_subs)
