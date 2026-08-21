@@ -93,12 +93,12 @@ async def test_first_execution_success(mock_db_settings, tmp_path, monkeypatch):
     # We need to capture the prompt used in isolated attempt
     original_escalate = SubtitleTranslator.escalate_single_line
     
-    async def mock_escalate_single_line(self, target_idx, target_text, prev_text, next_text, target_language, show_title, is_real_untranslated=False, job_id=None):
+    async def mock_escalate_single_line(self, target_idx, target_text, prev_text, next_text, target_language, show_title, is_real_untranslated=False, job_id=None, **kwargs):
         call_counts["escalate"] += 1
         
         # In our mock, we let it use the real escalate_single_line to capture the prompts
         # but we mock the provider's generate content
-        return await original_escalate(self, target_idx, target_text, prev_text, next_text, target_language, show_title, is_real_untranslated, job_id)
+        return await original_escalate(self, target_idx, target_text, prev_text, next_text, target_language, show_title, is_real_untranslated, job_id, **kwargs)
 
     monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
     monkeypatch.setattr(pipeline.translator, "classify_and_recover_identical", mock_classify)

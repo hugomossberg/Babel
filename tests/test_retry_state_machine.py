@@ -33,9 +33,10 @@ async def test_provider_error_creates_waiting_state(setup_teardown_db):
     
     with patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=ProviderUnavailableError("API rate limit exceeded")):
         # Mock so it thinks it found English subs
-        with patch("app.services.pipeline.find_external_subtitle", return_value=video_path):
-            with patch("builtins.open", MagicMock(side_effect=lambda *args, **kwargs: MagicMock(__enter__=lambda *a: MagicMock(read=lambda: "1\n00:00:00,000 --> 00:00:01,000\nHello\n"), __exit__=lambda *a: None))):
-                result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
+        with patch("app.services.pipeline.find_external_subtitle", side_effect=lambda p, l: video_path if l == "en" else None):
+                with patch("builtins.open", MagicMock(side_effect=lambda *args, **kwargs: MagicMock(__enter__=lambda *a: MagicMock(read=lambda: "1\n00:00:00,000 --> 00:00:01,000\nHello\n"), __exit__=lambda *a: None))):
+                    result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
+                    print(f"RESULT: {result}")
         
     assert result["status"] == "waiting_provider"
     assert result["job_id"] == job_id

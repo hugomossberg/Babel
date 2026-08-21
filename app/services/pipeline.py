@@ -638,6 +638,15 @@ class SubtitlePipeline:
                         skipped_langs.append(lang_name)
                         continue
 
+                # Mid-job target race protection (Before Translation)
+                existing_before_trans = find_external_subtitle(video_path, lang_code)
+                if existing_before_trans:
+                    health = evaluate_subtitle_health(existing_before_trans, target_lang_code=lang_code)
+                    if health.get("status") == "GREEN":
+                        append_job_log(job_id, "Target appeared while job was running. Skipping AI translation.")
+                        successful_langs.append(lang_code)
+                        continue
+
                 append_job_log(job_id, f"Translating to {lang_name} ({lang_code}) using {active_engine_name} ({total_source_lines} lines)...")
 
                 t_main_start = time.time()
@@ -655,6 +664,8 @@ class SubtitlePipeline:
                 max_qa_loops = 3
                 qa_loop_count = 0
                 known_untranslated_ids = set()
+                exhausted_strategies = set()
+                recovered_cues = set()
 
                 while qa_loop_count < max_qa_loops:
                     qa_loop_count += 1
@@ -682,7 +693,6 @@ class SubtitlePipeline:
 
                     # Attempt recovery for any untranslated or dropped lines
                     if qa_result["untranslated_ids"] or qa_result.get("dropped_count", 0) > 0:
-                        job_recovered_count = 0
                         try:
                             # 1. Primary Recovery for Identical lines (English still present)
                             if qa_result["untranslated_ids"]:
@@ -734,7 +744,7 @@ class SubtitlePipeline:
                                                 elif r["text"] != subs[idx].content:
                                                     translated_subs[idx].content = r["text"]
                                                     append_job_log(job_id, f"QA Recovery: Translated line {idx}")
-                                                    job_recovered_count += 1
+                                                    recovered_cues.add(idx)
                                     else:
                                         # Deterministic fallback for DeepL
                                         recovery_results = []
@@ -750,12 +760,14 @@ class SubtitlePipeline:
                                                 append_job_log(job_id, f"QA Recovery chunk failed (DeepL): {e}")
                                                 continue
 
-                                        res_dict = {r["id"]: r["text"] for r in recovery_results if "id" in r and "text" in r and is_usable_translation(r["text"])}
-                                        for idx, text in res_dict.items():
-                                            if text != subs[idx].content:  # actually changed
+                                        for r in recovery_results:
+                                            idx = r.get("id")
+                                            if idx is None: continue
+                                            text = r.get("text", "")
+                                            if is_usable_translation(text) and text != subs[idx].content and text != translated_subs[idx].content:
                                                 translated_subs[idx].content = text
-                                                append_job_log(job_id, f"QA Recovery: Translated line {idx} (DeepL Fallback)")
-                                                job_recovered_count += 1
+                                                append_job_log(job_id, f"QA Recovery: Translated line {idx}")
+                                                recovered_cues.add(idx)
 
                             # Re-run QA after primary recovery with safe_ids context
                             qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
@@ -810,7 +822,6 @@ class SubtitlePipeline:
                                 append_job_log(job_id, f"Escalation Stage: {len(all_unresolved)} lines still unresolved. Escalating using {esc_info}...")
                                 esc_sem = asyncio.Semaphore(3)
                                 async def escalate_one(idx):
-                                    nonlocal job_recovered_count
                                     prev_idx = max(0, idx - 1)
                                     next_idx = min(len(subs) - 1, idx + 1)
                                     prev_text = translated_subs[prev_idx].content if prev_idx != idx else ""
@@ -821,7 +832,8 @@ class SubtitlePipeline:
                                             esc_text = await self.translator.escalate_single_line(
                                                 idx, target_text, prev_text, next_text, lang_name, title or "",
                                                 is_real_untranslated=(idx in real_unresolved),
-                                                job_id=job_id
+                                                job_id=job_id,
+                                                exhausted_strategies=exhausted_strategies
                                             )
                                             is_dropped = idx in dropped_unresolved
                                             if esc_text:
@@ -838,7 +850,7 @@ class SubtitlePipeline:
                                                 elif esc_text != translated_subs[idx].content:
                                                     translated_subs[idx].content = esc_text
                                                     append_job_log(job_id, f"Escalation: Translated line {idx} using dialogue context")
-                                                    job_recovered_count += 1
+                                                    recovered_cues.add(idx)
                                         except Exception as e:
                                             append_job_log(job_id, f"Escalation failed for line {idx}: {e}")
 
@@ -896,28 +908,36 @@ class SubtitlePipeline:
                     max_sync_diff = this_max_diff
 
                 if qa_result["passed"]:
-                    # Bug #16: Rename conflicting old subs instead of leaving duplicates
+                    # Target Race Protection (Before Publish)
                     existing = find_external_subtitle(video_path, lang_code)
+                    skip_publish = False
                     if existing and not force_retranslate:
-                        backup_path = existing + ".babel-replaced"
+                        health = evaluate_subtitle_health(existing, target_lang_code=lang_code)
+                        if health.get("status") == "GREEN":
+                            append_job_log(job_id, "External target appeared before publish. Babel output not published.")
+                            successful_langs.append(lang_code)
+                            skip_publish = True
+                        else:
+                            backup_path = existing + ".babel-replaced"
+                            try:
+                                os.rename(existing, backup_path)
+                                append_job_log(job_id, f"Renamed existing subtitle to {os.path.basename(backup_path)}")
+                            except Exception:
+                                pass
+
+                    if not skip_publish:
+                        temp_output = target_output_path + ".tmp"
+                        with open(temp_output, "w", encoding="utf-8") as f:
+                            f.write(subs_to_srt_string(translated_subs))
                         try:
-                            os.rename(existing, backup_path)
-                            append_job_log(job_id, f"Renamed existing subtitle to {os.path.basename(backup_path)}")
-                        except Exception:
-                            pass
+                            os.chmod(temp_output, 0o666)
+                        except Exception as e:
+                            logger.warning(f"Could not set permissions for {temp_output}: {e}")
 
-                    temp_output = target_output_path + ".tmp"
-                    with open(temp_output, "w", encoding="utf-8") as f:
-                        f.write(subs_to_srt_string(translated_subs))
-                    try:
-                        os.chmod(temp_output, 0o666)
-                    except Exception as e:
-                        logger.warning(f"Could not set permissions for {temp_output}: {e}")
-
-                    # Atomic replace to prevent partial reads by media server
-                    os.replace(temp_output, target_output_path)
-                    output_files.append(target_output_path)
-                    successful_langs.append(lang_code)
+                        # Atomic replace to prevent partial reads by media server
+                        os.replace(temp_output, target_output_path)
+                        output_files.append(target_output_path)
+                        successful_langs.append(lang_code)
 
                     # Clean up partial progress file since we successfully finished
                     from app.core.db import DB_PATH
@@ -929,25 +949,26 @@ class SubtitlePipeline:
                         except Exception:
                             pass
 
-                    # Save Translation Memory only after QA PASS
-                    if title:
-                        try:
-                            from app.core.db import save_translation_memory_bulk
-                            tm_items = []
-                            for idx in range(len(subs)):
-                                orig_t = subs[idx].content.strip()
-                                trans_t = translated_subs[idx].content.strip()
-                                if orig_t and trans_t and orig_t != "<i></i>" and trans_t != "<i></i>":
-                                    tm_items.append({"original": orig_t, "translated": trans_t})
-                            save_translation_memory_bulk(title, tm_items)
-                        except Exception as e:
-                            logger.error(f"Failed to save translation memory: {e}")
+                    if not skip_publish:
+                        # Save Translation Memory only after QA PASS and if we actually published
+                        if title:
+                            try:
+                                from app.core.db import save_translation_memory_bulk
+                                tm_items = []
+                                for idx in range(len(subs)):
+                                    orig_t = subs[idx].content.strip()
+                                    trans_t = translated_subs[idx].content.strip()
+                                    if orig_t and trans_t and orig_t != "<i></i>" and trans_t != "<i></i>":
+                                        tm_items.append({"original": orig_t, "translated": trans_t})
+                                save_translation_memory_bulk(title, tm_items)
+                            except Exception as e:
+                                logger.error(f"Failed to save translation memory: {e}")
 
                 # Build a detailed QA summary for the user
                 unresolved_count = len(qa_result.get("real_untranslated_ids", []))
                 identical_candidates = initial_candidates_count if 'initial_candidates_count' in locals() else 0
                 kept_count = len(safe_ids) if 'safe_ids' in locals() else 0
-                recovered_count = job_recovered_count if 'job_recovered_count' in locals() else 0
+                recovered_count = len(recovered_cues) if 'recovered_cues' in locals() else 0
 
                 if qa_result["passed"]:
                     summary_status = "PASS (Tolerated)" if unresolved_count > 0 else "PASS"

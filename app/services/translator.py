@@ -401,7 +401,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         return self._cached_openai_client
 
     @with_retry
-    async def escalate_single_line(self, target_idx: int, target_text: str, prev_text: str, next_text: str, target_language: str, show_title: str, is_real_untranslated: bool = False, job_id: Optional[int] = None) -> Optional[str]:
+    async def escalate_single_line(self, target_idx: int, target_text: str, prev_text: str, next_text: str, target_language: str, show_title: str, is_real_untranslated: bool = False, job_id: Optional[int] = None, exhausted_strategies: set = None) -> Optional[str]:
         import logging
         import unicodedata
         import re
@@ -429,6 +429,25 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         for i, attempt in enumerate(attempts):
             provider = attempt["provider"]
             attempt_type = attempt["type"]
+
+            model_name = ""
+            if provider == "gemini":
+                model_name = get_setting("gemini_model", "gemini-3.5-flash-lite")
+                if escalate_enabled and provider == esc_provider:
+                    esc_model = get_setting("escalation_model", "")
+                    if esc_model: model_name = esc_model
+            elif provider == "openai":
+                model_name = get_setting("openai_model", "gpt-4o-mini")
+                if escalate_enabled and provider == esc_provider:
+                    esc_model = get_setting("escalation_model", "")
+                    if esc_model: model_name = esc_model
+            elif provider == "deepl":
+                model_name = "deepl"
+
+            context_fingerprint = hash((prev_text, target_text, next_text, is_real_untranslated))
+            strategy_key = f"{target_idx}:{provider}:{model_name}:{attempt_type}:{context_fingerprint}"
+            if exhausted_strategies is not None and strategy_key in exhausted_strategies:
+                continue
 
             if attempt_type == "contextual":
                 if is_real_untranslated:
@@ -564,6 +583,10 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                                 from app.core.db import append_job_log
                                 append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: translated successfully")
                             return raw_res
+
+                if exhausted_strategies is not None:
+                    exhausted_strategies.add(strategy_key)
+
             except Exception as e:
                 logger.error(f"Escalation line {target_idx} API call failed: {e}")
                 raise ProviderUnavailableError(f"Escalation failed: {e}") from e
