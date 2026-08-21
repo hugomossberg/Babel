@@ -120,7 +120,7 @@ async def api_delete_subtitles(req: DeleteSubRequest):
         langs = json.loads(get_setting("languages", "[]"))
         target_codes = {l["code"] for l in langs if l.get("enabled", True)}
     except Exception:
-        target_codes = {"sv"}
+        target_codes = set()
     
     from app.core.languages import get_language
     delete_suffixes = set()
@@ -133,7 +133,7 @@ async def api_delete_subtitles(req: DeleteSubRequest):
     deleted_files = []
     if os.path.exists(parent_dir):
         for f in os.listdir(parent_dir):
-            if not f.startswith(base_name):
+            if not f.startswith(base_name + "."):
                 continue
             fname_lower = f.lower()
             # Only delete if it matches a target language suffix

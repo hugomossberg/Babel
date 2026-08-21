@@ -24,7 +24,7 @@ def with_retry(func):
                     if recoverable:
                         raise ProviderUnavailableError(f"Provider unavailable after {retries} retries: {str(e)}")
                     raise e
-                
+
                 wait_time = backoffs[attempt]
                 logger.warning(f"Transient provider error in {func.__name__} (Attempt {attempt+1}/{retries}): {e}. Waiting {wait_time}s...")
                 await asyncio.sleep(wait_time)
@@ -47,7 +47,7 @@ def get_system_instruction(target_language: str, glossary: str = "", show_title:
     glossary_section = ""
     if glossary and glossary.strip():
         glossary_section = "\n\nGLOSSARY - Always use these exact translations:\n" + glossary.strip() + "\n"
-    
+
     show_context = ""
     if show_title:
         show_context = f"\nYou are translating subtitles for: \"{show_title}\". Adapt tone and terminology accordingly.\n"
@@ -133,10 +133,10 @@ def validate_classifier_output(raw_text: str, items: list) -> list:
     import logging
     logger = logging.getLogger(__name__)
     logger.info(f"Classifier validation: received {len(items)} candidates. Raw type: {type(raw_text)}")
-    
+
     valid_results = []
     returned_ids = set()
-    
+
     clean_text = raw_text.strip()
     if clean_text.startswith("```"):
         lines = clean_text.split('\n')
@@ -146,7 +146,7 @@ def validate_classifier_output(raw_text: str, items: list) -> list:
 
     try:
         data = json.loads(clean_text)
-        
+
         # Handle dict or list root
         if isinstance(data, dict):
             results = data.get("results", [])
@@ -155,34 +155,34 @@ def validate_classifier_output(raw_text: str, items: list) -> list:
         else:
             results = []
             logger.warning(f"Classifier validation: Unexpected JSON root type {type(data)}")
-            
+
         logger.info(f"Classifier validation: parsed {len(results)} results from JSON")
-        
+
         expected_ids = {item["id"]: item["text"] for item in items}
         allowed_reasons = {"proper_noun", "brand", "acronym", "number", "symbol", "non_verbal"}
-        
+
         kept = 0
         translated = 0
         rejected = 0
-        
+
         for r in results:
             if not isinstance(r, dict):
                 logger.warning(f"Classifier validation: rejected result item of type {type(r)}")
                 rejected += 1
                 continue
-                
+
             rid = r.get("id")
             act = str(r.get("action", "")).lower()
-            if rid not in expected_ids: 
+            if rid not in expected_ids:
                 logger.warning(f"Classifier validation: rejected result for unknown ID {rid}")
                 rejected += 1
                 continue
-                
+
             original_text = expected_ids[rid]
-                
+
             if act == "keep":
                 reason = str(r.get("reason", "")).lower()
-                
+
                 # Sanity checks
                 is_valid_keep = True
                 if reason not in allowed_reasons:
@@ -196,26 +196,44 @@ def validate_classifier_output(raw_text: str, items: list) -> list:
                     # Deterministic plausibility validation (fail-closed)
                     import re
                     words = [w for w in re.split(r"[^a-zA-Z0-9]+", original_text) if w]
-                    
+
                     if len(words) > 4:
                         logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason={reason} but text is {len(words)} words)")
                         is_valid_keep = False
                     else:
                         minor_words = {"and", "of", "the", "in", "de", "la", "von", "van", "a", "an"}
                         for w in words:
-                            if w.lower() in minor_words: 
+                            if w.lower() in minor_words:
                                 continue
                             # If a word is not purely digits and has no uppercase letters, it's not a valid proper noun
                             if not any(c.isupper() for c in w) and not w.isdigit():
                                 logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason={reason} but word '{w}' is not capitalized)")
                                 is_valid_keep = False
                                 break
-                
+                elif reason == "non_verbal":
+                    import re
+                    has_bracket = bool(re.search(r"^[\[\(].*?[\]\)]$", original_text.strip()))
+                    has_music = bool(re.search(r"[♪♬]", original_text))
+                    words = [w for w in re.split(r"[^a-zA-Z0-9]+", original_text) if w and any(c.isalpha() for c in w)]
+                    is_purely_symbolic = len(words) == 0
+
+                    if not (has_bracket or has_music or is_purely_symbolic):
+                        logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason={reason} but lacks determinable format like brackets)")
+                        is_valid_keep = False
+                elif reason == "acronym":
+                    import re
+                    words = [w for w in re.split(r"[^a-zA-Z0-9]+", original_text) if w and any(c.isalpha() for c in w)]
+                    if not words:
+                        pass
+                    elif any(not any(c.isupper() for c in w) for w in words):
+                        logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason={reason} but words are not uppercase)")
+                        is_valid_keep = False
+
                 if not is_valid_keep:
-                    act = "translate" 
-                    
+                    act = "translate"
+
             if act == "keep": kept += 1
-            elif act == "translate": 
+            elif act == "translate":
                 translated += 1
                 # Enforce that translate text is actually provided and doesn't just echo source
                 # We do this by checking if the text matches original. If so, we clear it so fallback logic triggers.
@@ -227,20 +245,20 @@ def validate_classifier_output(raw_text: str, items: list) -> list:
                 logger.warning(f"Classifier validation: rejected result for ID {rid} due to invalid action {act}")
                 rejected += 1
                 continue
-                
+
             valid_results.append({"id": rid, "action": act, "reason": r.get("reason", ""), "text": r.get("text", "")})
             returned_ids.add(rid)
-            
+
         logger.info(f"Classifier validation: Validated {kept} KEEP, {translated} TRANSLATE, {rejected} REJECTED")
     except Exception as e:
         logger.error(f"Classifier validation: JSON parse failed: {e}")
-    
+
     # Failsafe: Any missing items must be translated
     for item in items:
         if item["id"] not in returned_ids:
             logger.info(f"Classifier validation: Failsafe triggered for ID {item['id']}, forcing TRANSLATE")
             valid_results.append({"id": item["id"], "action": "translate", "reason": "malformed_fallback", "text": item["text"]})
-            
+
     return valid_results
 
 class SubtitleTranslator:
@@ -249,7 +267,7 @@ class SubtitleTranslator:
         provider = get_setting("ai_provider", "gemini").lower()
         if provider == "deepl":
             return [] # fallback to translation
-            
+
         system_prompt = f"""You are a subtitle quality assurance AI for {target_language}.
 The following lines were identical in English and {target_language}.
 Decide for each line whether it should be KEPT identical (e.g. proper nouns, brands, numbers, untranslatable sounds) or TRANSLATED.
@@ -262,7 +280,7 @@ Return ONLY a JSON object with a single key 'results' containing an array of obj
 Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
 """
         prompt = f"Context: {show_title}\n\nLines:\n" + json.dumps(items, ensure_ascii=False)
-        
+
         schema = {
             "type": "OBJECT",
             "properties": {
@@ -290,7 +308,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             api_key = get_setting("gemini_api_key", "")
             model_name = get_setting("gemini_model", "gemini-3.5-flash-lite")
             client = genai.Client(api_key=api_key)
-            
+
             def do_gemini():
                 return client.models.generate_content(
                     model=model_name,
@@ -305,13 +323,13 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             loop = asyncio.get_event_loop()
             resp = await loop.run_in_executor(None, do_gemini)
             return validate_classifier_output(resp.text, items)
-                
+
         elif provider == "openai":
             import openai
             api_key = get_setting("openai_api_key", "")
             model_name = get_setting("openai_model", "gpt-4o-mini")
             client = openai.Client(api_key=api_key)
-            
+
             def do_openai():
                 return client.chat.completions.create(
                     model=model_name,
@@ -329,7 +347,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 return validate_classifier_output(content, items)
             except Exception:
                 return []
-                
+
         elif provider == "ollama":
             import httpx
             ollama_url = get_setting("ollama_url", "http://localhost:11434").rstrip("/")
@@ -344,7 +362,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     return validate_classifier_output(resp.json()["response"], items)
                 except Exception:
                     return []
-        
+
         return []
     def get_gemini_client(self):
         api_key = get_setting("gemini_api_key", "")
@@ -362,9 +380,9 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
     async def escalate_single_line(self, target_idx: int, target_text: str, prev_text: str, next_text: str, target_language: str, show_title: str) -> str:
         import logging
         logger = logging.getLogger(__name__)
-        
+
         provider = get_setting("ai_provider", "gemini").lower()
-        
+
         escalate_enabled = get_setting("escalate_to_pro", "false").lower() == "true"
         esc_provider = get_setting("escalation_provider", "none").lower()
         if escalate_enabled and esc_provider != "none":
@@ -413,13 +431,13 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 from google.genai import types
                 import asyncio
                 api_key = get_setting("gemini_api_key", "")
-                
+
                 model_name = get_setting("gemini_model", "gemini-3.5-flash-lite")
                 if escalate_enabled and esc_provider == "gemini":
                     esc_model = get_setting("escalation_model", "")
                     if esc_model:
                         model_name = esc_model
-                        
+
                 client = genai.Client(api_key=api_key)
                 config = types.GenerateContentConfig(
                     system_instruction=system_prompt,
@@ -430,43 +448,62 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 loop = asyncio.get_event_loop()
                 resp = await loop.run_in_executor(None, lambda: client.models.generate_content(model=model_name, contents=prompt, config=config))
                 return _safe_parse(resp.text)
-                
+
             elif provider == "openai":
                 import openai
                 import asyncio
                 api_key = get_setting("openai_api_key", "")
-                
+
                 model = get_setting("openai_model", "gpt-4o-mini")
                 if escalate_enabled and esc_provider == "openai":
                     esc_model = get_setting("escalation_model", "")
                     if esc_model:
                         model = esc_model
-                        
+
                 client = openai.OpenAI(api_key=api_key)
                 loop = asyncio.get_event_loop()
                 resp = await loop.run_in_executor(None, lambda: client.chat.completions.create(
-                    model=model, 
-                    messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}], 
+                    model=model,
+                    messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
                     temperature=0.1,
                     response_format={"type": "json_schema", "json_schema": {"name": "esc", "schema": schema, "strict": True}}
                 ))
                 return _safe_parse(resp.choices[0].message.content)
+            elif provider == "deepl":
+                import httpx
+                api_key = get_setting("deepl_api_key", "")
+                from app.core.languages import get_language
+                lang_obj = get_language(lang_name)
+                target_lang_code = lang_obj.deepl_code if lang_obj else lang_name.upper()[:2]
+                url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
+                async with httpx.AsyncClient(timeout=30.0) as http_client:
+                    resp = await http_client.post(
+                        url,
+                        headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
+                        json={"text": [target_text], "target_lang": target_lang_code, "source_lang": "EN"}
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    res = data["translations"][0]["text"].strip()
+                    if res and res != target_text:
+                        return res
+                    return target_text
         except Exception as e:
             logger.error(f"Escalation line {target_idx} API call failed: {e}")
-            return target_text
-            
+            raise ProviderUnavailableError(f"Escalation failed: {e}") from e
+
         return target_text
 
     @with_retry
     async def translate_batch_gemini(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
         client = self.get_gemini_client()
-        
+
         context_section = ""
         if context_lines:
             context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
             for ctx in context_lines:
                 context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-        
+
         prompt = f"Translate the following {len(items)} subtitle lines into {target_language}:{context_section}\n\n" + json.dumps(items, ensure_ascii=False)
 
         schema = {
@@ -527,17 +564,17 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
     @with_retry
     async def translate_batch_openai(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
         client = self.get_openai_client()
-        
+
         context_section = ""
         if context_lines:
             context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
             for ctx in context_lines:
                 context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-                
+
         prompt = f"Translate the following {len(items)} subtitle lines into {target_language}:{context_section}\n\n" + json.dumps(items, ensure_ascii=False)
 
         glossary = get_setting("glossary", "")
-        
+
         def call_openai(model_to_use):
             return client.chat.completions.create(
                 model=model_to_use,
@@ -566,12 +603,12 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         api_key = get_setting("deepl_api_key", "")
         if not api_key:
             raise ValueError("DeepL API Key is not configured.")
-        
+
         from app.core.languages import get_language
         lang_obj = get_language(target_language)
         target_lang_code = lang_obj.deepl_code if lang_obj else target_language.upper()[:2]
         url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
-        
+
         texts = [it["text"] for it in items]
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
@@ -589,7 +626,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
     @with_retry
     async def translate_batch_ollama(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
         ollama_url = get_setting("ollama_url", "http://localhost:11434").rstrip("/")
-        
+
         context_section = ""
         if context_lines:
             context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
@@ -597,9 +634,9 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
 
         glossary = get_setting("glossary", "")
-        
+
         prompt = f"{get_system_instruction(target_language, glossary=glossary, show_title=show_title)}\n\nTranslate the following JSON list into {target_language}:{context_section}\n{json.dumps(items, ensure_ascii=False)}"
-        
+
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
                 f"{ollama_url}/api/generate",
@@ -644,18 +681,21 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         ]
 
         import os
+        from app.core.languages import get_language
         data_dir = os.path.dirname(DB_PATH)
-        partial_file = os.path.join(data_dir, f"job_{job_id}_partial.json") if job_id else None
-        
+        lang_obj = get_language(target_language)
+        lang_code = lang_obj.code if lang_obj else target_language.lower()[:2]
+        partial_file = os.path.join(data_dir, f"job_{job_id}_{lang_code}_partial.json") if job_id else None
+
         import hashlib
-        fingerprint = hashlib.md5("".join(s.content for s in subs).encode("utf-8")).hexdigest() + "_" + target_language
-        
+        fingerprint = hashlib.md5("".join(s.content for s in subs).encode("utf-8")).hexdigest() + "_" + lang_code
+
         partial_dict = {}
         if partial_file and os.path.exists(partial_file):
             try:
                 with open(partial_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                
+
                 if data.get("fingerprint") == fingerprint:
                     lines_data = data.get("lines", {})
                     partial_dict = {int(k): v for k, v in lines_data.items()}
@@ -701,23 +741,32 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 update_job(job_id, current_batch=f"Translating lines {start_idx + 1}-{end_idx} of {total_lines}")
 
             try:
-                results = await self.translate_batch(
-                    payload,
-                    target_language=target_language,
-                    context_lines=previous_context if previous_context else None,
-                    show_title=show_title or ""
-                )
-                res_dict = {r["id"]: r["text"] for r in results if "id" in r and "text" in r}
+                # --- Send only the missing cues to provider ---
+                missing_payload = [p for p in payload if p["id"] not in partial_dict]
+                res_dict = {}
+                if missing_payload:
+                    results = await self.translate_batch(
+                        missing_payload,
+                        target_language=target_language,
+                        context_lines=previous_context if previous_context else None,
+                        show_title=show_title or ""
+                    )
+                    res_dict = {r["id"]: r["text"] for r in results if "id" in r and "text" in r}
                 
+                # Merge back the already solved cues
+                for p in payload:
+                    if p["id"] in partial_dict:
+                        res_dict[p["id"]] = partial_dict[p["id"]]
+
                 # --- BABEL SMART RECOVERY (QA ENGINE) ---
                 missing_ids = [p["id"] for p in payload if p["id"] not in res_dict]
                 if missing_ids:
                     logger.warning(f"QA: AI dropped {len(missing_ids)} lines in batch. Triggering Smart Recovery.")
                     if job_id:
                         append_job_log(job_id, f"QA Alert: AI skipped {len(missing_ids)} lines. Triggering Smart Recovery for IDs: {missing_ids[:5]}...")
-                    
+
                     missing_payload = [p for p in payload if p["id"] in missing_ids]
-                    
+
                     # Micro-request for ONLY the missing lines
                     try:
                         recovery_results = await self.translate_batch(
@@ -729,7 +778,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                         for r in recovery_results:
                             if "id" in r and "text" in r:
                                 res_dict[r["id"]] = r["text"]
-                        
+
                         still_missing = [p["id"] for p in payload if p["id"] not in res_dict]
                         if not still_missing and job_id:
                             append_job_log(job_id, f"QA Success: Smart Recovery successfully translated the missing lines!")
@@ -738,16 +787,16 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                         if job_id:
                             append_job_log(job_id, f"QA Warning: Smart Recovery failed ({e}). Proceeding anyway.")
                 # ----------------------------------------
-                
+
                 for p in payload:
                     idx = p["id"]
                     if p["text"].strip() == "<i></i>":
                         translated_subs[idx].content = "<i></i>"
                     elif idx in res_dict:
                         translated_subs[idx].content = res_dict[idx]
-                    
+
                     partial_dict[idx] = translated_subs[idx].content
-                
+
                 if partial_file:
                     try:
                         wrapper = {"fingerprint": fingerprint, "lines": partial_dict}
@@ -781,10 +830,5 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     append_job_log(job_id, f"Warning: Lines {start_idx + 1}-{end_idx} could not be translated: {e}. Keeping original text.")
                     update_job(job_id, processed_lines=processed_count)
 
-        if partial_file and os.path.exists(partial_file):
-            try:
-                os.remove(partial_file)
-            except Exception:
-                pass
         return translated_subs
 

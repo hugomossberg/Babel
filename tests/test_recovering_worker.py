@@ -8,6 +8,7 @@ from app.services.pipeline import pipeline
 
 @pytest.fixture(autouse=True)
 def setup_teardown_db(tmp_path):
+    original_db = app.core.db.DB_PATH
     app.core.db.DB_PATH = "/tmp/test_recovering.db"
     app.core.db.init_db()
     app.core.db.clear_all_jobs()
@@ -19,8 +20,7 @@ def setup_teardown_db(tmp_path):
     
     app.core.db.clear_all_jobs()
     import os
-    if os.path.exists("/tmp/test_recovering.db"):
-        os.remove("/tmp/test_recovering.db")
+    app.core.db.DB_PATH = original_db
 
 @pytest.mark.asyncio
 async def test_recovering_worker_chain(setup_teardown_db, monkeypatch):

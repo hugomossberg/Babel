@@ -11,6 +11,7 @@ async def test_embedded_extraction_status_handling(tmp_path):
     
     # Mock settings so Auto Repair is OFF
     def fake_get_setting(key, default):
+        if key == "languages": return '[{"name": "Swedish", "code": "sv", "enabled": true}]'
         if key == "auto_repair_unhealthy": return "false"
         if key == "extract_target_embedded": return "true"
         if key == "enable_bazarr_check": return "false"

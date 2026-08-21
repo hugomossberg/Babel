@@ -13,6 +13,7 @@ import sqlite3
 def setup_teardown_db(tmp_path):
     # Use a test db
     import app.core.db
+    original_db = app.core.db.DB_PATH
     app.core.db.DB_PATH = "/tmp/test_babel_retry.db"
     app.core.db.init_db()
     app.core.db.clear_all_jobs()
@@ -23,8 +24,7 @@ def setup_teardown_db(tmp_path):
     yield str(video)
     
     app.core.db.clear_all_jobs()
-    if os.path.exists("/tmp/test_babel_retry.db"):
-        os.remove("/tmp/test_babel_retry.db")
+    app.core.db.DB_PATH = original_db
 
 @pytest.mark.asyncio
 async def test_provider_error_creates_waiting_state(setup_teardown_db):

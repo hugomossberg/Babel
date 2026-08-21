@@ -53,7 +53,7 @@ async def test_resume_translation(tmp_path, monkeypatch):
             
     # Check partial file exists
     data_dir = os.path.dirname(str(db_path))
-    partial_file = os.path.join(data_dir, f"job_{job_id}_partial.json")
+    partial_file = os.path.join(data_dir, f"job_{job_id}_en_partial.json")
     assert os.path.exists(partial_file)
     
     with open(partial_file, "r") as f:

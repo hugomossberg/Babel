@@ -51,24 +51,24 @@ def init_db():
             last_error TEXT
         )
         """)
-        
+
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )
         """)
-        
+
         # Reset stuck jobs on restart
         cursor.execute("""
-        UPDATE jobs 
-        SET status = 'FAILED', error_message = 'Interrupted by server restart' 
+        UPDATE jobs
+        SET status = 'FAILED', error_message = 'Interrupted by server restart'
         WHERE status IN ('PENDING', 'PROCESSING', 'RUNNING')
         """)
-        
+
         cursor.execute("""
-        UPDATE jobs 
-        SET status = 'RETRY_PENDING', error_message = 'Recovered from restart' 
+        UPDATE jobs
+        SET status = 'RETRY_PENDING', error_message = 'Recovered from restart'
         WHERE status IN ('TRANSLATING', 'RECOVERING', 'ESCALATING', 'WAITING_PROVIDER', 'RETRY_PENDING')
         """)
 
@@ -85,7 +85,7 @@ def init_db():
             cursor.execute("ALTER TABLE jobs ADD COLUMN last_error TEXT")
         except Exception:
             pass
-        
+
         defaults = {
             "gemini_api_key": "",
             "gemini_model": "gemini-3.5-flash-lite",
@@ -109,7 +109,7 @@ def init_db():
         }
         for k, v in defaults.items():
             cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
-            
+
         conn.commit()
 
 def get_setting(key: str, default: str = "") -> str:
@@ -128,7 +128,7 @@ def create_job(video_path: str, event_source: str = "MANUAL", title: Optional[st
     now = datetime.now(timezone.utc).isoformat()
     if not title:
         title = os.path.basename(video_path)
-    
+
     provider = get_setting("ai_provider", "gemini").lower()
     if provider == "openai":
         active_model = f"OpenAI ({get_setting('openai_model', 'gpt-4o-mini')})"
@@ -171,10 +171,10 @@ def append_job_log(job_id: int, message: str):
 def update_job(job_id: int, **kwargs):
     now = datetime.now(timezone.utc).isoformat()
     kwargs["updated_at"] = now
-    
+
     set_clauses = [f"{k} = ?" for k in kwargs.keys()]
     values = list(kwargs.values()) + [job_id]
-    
+
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         cursor.execute(f"UPDATE jobs SET {', '.join(set_clauses)} WHERE id = ?", values)
@@ -290,3 +290,21 @@ def get_translation_memory(series_title: str, limit: int = 20) -> list:
         cursor.execute("SELECT original_text, translated_text FROM translation_memory WHERE series_title = ? ORDER BY RANDOM() LIMIT ?", (series_title, limit))
         rows = cursor.fetchall()
         return [{"original": r["original_text"], "translated": r["translated_text"]} for r in rows]
+
+def recover_stale_queued_jobs():
+    import sqlite3
+    from datetime import datetime, timezone, timedelta
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    now = datetime.now(timezone.utc)
+    threshold = now - timedelta(minutes=15)
+    now_iso = now.isoformat()
+    threshold_iso = threshold.isoformat()
+
+    cursor.execute('''
+        UPDATE jobs
+        SET status = 'RECOVERING', next_retry_at = ?, updated_at = ?
+        WHERE status = 'QUEUED' AND updated_at < ?
+    ''', (now_iso, now_iso, threshold_iso))
+    conn.commit()
+    conn.close()

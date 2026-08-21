@@ -119,10 +119,8 @@ def extract_embedded_srt(video_path: str, output_srt_path: str, preferred_lang: 
         
         if any(lp == lang or lang.startswith(lp) for lp in lang_prefixes) and is_text_codec:
             score = 100
-            if forced:
-                score -= 50
-            if any(kw in title for kw in ["forced", "signs", "songs", "foreign", "parts", "descriptive"]):
-                score -= 50
+            if forced or any(kw in title for kw in ["forced", "signs", "songs", "foreign", "parts", "descriptive"]):
+                continue  # Skip forced tracks entirely for full translation
             
             if any(kw in title for kw in ["full", "sdh", "normal", "dialogue"]):
                 score += 20

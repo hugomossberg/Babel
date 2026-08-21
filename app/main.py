@@ -27,6 +27,8 @@ init_db()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.core.db import recover_stale_queued_jobs
+    recover_stale_queued_jobs()
     task = asyncio.create_task(retry_waiting_jobs())
     yield
     task.cancel()
@@ -36,6 +38,7 @@ async def lifespan(app: FastAPI):
         pass
 
 app = FastAPI(
+    lifespan=lifespan,
 
     title=APP_NAME,
     version=VERSION,
@@ -48,8 +51,8 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
         if not AUTH_USERNAME or not AUTH_PASSWORD:
             return await call_next(request)
         
-        # Don't require auth for webhooks or health check
-        if request.url.path.startswith("/webhook/") or request.url.path == "/health":
+        # Don't require auth for specific webhooks or health check
+        if request.url.path in ["/webhook/sonarr", "/webhook/radarr"] or request.url.path == "/health":
             return await call_next(request)
             
         auth_header = request.headers.get("Authorization")
@@ -92,14 +95,12 @@ async def serve_ui():
 async def process_one_retry_pass():
     from app.core.db import claim_job_for_retry
     try:
-        jobs = get_jobs_by_status(["WAITING_PROVIDER", "RETRY_PENDING", "RECOVERING"])
+        jobs = get_jobs_by_status(["WAITING_PROVIDER", "RETRY_PENDING", "RECOVERING", "PARTIAL"])
         for job in jobs:
             try:
                 should_retry = False
                 now = datetime.now(timezone.utc)
-                if job["status"] == "RETRY_PENDING":
-                    should_retry = True
-                elif job["status"] in ["WAITING_PROVIDER", "RECOVERING"]:
+                if job["status"] in ["RETRY_PENDING", "WAITING_PROVIDER", "RECOVERING", "PARTIAL"]:
                     if job.get("next_retry_at"):
                         next_retry_at = datetime.fromisoformat(job["next_retry_at"])
                         if now >= next_retry_at:

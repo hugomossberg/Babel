@@ -25,10 +25,9 @@ logger = logging.getLogger("babel.pipeline")
 def qa_gate(
     source_subs: list,
     translated_subs: list,
-    target_lang_code: str = "sv",
+    target_lang_code: str,
     job_id: Optional[int] = None,
-    safe_ids: Optional[list] = None,
-    allow_dropped: int = 0
+    safe_ids: Optional[list] = None
 ) -> Dict[str, Any]:
     """
     Final Quality Assurance gate. Returns a dict with:
@@ -108,12 +107,12 @@ def qa_gate(
     wrong_language = False
     if translated_subs:
         sample_text = " ".join([s.content for s in translated_subs[:80] if s.content.strip() and s.content.strip() != "<i></i>"])
-        if sample_text:
+        if len(sample_text) >= 20:
             lang_info = detect_language_heuristics(sample_text)
             detected = lang_info["lang"]
-            if detected != "unknown" and detected != target_lang_code[:2].lower():
+            if detected != "unknown" and detected != target_lang_code[:2].lower() and lang_info["confidence"] > 0.8:
                 wrong_language = True
-                issues.append(f"Target language detection failed: output appears to be {detected}, expected {target_lang_code}")
+                issues.append(f"Language mismatch: expected {target_lang_code}, detected {detected} ({lang_info['confidence']*100:.0f}% confidence)")
                 score -= 30
 
     # 6. Valid SRT structure
@@ -122,13 +121,9 @@ def qa_gate(
         srt_text = subs_to_srt_string(translated_subs)
         reparsed = list(srt.parse(srt_text))
         if len(reparsed) != len(translated_subs):
-            diff = abs(len(translated_subs) - len(reparsed))
-            if diff <= 2 and diff == dropped_count:
-                issues.append(f"SRT re-parse mismatch ({diff} lines), but matches dropped_count. Allowing.")
-            else:
-                issues.append(f"SRT re-parse mismatch: wrote {len(translated_subs)}, re-parsed {len(reparsed)}")
-                score -= 50
-                structure_valid = False
+            issues.append(f"SRT re-parse mismatch: wrote {len(translated_subs)}, re-parsed {len(reparsed)}")
+            score -= 50
+            structure_valid = False
     except Exception as e:
         issues.append(f"Invalid SRT structure: {e}")
         score -= 50
@@ -139,7 +134,7 @@ def qa_gate(
     sync_valid = max_drift == 0
     passed = (
         score >= 60
-        and dropped_count <= allow_dropped
+        and dropped_count == 0
         and len(real_untranslated_ids) == 0
         and sync_valid
         and not wrong_language
@@ -178,10 +173,10 @@ class SubtitlePipeline:
 
         # Clean up partial progress file
         import os
+        import glob
         from app.core.db import DB_PATH
         data_dir = os.path.dirname(DB_PATH)
-        partial_file = os.path.join(data_dir, f"job_{job_id}_partial.json")
-        if os.path.exists(partial_file):
+        for partial_file in glob.glob(os.path.join(data_dir, f"job_{job_id}_*_partial.json")):
             try:
                 os.remove(partial_file)
             except Exception:
@@ -295,6 +290,12 @@ class SubtitlePipeline:
             norm_path = os.path.normpath(video_path)
             if norm_path in self._active_video_paths:
                 logger.warning(f"Skipping duplicate request for {norm_path} — already being processed")
+                if job_id:
+                    # Job was already claimed but we can't process it. Revert to RECOVERING to try again later.
+                    from app.core.db import update_job
+                    from datetime import datetime, timezone, timedelta
+                    next_retry = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+                    update_job(job_id, status="RECOVERING", next_retry_at=next_retry)
                 return {"status": "skipped", "reason": "already_processing", "video_path": norm_path}
             self._active_video_paths.add(norm_path)
 
@@ -382,7 +383,9 @@ class SubtitlePipeline:
 
         target_languages = self.get_configured_languages()
         if not target_languages:
-            target_languages = [{"name": "Swedish", "code": "sv", "enabled": True}]
+            append_job_log(job_id, "No target language configured.")
+            update_job(job_id, status="ACTION_REQUIRED")
+            return {"status": "action_required", "reason": "no_target_languages"}
 
         base_path, _ = os.path.splitext(video_path)
 
@@ -637,6 +640,14 @@ class SubtitlePipeline:
 
                 append_job_log(job_id, f"Translating to {lang_name} ({lang_code}) using {active_engine_name} ({total_source_lines} lines)...")
 
+                translated_subs = await self.translator.translate_srt_content(
+                    subs=subs,
+                    target_language=lang_name,
+                    batch_size=batch_size,
+                    job_id=job_id,
+                    show_title=title
+                )
+
                 # --- NEVER GIVE UP RECOVERY LOOP ---
                 max_qa_loops = 3
                 qa_loop_count = 0
@@ -647,14 +658,6 @@ class SubtitlePipeline:
                     if qa_loop_count > 1:
                         append_job_log(job_id, f"--- QA RECOVERY LOOP {qa_loop_count}/{max_qa_loops} ---")
                         update_job(job_id, status="RECOVERING")
-
-                    translated_subs = await self.translator.translate_srt_content(
-                        subs=subs,
-                        target_language=lang_name,
-                        batch_size=batch_size,
-                        job_id=job_id,
-                        show_title=title
-                    )
 
                     # Strict Sync Lock: Match source timestamps exactly to guarantee 0ms drift
                     if strict_sync_lock and len(translated_subs) == len(subs):
@@ -781,7 +784,16 @@ class SubtitlePipeline:
                                         )
                                         is_dropped = idx in dropped_unresolved
                                         if esc_text:
-                                            if is_dropped and esc_text == target_text:
+                                            esc_clean = esc_text.strip()
+                                            orig_clean = target_text.strip()
+                                            is_orig_real = orig_clean and orig_clean != "<i></i>"
+                                            is_esc_empty = not esc_clean or esc_clean == "<i></i>"
+
+                                            if not esc_clean:
+                                                append_job_log(job_id, f"Escalation: Rejected empty text for line {idx}")
+                                            elif is_orig_real and is_esc_empty:
+                                                append_job_log(job_id, f"Escalation: Rejected fake empty/tag for real dialogue at line {idx}")
+                                            elif is_dropped and esc_clean == orig_clean:
                                                 append_job_log(job_id, f"Escalation: Rejected identical fallback for dropped line {idx}")
                                             elif esc_text != translated_subs[idx].content:
                                                 translated_subs[idx].content = esc_text
@@ -798,10 +810,21 @@ class SubtitlePipeline:
                                     # Clear partial state so next loop does a clean re-translate of failed batches
                                     from app.core.db import DB_PATH
                                     data_dir = os.path.dirname(DB_PATH)
-                                    partial_file = os.path.join(data_dir, f"job_{job_id}_partial.json") if job_id else None
+                                    partial_file = os.path.join(data_dir, f"job_{job_id}_{lang_code}_partial.json") if job_id else None
                                     if partial_file and os.path.exists(partial_file):
-                                        try: os.remove(partial_file)
-                                        except: pass
+                                        try:
+                                            with open(partial_file, "r", encoding="utf-8") as f:
+                                                pdata = json.load(f)
+                                            plines = pdata.get("lines", {})
+                                            for uid in all_unresolved:
+                                                if str(uid) in plines:
+                                                    del plines[str(uid)]
+                                            tmp_p = partial_file + ".tmp"
+                                            with open(tmp_p, "w", encoding="utf-8") as f:
+                                                json.dump(pdata, f, ensure_ascii=False)
+                                            os.replace(tmp_p, partial_file)
+                                        except Exception as e:
+                                            append_job_log(job_id, f"Failed to clean partial state: {e}")
 
                                     # To prevent getting completely stuck in a loop, throw an error if this was the last loop
                                     if qa_loop_count == max_qa_loops:
@@ -809,11 +832,6 @@ class SubtitlePipeline:
 
                         except Exception as e:
                             append_job_log(job_id, f"QA Recovery/Escalation failed: {e}")
-
-                # Relax constraints on the final evaluation if loops exhausted
-                if not qa_result["passed"]:
-                    qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, allow_dropped=2)
-
                 # Final QA Log
                 score = qa_result["score"]
                 if qa_result["passed"]:
@@ -853,6 +871,16 @@ class SubtitlePipeline:
                     os.replace(temp_output, target_output_path)
                     output_files.append(target_output_path)
                     successful_langs.append(lang_code)
+
+                    # Clean up partial progress file since we successfully finished
+                    from app.core.db import DB_PATH
+                    data_dir = os.path.dirname(DB_PATH)
+                    partial_file = os.path.join(data_dir, f"job_{job_id}_{lang_code}_partial.json") if job_id else None
+                    if partial_file and os.path.exists(partial_file):
+                        try:
+                            os.remove(partial_file)
+                        except Exception:
+                            pass
 
                     # Save Translation Memory only after QA PASS
                     if title:
@@ -926,7 +954,7 @@ class SubtitlePipeline:
                 "output_files": json.dumps(output_files),
                 "duration_seconds": total_duration
             }
-            if final_status == "RECOVERING":
+            if final_status in ["RECOVERING", "PARTIAL"]:
                 from datetime import datetime, timezone, timedelta
                 from app.core.db import get_job_by_id
                 job_data = get_job_by_id(job_id)

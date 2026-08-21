@@ -11,6 +11,7 @@ import os
 
 @pytest.fixture(autouse=True)
 def setup_teardown_db(tmp_path):
+    original_db = app.core.db.DB_PATH
     app.core.db.DB_PATH = "/tmp/test_dropped_babel.db"
     app.core.db.init_db()
     app.core.db.clear_all_jobs()
@@ -21,8 +22,7 @@ def setup_teardown_db(tmp_path):
     yield str(video)
     
     app.core.db.clear_all_jobs()
-    if os.path.exists("/tmp/test_dropped_babel.db"):
-        os.remove("/tmp/test_dropped_babel.db")
+    app.core.db.DB_PATH = original_db
 
 @pytest.mark.asyncio
 async def test_dropped_line_recovery(setup_teardown_db):

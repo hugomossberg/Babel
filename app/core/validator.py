@@ -22,7 +22,7 @@ def detect_language_heuristics(text: str) -> dict:
     Robust language detection for all languages.
     Returns a dict with 'lang' (normalized ISO code) and 'confidence'.
     """
-    if not text or not text.strip():
+    if not text or len(text.strip()) < 10:
         return {"lang": "unknown", "confidence": 0.0}
     
     try:
@@ -110,7 +110,10 @@ def check_dropped_lines(original_subs: List[srt.Subtitle], translated_subs: List
         orig = original_subs[i].content.strip()
         trans = translated_subs[i].content.strip()
 
-        if orig and orig != "<i></i>" and not trans:
+        is_orig_real = orig and orig != "<i></i>"
+        is_trans_empty = not trans or trans == "<i></i>"
+
+        if is_orig_real and is_trans_empty:
             dropped.append({
                 "index": i + 1,
                 "timestamp": str(original_subs[i].start),
