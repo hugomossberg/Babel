@@ -149,6 +149,7 @@ def qa_gate(
         "untranslated_ids": untranslated_ids,  # Keep full list for recovery attempts
         "real_untranslated_ids": real_untranslated_ids,
         "dropped_count": dropped_count,
+        "dropped_details": dropped_details,
         "sync_diff_ms": max_drift,
     }
 
@@ -631,131 +632,171 @@ class SubtitlePipeline:
 
                 append_job_log(job_id, f"Translating to {lang_name} ({lang_code}) using {active_engine_name} ({total_source_lines} lines)...")
 
-                translated_subs = await self.translator.translate_srt_content(
-                    subs=subs,
-                    target_language=lang_name,
-                    batch_size=batch_size,
-                    job_id=job_id,
-                    show_title=title
-                )
+                # --- NEVER GIVE UP RECOVERY LOOP ---
+                max_qa_loops = 3
+                qa_loop_count = 0
+                
+                while qa_loop_count < max_qa_loops:
+                    qa_loop_count += 1
+                    
+                    if qa_loop_count > 1:
+                        append_job_log(job_id, f"--- QA RECOVERY LOOP {qa_loop_count}/{max_qa_loops} ---")
+                        update_job(job_id, status="RECOVERING")
+                    
+                    translated_subs = await self.translator.translate_srt_content(
+                        subs=subs,
+                        target_language=lang_name,
+                        batch_size=batch_size,
+                        job_id=job_id,
+                        show_title=title
+                    )
 
-                # Strict Sync Lock: Match source timestamps exactly to guarantee 0ms drift
-                if strict_sync_lock and len(translated_subs) == len(subs):
-                    for idx in range(len(subs)):
-                        translated_subs[idx].start = subs[idx].start
-                        translated_subs[idx].end = subs[idx].end
+                    # Strict Sync Lock: Match source timestamps exactly to guarantee 0ms drift
+                    if strict_sync_lock and len(translated_subs) == len(subs):
+                        for idx in range(len(subs)):
+                            translated_subs[idx].start = subs[idx].start
+                            translated_subs[idx].end = subs[idx].end
 
-                # -------------------------------------------------------
-                # Bug #1, #5: FINAL QA GATE — never publish a broken file
-                # -------------------------------------------------------
-                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id)
-                initial_candidates_count = len(qa_result.get("untranslated_ids", []))
+                    # -------------------------------------------------------
+                    # Bug #1, #5: FINAL QA GATE — never publish a broken file
+                    # -------------------------------------------------------
+                    qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
+                    
+                    if qa_loop_count == 1:
+                        initial_candidates_count = len(qa_result.get("untranslated_ids", []))
 
-                # Attempt recovery for any untranslated lines
-                if qa_result["untranslated_ids"]:
-                    append_job_log(job_id, f"Initial QA: RECOVERY_REQUIRED ({initial_candidates_count} candidates need review)")
-                    recovery_payload = [
-                        {"id": idx, "text": subs[idx].content}
-                        for idx in qa_result["untranslated_ids"]
-                        if subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>"
-                    ]
-                    if recovery_payload:
-                        try:
-                            provider = get_setting("ai_provider", "gemini").lower()
-                            caps = get_provider_capabilities(provider)
-                            if caps["supports_identical_classification"]:
-                                recovery_results = []
-                                chunk_size = 20
-                                for i in range(0, len(recovery_payload), chunk_size):
-                                    chunk = recovery_payload[i:i + chunk_size]
-                                    try:
-                                        chunk_res = await self.translator.classify_and_recover_identical(
-                                            chunk, lang_name, title or ""
-                                        )
-                                        recovery_results.extend(chunk_res)
-                                    except Exception as e:
-                                        append_job_log(job_id, f"QA Recovery chunk failed: {e}")
-                                        continue
-                                
-                                for r in recovery_results:
-                                    idx = r.get("id")
-                                    if idx is None: continue
-                                    action = r.get("action")
-                                    if action == "keep":
-                                        safe_ids.append(idx)
-                                        raw_reason = r.get("reason", "none").lower()
-                                        reason_map = {
-                                            "proper_noun": "Name / Proper Noun",
-                                            "brand": "Brand Name",
-                                            "acronym": "Acronym / Abbreviation",
-                                            "number": "Number",
-                                            "symbol": "Symbol / Punctuation",
-                                            "non_verbal": "Non-verbal Sound",
-                                            "none": "Unspecified Reason"
-                                        }
-                                        reason_str = reason_map.get(raw_reason, raw_reason.replace("_", " ").title())
-                                        append_job_log(job_id, f"QA Recovery: Model kept line {idx} ({reason_str})")
-                                    elif action == "translate" and "text" in r:
-                                        if r["text"] != subs[idx].content:
-                                            translated_subs[idx].content = r["text"]
-                                            append_job_log(job_id, f"QA Recovery: Translated line {idx}")
-                            else:
-                                # Deterministic fallback for DeepL
-                                recovery_results = []
-                                chunk_size = 20
-                                for i in range(0, len(recovery_payload), chunk_size):
-                                    chunk = recovery_payload[i:i + chunk_size]
-                                    try:
-                                        chunk_res = await self.translator.translate_batch(
-                                            chunk, target_language=lang_name, show_title=title or ""
-                                        )
-                                        recovery_results.extend(chunk_res)
-                                    except Exception as e:
-                                        append_job_log(job_id, f"QA Recovery chunk failed (DeepL): {e}")
-                                        continue
-                                
-                                res_dict = {r["id"]: r["text"] for r in recovery_results if "id" in r and "text" in r}
-                                for idx, text in res_dict.items():
-                                    if text != subs[idx].content:  # actually changed
-                                        translated_subs[idx].content = text
-                                        append_job_log(job_id, f"QA Recovery: Translated line {idx} (DeepL Fallback)")
-                            
-                            # Re-run QA after recovery with safe_ids context
-                            qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
-                            
-                            # Escalation Stage: Contextual Single-Line Recovery
-                            real_unresolved = qa_result.get("real_untranslated_ids", [])
-                            if real_unresolved:
-                                esc_enabled = get_setting("escalate_to_pro", "false").lower() == "true"
-                                esc_prov = get_setting("escalation_provider", "none")
-                                esc_mod = get_setting("escalation_model", "")
-                                if esc_enabled and esc_prov != "none" and esc_mod:
-                                    esc_info = f"{esc_prov} / {esc_mod}"
-                                else:
-                                    esc_info = "Primary Model (Contextual Mode)"
-                                append_job_log(job_id, f"Escalation Stage: {len(real_unresolved)} lines still unresolved. Escalating using {esc_info}...")
-                                for idx in real_unresolved:
-                                    prev_idx = max(0, idx - 1)
-                                    next_idx = min(len(subs) - 1, idx + 1)
-                                    prev_text = translated_subs[prev_idx].content if prev_idx != idx else ""
-                                    next_text = subs[next_idx].content if next_idx != idx else ""
-                                    target_text = subs[idx].content
+                    if qa_result["passed"]:
+                        break # Success! Exit the recovery loop.
+
+                    # Attempt recovery for any untranslated or dropped lines
+                    if qa_result["untranslated_ids"] or qa_result.get("dropped_count", 0) > 0:
+                        dropped_ids = [d["index"] - 1 for d in qa_result.get("dropped_details", [])]
+                        all_recovery_ids = list(set(qa_result["untranslated_ids"] + dropped_ids))
+                        all_recovery_ids.sort()
+
+                        append_job_log(job_id, f"QA: RECOVERY_REQUIRED ({len(all_recovery_ids)} candidates need review or re-translation)")
+                        recovery_payload = [
+                            {"id": idx, "text": subs[idx].content}
+                            for idx in all_recovery_ids
+                            if subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>"
+                        ]
+                        if recovery_payload:
+                            try:
+                                provider = get_setting("ai_provider", "gemini").lower()
+                                caps = get_provider_capabilities(provider)
+                                if caps["supports_identical_classification"]:
+                                    recovery_results = []
+                                    chunk_size = 20
+                                    for i in range(0, len(recovery_payload), chunk_size):
+                                        chunk = recovery_payload[i:i + chunk_size]
+                                        try:
+                                            chunk_res = await self.translator.classify_and_recover_identical(
+                                                chunk, lang_name, title or ""
+                                            )
+                                            recovery_results.extend(chunk_res)
+                                        except Exception as e:
+                                            append_job_log(job_id, f"QA Recovery chunk failed: {e}")
+                                            continue
                                     
-                                    try:
-                                        esc_text = await self.translator.escalate_single_line(
-                                            idx, target_text, prev_text, next_text, lang_name, title or ""
-                                        )
-                                        if esc_text and esc_text != target_text:
-                                            translated_subs[idx].content = esc_text
-                                            append_job_log(job_id, f"Escalation: Translated line {idx} using dialogue context")
-                                    except Exception as e:
-                                        append_job_log(job_id, f"Escalation failed for line {idx}: {e}")
+                                    for r in recovery_results:
+                                        idx = r.get("id")
+                                        if idx is None: continue
+                                        action = r.get("action")
+                                        if action == "keep":
+                                            safe_ids.append(idx)
+                                            raw_reason = r.get("reason", "none").lower()
+                                            reason_map = {
+                                                "proper_noun": "Name / Proper Noun",
+                                                "brand": "Brand Name",
+                                                "acronym": "Acronym / Abbreviation",
+                                                "number": "Number",
+                                                "symbol": "Symbol / Punctuation",
+                                                "non_verbal": "Non-verbal Sound",
+                                                "none": "Unspecified Reason"
+                                            }
+                                            reason_str = reason_map.get(raw_reason, raw_reason.replace("_", " ").title())
+                                            append_job_log(job_id, f"QA Recovery: Model kept line {idx} ({reason_str})")
+                                        elif action == "translate" and "text" in r:
+                                            if r["text"] != subs[idx].content:
+                                                translated_subs[idx].content = r["text"]
+                                                append_job_log(job_id, f"QA Recovery: Translated line {idx}")
+                                else:
+                                    # Deterministic fallback for DeepL
+                                    recovery_results = []
+                                    chunk_size = 20
+                                    for i in range(0, len(recovery_payload), chunk_size):
+                                        chunk = recovery_payload[i:i + chunk_size]
+                                        try:
+                                            chunk_res = await self.translator.translate_batch(
+                                                chunk, target_language=lang_name, show_title=title or ""
+                                            )
+                                            recovery_results.extend(chunk_res)
+                                        except Exception as e:
+                                            append_job_log(job_id, f"QA Recovery chunk failed (DeepL): {e}")
+                                            continue
+                                    
+                                    res_dict = {r["id"]: r["text"] for r in recovery_results if "id" in r and "text" in r}
+                                    for idx, text in res_dict.items():
+                                        if text != subs[idx].content:  # actually changed
+                                            translated_subs[idx].content = text
+                                            append_job_log(job_id, f"QA Recovery: Translated line {idx} (DeepL Fallback)")
                                 
-                                # Final QA rerun after escalation
+                                # Re-run QA after recovery with safe_ids context
                                 qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
+                                if qa_result["passed"]:
+                                    break
+                                
+                                # Escalation Stage: Contextual Single-Line Recovery
+                                real_unresolved = qa_result.get("real_untranslated_ids", [])
+                                dropped_unresolved = [d["index"] - 1 for d in qa_result.get("dropped_details", [])]
+                                all_unresolved = list(set(real_unresolved + dropped_unresolved))
+                                all_unresolved.sort()
+                                
+                                if all_unresolved:
+                                    esc_enabled = get_setting("escalate_to_pro", "false").lower() == "true"
+                                    esc_prov = get_setting("escalation_provider", "none")
+                                    esc_mod = get_setting("escalation_model", "")
+                                    if esc_enabled and esc_prov != "none" and esc_mod:
+                                        esc_info = f"{esc_prov} / {esc_mod}"
+                                    else:
+                                        esc_info = "Primary Model (Contextual Mode)"
+                                    append_job_log(job_id, f"Escalation Stage: {len(all_unresolved)} lines still unresolved. Escalating using {esc_info}...")
+                                    for idx in all_unresolved:
+                                        prev_idx = max(0, idx - 1)
+                                        next_idx = min(len(subs) - 1, idx + 1)
+                                        prev_text = translated_subs[prev_idx].content if prev_idx != idx else ""
+                                        next_text = subs[next_idx].content if next_idx != idx else ""
+                                        target_text = subs[idx].content
+                                        
+                                        try:
+                                            esc_text = await self.translator.escalate_single_line(
+                                                idx, target_text, prev_text, next_text, lang_name, title or ""
+                                            )
+                                            if esc_text and esc_text != target_text:
+                                                translated_subs[idx].content = esc_text
+                                                append_job_log(job_id, f"Escalation: Translated line {idx} using dialogue context")
+                                        except Exception as e:
+                                            append_job_log(job_id, f"Escalation failed for line {idx}: {e}")
+                                    
+                                    # Final QA rerun after escalation
+                                    qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
+                                    if qa_result["passed"]:
+                                        break
+                                    else:
+                                        # Clear partial state so next loop does a clean re-translate of failed batches
+                                        from app.core.db import DB_PATH
+                                        data_dir = os.path.dirname(DB_PATH)
+                                        partial_file = os.path.join(data_dir, f"job_{job_id}_partial.json") if job_id else None
+                                        if partial_file and os.path.exists(partial_file):
+                                            try: os.remove(partial_file)
+                                            except: pass
+                                            
+                                        # To prevent getting completely stuck in a loop, throw an error if this was the last loop
+                                        if qa_loop_count == max_qa_loops:
+                                            append_job_log(job_id, f"QA loop exhausted ({max_qa_loops} attempts). Stopping recovery loop for {lang_name}.")
 
-                        except Exception as e:
-                            append_job_log(job_id, f"QA Recovery/Escalation failed: {e}")
+                            except Exception as e:
+                                append_job_log(job_id, f"QA Recovery/Escalation failed: {e}")
                 
                 # Final QA Log
                 score = qa_result["score"]
@@ -847,6 +888,9 @@ class SubtitlePipeline:
             total_duration = round(time.time() - start_time, 2)
             
             # Bug #31: Determine correct final status
+            # If we didn't translate all requested languages because of a QA failure,
+            # this is a recoverable state! We should go to RECOVERING, not FAILED.
+            # Bug #31: Determine correct final status
             if len(successful_langs) + len(skipped_langs) == len(langs_needing_translation):
                 if successful_langs:
                     final_status = "TRANSLATED"
@@ -855,24 +899,40 @@ class SubtitlePipeline:
             elif successful_langs:
                 final_status = "PARTIAL"
             else:
-                final_status = "FAILED"
+                final_status = "RECOVERING"
 
-            update_job(
-                job_id,
-                status=final_status,
-                target_languages=",".join(successful_langs),
-                total_lines=total_source_lines,
-                cleaned_sdh_lines=cleaned_count,
-                dropped_lines=total_dropped,
-                sync_diff_ms=max_sync_diff,
-                output_files=json.dumps(output_files),
-                duration_seconds=total_duration
-            )
+            update_args = {
+                "status": final_status,
+                "target_languages": ",".join(successful_langs),
+                "total_lines": total_source_lines,
+                "cleaned_sdh_lines": cleaned_count,
+                "dropped_lines": total_dropped,
+                "sync_diff_ms": max_sync_diff,
+                "output_files": json.dumps(output_files),
+                "duration_seconds": total_duration
+            }
+            if final_status == "RECOVERING":
+                from datetime import datetime, timezone, timedelta
+                from app.core.db import get_job_by_id
+                job_data = get_job_by_id(job_id)
+                current_retries = job_data.get("retry_count", 0) if job_data else 0
+                
+                backoff_mins = 1
+                if current_retries == 1: backoff_mins = 5
+                elif current_retries == 2: backoff_mins = 15
+                elif current_retries == 3: backoff_mins = 30
+                elif current_retries >= 4: backoff_mins = 60
+                
+                update_args["next_retry_at"] = (datetime.now(timezone.utc) + timedelta(minutes=backoff_mins)).isoformat()
+                update_args["retry_count"] = current_retries + 1
+                append_job_log(job_id, f"Job needs recovery. Will resume in {backoff_mins} min (Worker attempt {current_retries + 1}).")
+
+            update_job(job_id, **update_args)
 
             await self._maybe_notify_jellyfin()
 
             return {
-                "status": "success" if successful_langs else "failed",
+                "status": final_status.lower(),
                 "job_id": job_id,
                 "duration": total_duration,
                 "output_files": output_files
@@ -915,8 +975,25 @@ class SubtitlePipeline:
                 try: os.remove(temp_extracted_srt)
                 except: pass
             total_duration = round(time.time() - start_time, 2)
-            append_job_log(job_id, f"FATAL ERROR: {str(e)}")
-            update_job(job_id, status="FAILED", error_message=str(e), duration_seconds=total_duration)
-            return {"status": "failed", "error": str(e), "job_id": job_id}
+            
+            err_str = str(e).lower()
+            if any(t in err_str for t in ["timeout", "429", "500", "502", "503", "504", "connection"]):
+                from datetime import datetime, timezone, timedelta
+                next_retry_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+                append_job_log(job_id, f"NETWORK/PROVIDER ERROR: {str(e)}. Retrying later.")
+                update_job(job_id, status="WAITING_PROVIDER", error_message=str(e), duration_seconds=total_duration, next_retry_at=next_retry_at)
+                return {"status": "waiting_provider", "error": str(e), "job_id": job_id}
+                
+            elif any(t in err_str for t in ["permission denied", "no such file", "not found", "read-only"]):
+                append_job_log(job_id, f"TERMINAL FILESYSTEM ERROR: {str(e)}")
+                update_job(job_id, status="FAILED", error_message=str(e), duration_seconds=total_duration)
+                return {"status": "failed", "error": str(e), "job_id": job_id}
+                
+            else:
+                from datetime import datetime, timezone, timedelta
+                next_retry_at = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
+                append_job_log(job_id, f"UNEXPECTED ERROR: {str(e)}. Treating as recoverable.")
+                update_job(job_id, status="RETRY_PENDING", error_message=str(e), duration_seconds=total_duration, next_retry_at=next_retry_at)
+                return {"status": "retry_pending", "error": str(e), "job_id": job_id}
 
 pipeline = SubtitlePipeline()

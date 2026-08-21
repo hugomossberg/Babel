@@ -89,40 +89,49 @@ async def serve_ui():
 
 
 
-async def retry_waiting_jobs():
+async def process_one_retry_pass():
     from app.core.db import claim_job_for_retry
+    try:
+        jobs = get_jobs_by_status(["WAITING_PROVIDER", "RETRY_PENDING", "RECOVERING"])
+        for job in jobs:
+            try:
+                should_retry = False
+                now = datetime.now(timezone.utc)
+                if job["status"] == "RETRY_PENDING":
+                    should_retry = True
+                elif job["status"] in ["WAITING_PROVIDER", "RECOVERING"]:
+                    if job.get("next_retry_at"):
+                        next_retry_at = datetime.fromisoformat(job["next_retry_at"])
+                        if now >= next_retry_at:
+                            should_retry = True
+                    else:
+                        updated_at = datetime.fromisoformat(job["updated_at"])
+                        if (now - updated_at).total_seconds() > 300: # 5 min fallback
+                            should_retry = True
+                
+                if should_retry:
+                    if claim_job_for_retry(job["id"]):
+                        logging.info(f"Retrying job {job['id']}")
+                        # wait for the task to finish if it's running synchronously in a test
+                        # but in production, we want to run them concurrently.
+                        # For testability without sleep, maybe we can await them or just create task
+                        # Let's keep create_task but return the tasks so tests can await them
+                        yield asyncio.create_task(pipeline.process_video_file(
+                            job["video_path"],
+                            event_source="RETRY",
+                            title=job["title"],
+                            job_id=job["id"]
+                        ))
+            except Exception as e:
+                logging.error(f"Error checking retry for job {job['id']}: {e}")
+    except Exception as e:
+        logging.error(f"Error in retry loop: {e}")
+
+async def retry_waiting_jobs():
     while True:
-        try:
-            jobs = get_jobs_by_status(["WAITING_PROVIDER", "RETRY_PENDING"])
-            for job in jobs:
-                try:
-                    should_retry = False
-                    now = datetime.now(timezone.utc)
-                    if job["status"] == "RETRY_PENDING":
-                        should_retry = True
-                    elif job["status"] == "WAITING_PROVIDER":
-                        if job.get("next_retry_at"):
-                            next_retry_at = datetime.fromisoformat(job["next_retry_at"])
-                            if now >= next_retry_at:
-                                should_retry = True
-                        else:
-                            updated_at = datetime.fromisoformat(job["updated_at"])
-                            if (now - updated_at).total_seconds() > 900:
-                                should_retry = True
-                    
-                    if should_retry:
-                        if claim_job_for_retry(job["id"]):
-                            logging.info(f"Retrying job {job['id']}")
-                            asyncio.create_task(pipeline.process_video_file(
-                                job["video_path"],
-                                event_source="RETRY",
-                                title=job["title"],
-                                job_id=job["id"]
-                            ))
-                except Exception as e:
-                    logging.error(f"Error checking retry for job {job['id']}: {e}")
-        except Exception as e:
-            logging.error(f"Error in retry loop: {e}")
+        # consume the generator
+        async for _ in process_one_retry_pass():
+            pass
         await asyncio.sleep(10)
 
 @app.get("/health")
