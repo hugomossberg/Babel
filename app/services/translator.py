@@ -387,127 +387,174 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         return openai.OpenAI(api_key=api_key)
 
     @with_retry
-    async def escalate_single_line(self, target_idx: int, target_text: str, prev_text: str, next_text: str, target_language: str, show_title: str, is_real_untranslated: bool = False) -> Optional[str]:
+    async def escalate_single_line(self, target_idx: int, target_text: str, prev_text: str, next_text: str, target_language: str, show_title: str, is_real_untranslated: bool = False, job_id: Optional[int] = None) -> Optional[str]:
         import logging
+        import unicodedata
+        import re
         logger = logging.getLogger(__name__)
 
-        provider = get_setting("ai_provider", "gemini").lower()
+        def normalize(text: str) -> str:
+            if not text: return ""
+            t = unicodedata.normalize('NFKC', text)
+            t = re.sub(r'\s+', '', t).lower()
+            return t
 
+        primary_provider = get_setting("ai_provider", "gemini").lower()
         escalate_enabled = get_setting("escalate_to_pro", "false").lower() == "true"
         esc_provider = get_setting("escalation_provider", "none").lower()
-        if escalate_enabled and esc_provider != "none":
-            provider = esc_provider
 
-        if provider == "deepl":
-            return None
+        configured_esc = esc_provider if escalate_enabled and esc_provider != "none" else primary_provider
+        configured_alt = primary_provider if configured_esc != primary_provider else configured_esc
 
-        if is_real_untranslated:
-            system_prompt = f"You MUST translate TARGET into {target_language}.\nTARGET is known to still be untranslated English dialogue.\nDo NOT return the English source.\nDo NOT return an empty string.\nPrevious/Next are context only.\nReturn a JSON object with a single key 'translation' containing only the translated TARGET."
-        else:
-            system_prompt = f"You are a subtitle translator. Translate the TARGET line to {target_language}. The Previous and Next lines are for context only. Return a JSON object with a single key 'translation' containing the translated string."
-        prompt = f"Context: {show_title}\n\nPrevious: {prev_text}\nTARGET: {target_text}\nNext: {next_text}\n\nTranslate TARGET:"
+        attempts = [
+            {"provider": configured_esc, "type": "contextual"},
+            {"provider": configured_esc, "type": "strict"},
+            {"provider": configured_alt, "type": "strict"},
+        ]
 
-        schema = {
-            "type": "OBJECT",
-            "properties": {
-                "translation": {"type": "STRING"}
-            },
-            "required": ["translation"]
-        }
+        for i, attempt in enumerate(attempts):
+            provider = attempt["provider"]
+            attempt_type = attempt["type"]
 
-        def _safe_parse(raw_resp: str) -> Optional[str]:
-            clean_text = raw_resp.strip()
-            if clean_text.startswith("```"):
-                lines = clean_text.split('\n')
-                if lines[0].startswith("```"): lines = lines[1:]
-                if lines and lines[-1].startswith("```"): lines = lines[:-1]
-                clean_text = "\n".join(lines).strip()
+            if attempt_type == "contextual":
+                if is_real_untranslated:
+                    system_prompt = f"You MUST translate TARGET into {target_language}.\nTARGET is known to still be untranslated English dialogue.\nDo NOT return the English source.\nDo NOT return an empty string.\nPrevious/Next are context only.\nReturn a JSON object with a single key 'translation' containing only the translated TARGET."
+                else:
+                    system_prompt = f"You are a subtitle translator. Translate the TARGET line to {target_language}. The Previous and Next lines are for context only. Return a JSON object with a single key 'translation' containing the translated string."
+                prompt = f"Context: {show_title}\n\nPrevious: {prev_text}\nTARGET: {target_text}\nNext: {next_text}\n\nTranslate TARGET:"
+            else:
+                system_prompt = f"You are a strict translation engine."
+                prompt = f"Translate ONLY this English dialogue line into {target_language}.\n\nSOURCE:\n\"{target_text}\"\n\nRequirements:\n- Return an actual {target_language} translation.\n- Never return the English SOURCE.\n- Never return blank text.\n- Do not classify the line.\n- Previous/Next are context only.\n- Return only structured translation output.\n\nContext:\nPrevious: {prev_text}\nNext: {next_text}"
+
+            schema = {
+                "type": "OBJECT",
+                "properties": {
+                    "translation": {"type": "STRING"}
+                },
+                "required": ["translation"]
+            }
+
+            def _safe_parse(raw_resp: str) -> Optional[str]:
+                clean_text = raw_resp.strip()
+                if clean_text.startswith("```"):
+                    lines = clean_text.split('\n')
+                    if lines[0].startswith("```"): lines = lines[1:]
+                    if lines and lines[-1].startswith("```"): lines = lines[:-1]
+                    clean_text = "\n".join(lines).strip()
+                try:
+                    data = json.loads(clean_text)
+                    res = data.get("translation", "")
+                    if not is_usable_translation(res):
+                        logger.info(f"Escalation line {target_idx} attempt {i+1}/3: rejected blank")
+                        if job_id:
+                            from app.core.db import append_job_log
+                            append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: rejected blank")
+                        return None
+                    if normalize(res) == normalize(target_text):
+                        logger.info(f"Escalation line {target_idx} attempt {i+1}/3: rejected identical source")
+                        if job_id:
+                            from app.core.db import append_job_log
+                            append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: rejected identical source")
+                        return None
+
+                    logger.info(f"Escalation line {target_idx} attempt {i+1}/3: translated successfully")
+                    if job_id:
+                        from app.core.db import append_job_log
+                        append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: translated successfully")
+                    return res
+                except Exception as e:
+                    logger.error(f"Escalation line {target_idx} attempt {i+1}/3 JSON parse failed: {e}. Raw: {raw_resp[:50]}")
+                    if job_id:
+                        from app.core.db import append_job_log
+                        append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: invalid semantic response")
+                    return None
+
             try:
-                data = json.loads(clean_text)
-                res = data.get("translation", "").strip()
+                if provider == "gemini":
+                    from google import genai
+                    from google.genai import types
+                    import asyncio
+                    api_key = get_setting("gemini_api_key", "")
 
-                if not is_usable_translation(res):
-                    logger.info(f"Escalation line {target_idx}: rejected blank result")
-                    return None
+                    model_name = get_setting("gemini_model", "gemini-3.5-flash-lite")
+                    if escalate_enabled and provider == esc_provider:
+                        esc_model = get_setting("escalation_model", "")
+                        if esc_model: model_name = esc_model
 
-                if res.strip().lower() == target_text.strip().lower():
-                    logger.info(f"Escalation line {target_idx}: rejected identical source")
-                    return None
-
-                logger.info(f"Escalation line {target_idx}: valid translation returned ({len(res)} chars)")
-                return res
-            except Exception as e:
-                logger.error(f"Escalation line {target_idx} JSON parse failed: {e}. Raw: {raw_resp[:50]}")
-                return None
-
-        try:
-            if provider == "gemini":
-                from google import genai
-                from google.genai import types
-                import asyncio
-                api_key = get_setting("gemini_api_key", "")
-
-                model_name = get_setting("gemini_model", "gemini-3.5-flash-lite")
-                if escalate_enabled and esc_provider == "gemini":
-                    esc_model = get_setting("escalation_model", "")
-                    if esc_model:
-                        model_name = esc_model
-
-                client = genai.Client(api_key=api_key)
-                config = types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=0.1,
-                    response_mime_type="application/json",
-                    response_schema=schema,
-                )
-                loop = asyncio.get_event_loop()
-                resp = await loop.run_in_executor(None, lambda: client.models.generate_content(model=model_name, contents=prompt, config=config))
-                return _safe_parse(resp.text)
-
-            elif provider == "openai":
-                import openai
-                import asyncio
-                api_key = get_setting("openai_api_key", "")
-
-                model = get_setting("openai_model", "gpt-4o-mini")
-                if escalate_enabled and esc_provider == "openai":
-                    esc_model = get_setting("escalation_model", "")
-                    if esc_model:
-                        model = esc_model
-
-                client = openai.OpenAI(api_key=api_key)
-                loop = asyncio.get_event_loop()
-                resp = await loop.run_in_executor(None, lambda: client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
-                    temperature=0.1,
-                    response_format={"type": "json_schema", "json_schema": {"name": "esc", "schema": schema, "strict": True}}
-                ))
-                return _safe_parse(resp.choices[0].message.content)
-            elif provider == "deepl":
-                import httpx
-                api_key = get_setting("deepl_api_key", "")
-                from app.core.languages import get_language
-                lang_obj = get_language(lang_name)
-                target_lang_code = lang_obj.deepl_code if lang_obj else lang_name.upper()[:2]
-                url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
-                async with httpx.AsyncClient(timeout=30.0) as http_client:
-                    resp = await http_client.post(
-                        url,
-                        headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
-                        json={"text": [target_text], "target_lang": target_lang_code, "source_lang": "EN"}
+                    client = genai.Client(api_key=api_key)
+                    config = types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        temperature=0.1,
+                        response_mime_type="application/json",
+                        response_schema=schema,
                     )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    res = data["translations"][0]["text"].strip()
-                    if res and res != target_text:
-                        return res
-                    return target_text
-        except Exception as e:
-            logger.error(f"Escalation line {target_idx} API call failed: {e}")
-            raise ProviderUnavailableError(f"Escalation failed: {e}") from e
+                    loop = asyncio.get_event_loop()
+                    resp = await loop.run_in_executor(None, lambda: client.models.generate_content(model=model_name, contents=prompt, config=config))
+                    res = _safe_parse(resp.text)
+                    if res: return res
 
-        return target_text
+                elif provider == "openai":
+                    import openai
+                    import asyncio
+                    api_key = get_setting("openai_api_key", "")
+
+                    model = get_setting("openai_model", "gpt-4o-mini")
+                    if escalate_enabled and provider == esc_provider:
+                        esc_model = get_setting("escalation_model", "")
+                        if esc_model: model = esc_model
+
+                    client = openai.OpenAI(api_key=api_key)
+                    loop = asyncio.get_event_loop()
+                    resp = await loop.run_in_executor(None, lambda: client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
+                        temperature=0.1,
+                        response_format={"type": "json_schema", "json_schema": {"name": "esc", "schema": schema, "strict": True}}
+                    ))
+                    res = _safe_parse(resp.choices[0].message.content)
+                    if res: return res
+
+                elif provider == "deepl":
+                    import httpx
+                    api_key = get_setting("deepl_api_key", "")
+                    from app.core.languages import get_language
+                    lang_obj = get_language(target_language)
+                    target_lang_code = lang_obj.deepl_code if lang_obj else target_language.upper()[:2]
+                    url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
+                    async with httpx.AsyncClient(timeout=30.0) as http_client:
+                        resp = await http_client.post(
+                            url,
+                            headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
+                            json={"text": [target_text], "target_lang": target_lang_code, "source_lang": "EN"}
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        raw_res = data["translations"][0]["text"]
+
+                        if not is_usable_translation(raw_res):
+                            logger.info(f"Escalation line {target_idx} attempt {i+1}/3: rejected blank")
+                            if job_id:
+                                from app.core.db import append_job_log
+                                append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: rejected blank")
+                        elif normalize(raw_res) == normalize(target_text):
+                            logger.info(f"Escalation line {target_idx} attempt {i+1}/3: rejected identical source")
+                            if job_id:
+                                from app.core.db import append_job_log
+                                append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: rejected identical source")
+                        else:
+                            logger.info(f"Escalation line {target_idx} attempt {i+1}/3: translated successfully")
+                            if job_id:
+                                from app.core.db import append_job_log
+                                append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: translated successfully")
+                            return raw_res
+            except Exception as e:
+                logger.error(f"Escalation line {target_idx} API call failed: {e}")
+                raise ProviderUnavailableError(f"Escalation failed: {e}") from e
+
+        if job_id:
+            from app.core.db import append_job_log
+            append_job_log(job_id, f"Escalation line {target_idx} exhausted 3 semantic attempts")
+        return None
 
     @with_retry
     async def translate_batch_gemini(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "") -> List[dict]:

@@ -783,7 +783,8 @@ class SubtitlePipeline:
                                     try:
                                         esc_text = await self.translator.escalate_single_line(
                                             idx, target_text, prev_text, next_text, lang_name, title or "",
-                                            is_real_untranslated=(idx in real_unresolved)
+                                            is_real_untranslated=(idx in real_unresolved),
+                                            job_id=job_id
                                         )
                                         is_dropped = idx in dropped_unresolved
                                         if esc_text:
