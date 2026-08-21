@@ -154,18 +154,22 @@ def create_job(video_path: str, event_source: str = "MANUAL", title: Optional[st
         return cursor.lastrowid
 
 def append_job_log(job_id: int, message: str):
+    now = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    formatted = f"[{now}] {message}"
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        row = cursor.execute("SELECT logs FROM jobs WHERE id = ?", (job_id,)).fetchone()
-        logs = []
-        if row and row[0]:
-            try:
-                logs = json.loads(row[0])
-            except Exception:
-                pass
-        now = datetime.now(timezone.utc).strftime("%H:%M:%S")
-        logs.append(f"[{now}] {message}")
-        cursor.execute("UPDATE jobs SET logs = ? WHERE id = ?", (json.dumps(logs), job_id))
+        try:
+            cursor.execute("UPDATE jobs SET logs = json_insert(coalesce(logs, '[]'), '$[#]', ?) WHERE id = ?", (formatted, job_id))
+        except sqlite3.OperationalError:
+            row = cursor.execute("SELECT logs FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            logs = []
+            if row and row[0]:
+                try:
+                    logs = json.loads(row[0])
+                except Exception:
+                    pass
+            logs.append(formatted)
+            cursor.execute("UPDATE jobs SET logs = ? WHERE id = ?", (json.dumps(logs), job_id))
         conn.commit()
 
 def update_job(job_id: int, **kwargs):
@@ -273,13 +277,27 @@ def get_jobs_by_status(statuses: list) -> list:
 
 def save_translation_memory(series_title: str, original: str, translated: str):
     if not series_title or not original or not translated: return
-    # only save short distinct phrases to avoid filling DB with whole lines
     if len(original.split()) > 6: return
+    save_translation_memory_bulk(series_title, [{"original": original, "translated": translated}])
+
+def save_translation_memory_bulk(series_title: str, items: list):
+    if not series_title or not items: return
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
+    
+    valid_items = []
+    for item in items:
+        orig = item.get("original", "").strip()
+        trans = item.get("translated", "").strip()
+        if not orig or not trans: continue
+        if len(orig.split()) > 6: continue
+        valid_items.append((series_title, orig, trans, now))
+        
+    if not valid_items: return
+    
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO translation_memory (series_title, original_text, translated_text, created_at) VALUES (?, ?, ?, ?)", (series_title, original, translated, now))
+        cursor.executemany("INSERT OR REPLACE INTO translation_memory (series_title, original_text, translated_text, created_at) VALUES (?, ?, ?, ?)", valid_items)
         conn.commit()
 
 def get_translation_memory(series_title: str, limit: int = 20) -> list:

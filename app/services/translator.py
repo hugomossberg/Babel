@@ -374,17 +374,31 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     return []
 
         return []
+    def __init__(self):
+        self._cached_gemini_key = None
+        self._cached_gemini_client = None
+        self._cached_openai_key = None
+        self._cached_openai_client = None
+
     def get_gemini_client(self):
         api_key = get_setting("gemini_api_key", "")
         if not api_key:
             raise ValueError("Gemini API Key is not configured in settings.")
-        return genai.Client(api_key=api_key)
+        if self._cached_gemini_client and self._cached_gemini_key == api_key:
+            return self._cached_gemini_client
+        self._cached_gemini_key = api_key
+        self._cached_gemini_client = genai.Client(api_key=api_key)
+        return self._cached_gemini_client
 
     def get_openai_client(self):
         api_key = get_setting("openai_api_key", "")
         if not api_key:
             raise ValueError("OpenAI API Key is not configured in settings.")
-        return openai.OpenAI(api_key=api_key)
+        if self._cached_openai_client and self._cached_openai_key == api_key:
+            return self._cached_openai_client
+        self._cached_openai_key = api_key
+        self._cached_openai_client = openai.OpenAI(api_key=api_key)
+        return self._cached_openai_client
 
     @with_retry
     async def escalate_single_line(self, target_idx: int, target_text: str, prev_text: str, next_text: str, target_language: str, show_title: str, is_real_untranslated: bool = False, job_id: Optional[int] = None) -> Optional[str]:
@@ -567,7 +581,10 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         if context_lines:
             context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
             for ctx in context_lines:
-                context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
+                if ctx.get("translated"):
+                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
+                else:
+                    context_section += f'  Original: "{ctx["original"]}"\n'
 
         prompt = f"Translate the following {len(items)} subtitle lines into {target_language}:{context_section}\n\n" + json.dumps(items, ensure_ascii=False)
 
@@ -634,7 +651,10 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         if context_lines:
             context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
             for ctx in context_lines:
-                context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
+                if ctx.get("translated"):
+                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
+                else:
+                    context_section += f'  Original: "{ctx["original"]}"\n'
 
         prompt = f"Translate the following {len(items)} subtitle lines into {target_language}:{context_section}\n\n" + json.dumps(items, ensure_ascii=False)
 
@@ -696,7 +716,10 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         if context_lines:
             context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
             for ctx in context_lines:
-                context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
+                if ctx.get("translated"):
+                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
+                else:
+                    context_section += f'  Original: "{ctx["original"]}"\n'
 
         glossary = get_setting("glossary", "")
 
@@ -775,125 +798,114 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
 
         processed_count = 0
         context_window_size = 5
-        previous_context = []
+        global_tm_context = []
         if show_title:
             try:
                 tm_context = get_translation_memory(show_title, limit=10)
                 if tm_context:
-                    previous_context.extend(tm_context)
+                    global_tm_context.extend(tm_context)
             except Exception:
                 pass
-
-        for batch_idx, (start_idx, chunk, payload) in enumerate(batches):
+                
+        state_lock = asyncio.Lock()
+        concurrency = int(get_setting("batch_concurrency", "3"))
+        sem = asyncio.Semaphore(concurrency)
+        
+        async def process_batch(batch_idx, start_idx, chunk, payload):
+            nonlocal processed_count
             end_idx = min(start_idx + len(payload), total_lines)
 
-            # --- ÄKTA RESUME: Skip batch if all lines are already translated ---
             if payload and all(p["id"] in partial_dict for p in payload):
-                processed_count += len(payload)
-                if job_id:
-                    update_job(job_id, processed_lines=processed_count, current_batch=f"Skipping cached lines {start_idx + 1}-{end_idx} / {total_lines}")
-                continue
-            # -------------------------------------------------------------------
+                async with state_lock:
+                    processed_count += len(payload)
+                    if job_id:
+                        update_job(job_id, processed_lines=processed_count, current_batch=f"Skipping cached lines {start_idx + 1}-{end_idx} / {total_lines}")
+                return
 
             all_empty = all(p["text"].strip() == "<i></i>" for p in payload)
             if all_empty:
-                processed_count += len(payload)
-                if job_id:
-                    update_job(job_id, processed_lines=processed_count, current_batch=f"Lines {start_idx + 1}-{end_idx} / {total_lines}")
-                continue
+                async with state_lock:
+                    processed_count += len(payload)
+                    if job_id:
+                        update_job(job_id, processed_lines=processed_count, current_batch=f"Lines {start_idx + 1}-{end_idx} / {total_lines}")
+                return
 
             if job_id:
-                update_job(job_id, current_batch=f"Translating lines {start_idx + 1}-{end_idx} of {total_lines}")
+                async with state_lock:
+                    update_job(job_id, current_batch=f"Translating lines {start_idx + 1}-{end_idx} of {total_lines}")
 
             try:
-                # --- Send only the missing cues to provider ---
+                batch_context = list(global_tm_context)
+                if start_idx > 0:
+                    ctx_start = max(0, start_idx - context_window_size)
+                    for idx in range(ctx_start, start_idx):
+                        if subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>":
+                            batch_context.append({
+                                "original": subs[idx].content,
+                                "translated": partial_dict.get(idx, "")
+                            })
+                            
                 missing_payload = [p for p in payload if p["id"] not in partial_dict]
                 res_dict = {}
                 if missing_payload:
                     results = await self.translate_batch(
                         missing_payload,
                         target_language=target_language,
-                        context_lines=previous_context if previous_context else None,
+                        context_lines=batch_context if batch_context else None,
                         show_title=show_title or ""
                     )
                     res_dict = {r["id"]: r["text"] for r in results if "id" in r and "text" in r and is_usable_translation(r["text"])}
 
-                # Merge back the already solved cues
                 for p in payload:
                     if p["id"] in partial_dict:
                         res_dict[p["id"]] = partial_dict[p["id"]]
+                        
+                async with state_lock:
+                    for p in payload:
+                        idx = p["id"]
+                        if p["text"].strip() == "<i></i>":
+                            translated_subs[idx].content = "<i></i>"
+                            partial_dict[idx] = "<i></i>"
+                        elif idx in res_dict:
+                            translated_subs[idx].content = res_dict[idx]
+                            partial_dict[idx] = translated_subs[idx].content
 
-                # --- BABEL SMART RECOVERY (QA ENGINE) ---
-                missing_ids = [p["id"] for p in payload if p["id"] not in res_dict]
-                if missing_ids:
-                    logger.warning(f"QA: AI dropped {len(missing_ids)} lines in batch. Triggering Smart Recovery.")
+                    if partial_file:
+                        try:
+                            wrapper = {"fingerprint": fingerprint, "lines": partial_dict}
+                            tmp_file = partial_file + f".tmp.{start_idx}"
+                            with open(tmp_file, "w", encoding="utf-8") as f:
+                                json.dump(wrapper, f, ensure_ascii=False)
+                            os.replace(tmp_file, partial_file)
+                        except Exception as e:
+                            logger.error(f"Failed to save partial progress for job {job_id}: {e}")
+
+                    processed_count += len(payload)
                     if job_id:
-                        append_job_log(job_id, f"QA Alert: AI skipped {len(missing_ids)} lines. Triggering Smart Recovery for IDs: {missing_ids[:5]}...")
-
-                    missing_payload = [p for p in payload if p["id"] in missing_ids]
-
-                    # Micro-request for ONLY the missing lines
-                    try:
-                        recovery_results = await self.translate_batch(
-                            missing_payload,
-                            target_language=target_language,
-                            context_lines=previous_context if previous_context else None,
-                            show_title=show_title or ""
-                        )
-                        for r in recovery_results:
-                            if "id" in r and "text" in r and is_usable_translation(r["text"]):
-                                res_dict[r["id"]] = r["text"]
-
-                        still_missing = [p["id"] for p in payload if p["id"] not in res_dict]
-                        if not still_missing and job_id:
-                            append_job_log(job_id, f"QA Success: Smart Recovery successfully translated the missing lines!")
-                    except Exception as e:
-                        logger.error(f"Smart recovery failed: {e}")
-                        if job_id:
-                            append_job_log(job_id, f"QA Warning: Smart Recovery failed ({e}). Proceeding anyway.")
-                # ----------------------------------------
-
-                for p in payload:
-                    idx = p["id"]
-                    if p["text"].strip() == "<i></i>":
-                        translated_subs[idx].content = "<i></i>"
-                        partial_dict[idx] = "<i></i>"
-                    elif idx in res_dict:
-                        translated_subs[idx].content = res_dict[idx]
-                        partial_dict[idx] = translated_subs[idx].content
-
-                if partial_file:
-                    try:
-                        wrapper = {"fingerprint": fingerprint, "lines": partial_dict}
-                        tmp_file = partial_file + ".tmp"
-                        with open(tmp_file, "w", encoding="utf-8") as f:
-                            json.dump(wrapper, f, ensure_ascii=False)
-                        os.replace(tmp_file, partial_file)
-                    except Exception as e:
-                        logger.error(f"Failed to save partial progress for job {job_id}: {e}")
-
-                valid_translations = [
-                    {"original": p["text"], "translated": res_dict[p["id"]]}
-                    for p in payload if p["id"] in res_dict and p["text"].strip() != "<i></i>"
-                ]
-                if valid_translations:
-                    previous_context = valid_translations[-context_window_size:]
-
-                processed_count += len(payload)
-                if job_id:
-                    update_job(job_id, processed_lines=processed_count)
+                        update_job(job_id, processed_lines=processed_count)
 
             except ProviderUnavailableError as e:
-                # Let pipeline handle WAITING_PROVIDER
-                if job_id:
-                    update_job(job_id, processed_lines=processed_count)
+                async with state_lock:
+                    if job_id:
+                        update_job(job_id, processed_lines=processed_count)
                 raise e
             except Exception as e:
                 logger.error(f"Batch {start_idx} failed: {e}")
-                processed_count += len(payload)
-                if job_id:
-                    append_job_log(job_id, f"Warning: Lines {start_idx + 1}-{end_idx} could not be translated: {e}. Keeping original text.")
-                    update_job(job_id, processed_lines=processed_count)
+                async with state_lock:
+                    processed_count += len(payload)
+                    if job_id:
+                        append_job_log(job_id, f"Warning: Lines {start_idx + 1}-{end_idx} could not be translated: {e}. Keeping original text.")
+                        update_job(job_id, processed_lines=processed_count)
+
+        async def run_batch_with_sem(batch_idx, start_idx, chunk, payload):
+            async with sem:
+                await process_batch(batch_idx, start_idx, chunk, payload)
+
+        tasks = []
+        for batch_idx, (start_idx, chunk, payload) in enumerate(batches):
+            tasks.append(run_batch_with_sem(batch_idx, start_idx, chunk, payload))
+            
+        if tasks:
+            await asyncio.gather(*tasks)
 
         return translated_subs
-

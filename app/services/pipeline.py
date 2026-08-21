@@ -640,6 +640,7 @@ class SubtitlePipeline:
 
                 append_job_log(job_id, f"Translating to {lang_name} ({lang_code}) using {active_engine_name} ({total_source_lines} lines)...")
 
+                t_main_start = time.time()
                 translated_subs = await self.translator.translate_srt_content(
                     subs=subs,
                     target_language=lang_name,
@@ -647,6 +648,8 @@ class SubtitlePipeline:
                     job_id=job_id,
                     show_title=title
                 )
+                t_main_end = time.time()
+                append_job_log(job_id, f"Timing: Main translation phase completed in {round(t_main_end - t_main_start, 1)}s")
 
                 # --- NEVER GIVE UP RECOVERY LOOP ---
                 max_qa_loops = 3
@@ -805,42 +808,46 @@ class SubtitlePipeline:
                                 else:
                                     esc_info = "Primary Model (Contextual Mode)"
                                 append_job_log(job_id, f"Escalation Stage: {len(all_unresolved)} lines still unresolved. Escalating using {esc_info}...")
-                                for idx in all_unresolved:
+                                esc_sem = asyncio.Semaphore(3)
+                                async def escalate_one(idx):
+                                    nonlocal job_recovered_count
                                     prev_idx = max(0, idx - 1)
                                     next_idx = min(len(subs) - 1, idx + 1)
                                     prev_text = translated_subs[prev_idx].content if prev_idx != idx else ""
                                     next_text = subs[next_idx].content if next_idx != idx else ""
                                     target_text = subs[idx].content
+                                    async with esc_sem:
+                                        try:
+                                            esc_text = await self.translator.escalate_single_line(
+                                                idx, target_text, prev_text, next_text, lang_name, title or "",
+                                                is_real_untranslated=(idx in real_unresolved),
+                                                job_id=job_id
+                                            )
+                                            is_dropped = idx in dropped_unresolved
+                                            if esc_text:
+                                                esc_clean = esc_text.strip()
+                                                orig_clean = target_text.strip()
+                                                is_orig_real = orig_clean and orig_clean != "<i></i>"
+                                                is_esc_empty = not esc_clean or esc_clean == "<i></i>"
+                                                if not esc_clean:
+                                                    append_job_log(job_id, f"Escalation: Rejected empty text for line {idx}")
+                                                elif is_orig_real and is_esc_empty:
+                                                    append_job_log(job_id, f"Escalation: Rejected fake empty/tag for real dialogue at line {idx}")
+                                                elif is_dropped and esc_clean == orig_clean:
+                                                    append_job_log(job_id, f"Escalation: Rejected identical fallback for dropped line {idx}")
+                                                elif esc_text != translated_subs[idx].content:
+                                                    translated_subs[idx].content = esc_text
+                                                    append_job_log(job_id, f"Escalation: Translated line {idx} using dialogue context")
+                                                    job_recovered_count += 1
+                                        except Exception as e:
+                                            append_job_log(job_id, f"Escalation failed for line {idx}: {e}")
 
-                                    try:
-                                        esc_text = await self.translator.escalate_single_line(
-                                            idx, target_text, prev_text, next_text, lang_name, title or "",
-                                            is_real_untranslated=(idx in real_unresolved),
-                                            job_id=job_id
-                                        )
-                                        is_dropped = idx in dropped_unresolved
-                                        if esc_text:
-                                            esc_clean = esc_text.strip()
-                                            orig_clean = target_text.strip()
-                                            is_orig_real = orig_clean and orig_clean != "<i></i>"
-                                            is_esc_empty = not esc_clean or esc_clean == "<i></i>"
-
-                                            if not esc_clean:
-                                                append_job_log(job_id, f"Escalation: Rejected empty text for line {idx}")
-                                            elif is_orig_real and is_esc_empty:
-                                                append_job_log(job_id, f"Escalation: Rejected fake empty/tag for real dialogue at line {idx}")
-                                            elif is_dropped and esc_clean == orig_clean:
-                                                append_job_log(job_id, f"Escalation: Rejected identical fallback for dropped line {idx}")
-                                            elif esc_text != translated_subs[idx].content:
-                                                translated_subs[idx].content = esc_text
-                                                append_job_log(job_id, f"Escalation: Translated line {idx} using dialogue context")
-                                                job_recovered_count += 1
-                                        else:
-                                            # We just let it be None and it failed.
-                                            # The specific failure reason is already logged via logger in escalate_single_line.
-                                            pass
-                                    except Exception as e:
-                                        append_job_log(job_id, f"Escalation failed for line {idx}: {e}")
+                                esc_tasks = [escalate_one(idx) for idx in all_unresolved]
+                                if esc_tasks:
+                                    t_esc_start = time.time()
+                                    await asyncio.gather(*esc_tasks)
+                                    t_esc_end = time.time()
+                                    append_job_log(job_id, f"Timing: Escalation phase ({len(esc_tasks)} cues) completed in {round(t_esc_end - t_esc_start, 1)}s")
 
                                 # Final QA rerun after escalation
                                 qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
@@ -925,12 +932,14 @@ class SubtitlePipeline:
                     # Save Translation Memory only after QA PASS
                     if title:
                         try:
-                            from app.core.db import save_translation_memory
+                            from app.core.db import save_translation_memory_bulk
+                            tm_items = []
                             for idx in range(len(subs)):
                                 orig_t = subs[idx].content.strip()
                                 trans_t = translated_subs[idx].content.strip()
                                 if orig_t and trans_t and orig_t != "<i></i>" and trans_t != "<i></i>":
-                                    save_translation_memory(title, orig_t, trans_t)
+                                    tm_items.append({"original": orig_t, "translated": trans_t})
+                            save_translation_memory_bulk(title, tm_items)
                         except Exception as e:
                             logger.error(f"Failed to save translation memory: {e}")
 
