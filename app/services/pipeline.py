@@ -687,7 +687,7 @@ class SubtitlePipeline:
                                 recovery_payload = [
                                     {"id": idx, "text": subs[idx].content}
                                     for idx in identical_ids
-                                    if subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>"
+                                    if subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>" and idx not in safe_ids
                                 ]
                                 if recovery_payload:
                                     provider = get_setting("ai_provider", "gemini").lower()
@@ -782,7 +782,8 @@ class SubtitlePipeline:
 
                                     try:
                                         esc_text = await self.translator.escalate_single_line(
-                                            idx, target_text, prev_text, next_text, lang_name, title or ""
+                                            idx, target_text, prev_text, next_text, lang_name, title or "",
+                                            is_real_untranslated=(idx in real_unresolved)
                                         )
                                         is_dropped = idx in dropped_unresolved
                                         if esc_text:
@@ -801,6 +802,10 @@ class SubtitlePipeline:
                                                 translated_subs[idx].content = esc_text
                                                 append_job_log(job_id, f"Escalation: Translated line {idx} using dialogue context")
                                                 job_recovered_count += 1
+                                        else:
+                                            # We just let it be None and it failed.
+                                            # The specific failure reason is already logged via logger in escalate_single_line.
+                                            pass
                                     except Exception as e:
                                         append_job_log(job_id, f"Escalation failed for line {idx}: {e}")
 

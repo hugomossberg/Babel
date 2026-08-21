@@ -387,7 +387,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         return openai.OpenAI(api_key=api_key)
 
     @with_retry
-    async def escalate_single_line(self, target_idx: int, target_text: str, prev_text: str, next_text: str, target_language: str, show_title: str) -> str:
+    async def escalate_single_line(self, target_idx: int, target_text: str, prev_text: str, next_text: str, target_language: str, show_title: str, is_real_untranslated: bool = False) -> Optional[str]:
         import logging
         logger = logging.getLogger(__name__)
 
@@ -399,9 +399,12 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             provider = esc_provider
 
         if provider == "deepl":
-            return target_text
+            return None
 
-        system_prompt = f"You are a subtitle translator. Translate the TARGET line to {target_language}. The Previous and Next lines are for context only. Return a JSON object with a single key 'translation' containing the translated string."
+        if is_real_untranslated:
+            system_prompt = f"You MUST translate TARGET into {target_language}.\nTARGET is known to still be untranslated English dialogue.\nDo NOT return the English source.\nDo NOT return an empty string.\nPrevious/Next are context only.\nReturn a JSON object with a single key 'translation' containing only the translated TARGET."
+        else:
+            system_prompt = f"You are a subtitle translator. Translate the TARGET line to {target_language}. The Previous and Next lines are for context only. Return a JSON object with a single key 'translation' containing the translated string."
         prompt = f"Context: {show_title}\n\nPrevious: {prev_text}\nTARGET: {target_text}\nNext: {next_text}\n\nTranslate TARGET:"
 
         schema = {
@@ -412,7 +415,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             "required": ["translation"]
         }
 
-        def _safe_parse(raw_resp: str) -> str:
+        def _safe_parse(raw_resp: str) -> Optional[str]:
             clean_text = raw_resp.strip()
             if clean_text.startswith("```"):
                 lines = clean_text.split('\n')
@@ -422,18 +425,20 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             try:
                 data = json.loads(clean_text)
                 res = data.get("translation", "").strip()
-                if res and res != target_text:
-                    logger.info(f"Escalation line {target_idx}: valid translation returned ({len(res)} chars)")
-                    return res
-                elif res == target_text:
-                    logger.info(f"Escalation line {target_idx}: returned identical text")
-                    return target_text
-                else:
-                    logger.info(f"Escalation line {target_idx}: returned empty translation")
-                    return target_text
+
+                if not is_usable_translation(res):
+                    logger.info(f"Escalation line {target_idx}: rejected blank result")
+                    return None
+
+                if res.strip().lower() == target_text.strip().lower():
+                    logger.info(f"Escalation line {target_idx}: rejected identical source")
+                    return None
+
+                logger.info(f"Escalation line {target_idx}: valid translation returned ({len(res)} chars)")
+                return res
             except Exception as e:
                 logger.error(f"Escalation line {target_idx} JSON parse failed: {e}. Raw: {raw_resp[:50]}")
-                return target_text
+                return None
 
         try:
             if provider == "gemini":
@@ -762,7 +767,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                         show_title=show_title or ""
                     )
                     res_dict = {r["id"]: r["text"] for r in results if "id" in r and "text" in r and is_usable_translation(r["text"])}
-                
+
                 # Merge back the already solved cues
                 for p in payload:
                     if p["id"] in partial_dict:

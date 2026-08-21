@@ -15,12 +15,12 @@ def setup_teardown_db(tmp_path):
     app.core.db.DB_PATH = "/tmp/test_dropped_babel.db"
     app.core.db.init_db()
     app.core.db.clear_all_jobs()
-    
+
     video = tmp_path / "test_dropped.mkv"
     video.touch()
-    
+
     yield str(video)
-    
+
     app.core.db.clear_all_jobs()
     app.core.db.DB_PATH = original_db
 
@@ -28,16 +28,16 @@ def setup_teardown_db(tmp_path):
 async def test_dropped_line_recovery(setup_teardown_db):
     video_path = setup_teardown_db
     job_id = app.core.db.create_job(video_path, "MANUAL", "test title")
-    
+
     # Create 675 source cues
     source_subs = []
     for i in range(1, 676):
         source_subs.append(srt.Subtitle(i, timedelta(seconds=i), timedelta(seconds=i+1), f"Source English Dialogue {i}"))
-        
+
     srt_path = video_path.replace(".mkv", ".en.srt")
     with open(srt_path, "w") as f:
         f.write(srt.compose(source_subs))
-        
+
     # First pass: returns 675 cues, but 2 are dropped
     first_pass_subs = []
     for i in range(1, 676):
@@ -45,12 +45,12 @@ async def test_dropped_line_recovery(setup_teardown_db):
             first_pass_subs.append(srt.Subtitle(i, timedelta(seconds=i), timedelta(seconds=i+1), ""))
         else:
             first_pass_subs.append(srt.Subtitle(i, timedelta(seconds=i), timedelta(seconds=i+1), f"Svensk översättning dialog {i}"))
-            
+
     async def mock_translate_srt_content(*args, **kwargs):
         import copy
         return copy.deepcopy(first_pass_subs)
-        
-    async def mock_escalate_single_line(target_idx, target_text, prev_text, next_text, target_language, show_title):
+
+    async def mock_escalate_single_line(target_idx, target_text, prev_text, next_text, target_language, show_title, is_real_untranslated=False, **kwargs):
         assert target_idx in [99, 499] # 0-indexed
         if target_idx == 99:
             return "Reparerad svensk text 100"
@@ -64,17 +64,17 @@ async def test_dropped_line_recovery(setup_teardown_db):
                 with patch("app.services.pipeline.find_external_subtitle", return_value=srt_path):
                     with patch("os.rename"):
                         result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
-                    
+
     assert result["status"] == "translated"
-    
+
     job = app.core.db.get_job_by_id(job_id)
     assert job["status"] == "TRANSLATED"
     assert job["dropped_lines"] == 0
     assert job["total_lines"] == 675
-    
+
     # Check that 2 were recovered
     logs = job["logs"] if isinstance(job["logs"], list) else []
-    
+
     # Verify the summary line
     summary_line = next((log for log in logs if "2 translated on recovery" in log), None)
     assert summary_line is not None, "Bookkeeping for recovered_count failed"
