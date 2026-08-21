@@ -651,13 +651,14 @@ class SubtitlePipeline:
                 # --- NEVER GIVE UP RECOVERY LOOP ---
                 max_qa_loops = 3
                 qa_loop_count = 0
+                known_untranslated_ids = set()
 
                 while qa_loop_count < max_qa_loops:
                     qa_loop_count += 1
 
                     if qa_loop_count > 1:
                         append_job_log(job_id, f"--- QA RECOVERY LOOP {qa_loop_count}/{max_qa_loops} ---")
-                        update_job(job_id, status="RECOVERING")
+
 
                     # Strict Sync Lock: Match source timestamps exactly to guarantee 0ms drift
                     if strict_sync_lock and len(translated_subs) == len(subs):
@@ -687,7 +688,7 @@ class SubtitlePipeline:
                                 recovery_payload = [
                                     {"id": idx, "text": subs[idx].content}
                                     for idx in identical_ids
-                                    if subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>" and idx not in safe_ids
+                                    if subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>" and idx not in safe_ids and idx not in known_untranslated_ids
                                 ]
                                 if recovery_payload:
                                     provider = get_setting("ai_provider", "gemini").lower()
@@ -764,8 +765,39 @@ class SubtitlePipeline:
                             all_unresolved = list(set(real_unresolved + dropped_unresolved))
                             all_unresolved.sort()
 
+
+                            if all_unresolved:
+                                # Add to known untranslated so they don't get classified again
+                                for uid in all_unresolved:
+                                    known_untranslated_ids.add(uid)
+
+                                append_job_log(job_id, f"Targeted Recovery: translating {len(all_unresolved)} unresolved dialogue cues")
+                                batch_payload = [{"id": idx, "text": subs[idx].content} for idx in all_unresolved]
+
+                                try:
+                                    targeted_results = await self.translator.translate_batch(batch_payload, target_language=lang_name, show_title=title or "")
+                                    targeted_success = 0
+                                    for r in targeted_results:
+                                        idx = r.get("id")
+                                        if idx is None: continue
+                                        text = r.get("text", "")
+                                        if is_usable_translation(text) and text != subs[idx].content:
+                                            translated_subs[idx].content = text
+                                            targeted_success += 1
+                                    append_job_log(job_id, f"Targeted Recovery: translated {targeted_success}/{len(all_unresolved)}")
+                                except Exception as e:
+                                    append_job_log(job_id, f"Targeted Recovery failed: {e}")
+
+                                # Re-run QA again to get the remaining stubborn cues
+                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
+                                real_unresolved = qa_result.get("real_untranslated_ids", [])
+                                dropped_unresolved = [d["index"] - 1 for d in qa_result.get("dropped_details", [])]
+                                all_unresolved = list(set(real_unresolved + dropped_unresolved))
+                                all_unresolved.sort()
+
                             if all_unresolved:
                                 esc_enabled = get_setting("escalate_to_pro", "false").lower() == "true"
+
                                 esc_prov = get_setting("escalation_provider", "none")
                                 esc_mod = get_setting("escalation_model", "")
                                 if esc_enabled and esc_prov != "none" and esc_mod:

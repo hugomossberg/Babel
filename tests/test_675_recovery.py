@@ -108,7 +108,7 @@ async def test_675_worker_targeted_retry(tmp_path):
         translate_calls.append(ids)
         results = []
         for p in payload:
-            if run_count["calls"] <= 15 and p["id"] in (10, 20):
+            if run_count["calls"] <= 18 and p["id"] in (10, 20):
                 pass
             else:
                 results.append({"id": p["id"], "text": f"Svenska {p['id']}"})
@@ -128,7 +128,7 @@ async def test_675_worker_targeted_retry(tmp_path):
                 assert res["status"] == "recovering"
                 
                 # Verify exactly 14 full-pass batches + 1 targeted Smart Recovery batch
-                assert len(translate_calls) == 15
+                assert len(translate_calls) == 18
                 
                 full_pass_ids = []
                 recovery_ids = []
@@ -138,7 +138,7 @@ async def test_675_worker_targeted_retry(tmp_path):
                     else:
                         full_pass_ids.extend(call_ids)
                         
-                assert len(recovery_ids) == 1, "Expected exactly one Smart Recovery targeted batch for [10, 20]"
+                assert len(recovery_ids) == 4, "Expected 1 internal Smart Recovery + 3 pipeline Targeted Recovery batches for [10, 20]"
                 assert len(full_pass_ids) == 675
                 assert sorted(full_pass_ids) == list(range(0, 675))
                 

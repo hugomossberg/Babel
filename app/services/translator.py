@@ -409,7 +409,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         attempts = [
             {"provider": configured_esc, "type": "contextual"},
             {"provider": configured_esc, "type": "strict"},
-            {"provider": configured_alt, "type": "strict"},
+            {"provider": configured_esc, "type": "isolated"},
         ]
 
         for i, attempt in enumerate(attempts):
@@ -422,9 +422,12 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 else:
                     system_prompt = f"You are a subtitle translator. Translate the TARGET line to {target_language}. The Previous and Next lines are for context only. Return a JSON object with a single key 'translation' containing the translated string."
                 prompt = f"Context: {show_title}\n\nPrevious: {prev_text}\nTARGET: {target_text}\nNext: {next_text}\n\nTranslate TARGET:"
+            elif attempt_type == "strict":
+                system_prompt = f"You are a strict translation engine."
+                prompt = f"This cue has already failed QA because source-language dialogue remains.\n\nTranslate TARGET into {target_language}.\n\nTARGET:\n\"{target_text}\"\n\nPrevious/Next may only help disambiguation.\n\nYou MUST NOT:\n- classify TARGET\n- decide KEEP\n- return TARGET unchanged\n- return blank text\n\nReturn the actual translated TARGET.\n\nContext:\nPrevious: {prev_text}\nNext: {next_text}"
             else:
                 system_prompt = f"You are a strict translation engine."
-                prompt = f"Translate ONLY this English dialogue line into {target_language}.\n\nSOURCE:\n\"{target_text}\"\n\nRequirements:\n- Return an actual {target_language} translation.\n- Never return the English SOURCE.\n- Never return blank text.\n- Do not classify the line.\n- Previous/Next are context only.\n- Return only structured translation output.\n\nContext:\nPrevious: {prev_text}\nNext: {next_text}"
+                prompt = f"Translate this subtitle dialogue into {target_language}.\n\nSOURCE:\n\"{target_text}\"\n\nReturn only the translated dialogue.\nDo not return the source text.\nDo not explain or classify."
 
             schema = {
                 "type": "OBJECT",
