@@ -30,16 +30,16 @@ async def test_a_target_appears_after_extraction(mock_db_settings, tmp_path, mon
     en_srt = tmp_path / "test.en.srt"
     with open(en_srt, "w") as f:
         f.write("1\n00:00:00,000 --> 00:00:01,000\nHello\n")
-    
+
     pipeline = SubtitlePipeline()
-    
+
     translate_calls = 0
     async def mock_translate_batch(*args, **kwargs):
         nonlocal translate_calls
         translate_calls += 1
         return [{"id": 0, "text": "Hej"}]
     monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
-    
+
     async def mock_escalate(*args, **kwargs):
         return "Hej"
     monkeypatch.setattr(pipeline.translator, "escalate_single_line", mock_escalate)
@@ -47,7 +47,7 @@ async def test_a_target_appears_after_extraction(mock_db_settings, tmp_path, mon
     # We mock find_external_subtitle to return None the FIRST time (before extraction)
     # and the sv.srt path the SECOND time (mid-job check).
     sv_srt_path = str(tmp_path / "test.sv.srt")
-    
+
     call_count = 0
     def mock_find(vp, lang):
         nonlocal call_count
@@ -66,16 +66,16 @@ async def test_a_target_appears_after_extraction(mock_db_settings, tmp_path, mon
         if lang == "en":
             return str(en_srt)
         return None
-        
+
     with patch("app.services.pipeline.find_external_subtitle", side_effect=mock_find):
         res = await pipeline.process_video_file(str(video_path), event_source="MANUAL")
-        
+
     assert res["status"] != "failed"
     assert translate_calls == 0  # AI translation skipped
-    
+
     job = get_job_by_id(res["job_id"])
     assert job["status"] == "TRANSLATED" or job["status"] == "ALREADY_EXISTS" or job["status"] == "COMPLETED"
-    
+
 @pytest.mark.asyncio
 async def test_b_target_appears_before_publish(mock_db_settings, tmp_path, monkeypatch):
     video_path = tmp_path / "test.mkv"
@@ -83,16 +83,16 @@ async def test_b_target_appears_before_publish(mock_db_settings, tmp_path, monke
     en_srt = tmp_path / "test.en.srt"
     with open(en_srt, "w") as f:
         f.write("1\n00:00:00,000 --> 00:00:01,000\nHello\n")
-        
+
     pipeline = SubtitlePipeline()
-    
+
     translate_calls = 0
     async def mock_translate_batch(*args, **kwargs):
         nonlocal translate_calls
         translate_calls += 1
         return [{"id": 0, "text": "Hej"}]
     monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
-    
+
     async def mock_escalate(*args, **kwargs):
         return "Hej"
     monkeypatch.setattr(pipeline.translator, "escalate_single_line", mock_escalate)
@@ -116,13 +116,13 @@ async def test_b_target_appears_before_publish(mock_db_settings, tmp_path, monke
         if lang == "en":
             return str(en_srt)
         return None
-        
+
     with patch("app.services.pipeline.find_external_subtitle", side_effect=mock_find):
         res = await pipeline.process_video_file(str(video_path), event_source="MANUAL")
-        
+
     assert res["status"] != "failed"
     assert translate_calls == 1  # AI translation happened
-    
+
     # Check that the external target was NOT overwritten
     with open(sv_srt_path, "r") as f:
         content = f.read()
@@ -140,14 +140,14 @@ async def test_c_qa_fail_no_target_created(mock_db_settings, tmp_path, monkeypat
         for i in range(1, 101):
             lines.append(f"{i}\n00:00:0{i%10},000 --> 00:00:0{i%10},500\nHello {i}\n")
         f.write("\n".join(lines))
-        
+
     pipeline = SubtitlePipeline()
-    
+
     async def mock_translate_batch(*args, **kwargs):
         # Return empty list to simulate total failure/dropped lines -> QA FAIL
         return []
     monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
-    
+
     async def mock_escalate(*args, **kwargs):
         return None  # Fail escalation too, so QA fails
     monkeypatch.setattr(pipeline.translator, "escalate_single_line", mock_escalate)
@@ -155,11 +155,64 @@ async def test_c_qa_fail_no_target_created(mock_db_settings, tmp_path, monkeypat
     def mock_find(vp, lang):
         if lang == "en": return str(en_srt)
         return None
-        
+
     with patch("app.services.pipeline.find_external_subtitle", side_effect=mock_find):
         res = await pipeline.process_video_file(str(video_path), event_source="MANUAL")
-        
+
     assert res["status"] in ["failed", "recovering"]
-    
+
     sv_srt_path = tmp_path / "test.sv.srt"
     assert not sv_srt_path.exists()
+
+@pytest.mark.asyncio
+async def test_d_final_no_clobber_race(mock_db_settings, tmp_path, monkeypatch):
+    video_path = tmp_path / "test.mkv"
+    video_path.touch()
+    en_srt = tmp_path / "test.en.srt"
+    with open(en_srt, "w") as f:
+        f.write("1\n00:00:00,000 --> 00:00:01,000\nHello\n")
+
+    pipeline = SubtitlePipeline()
+
+    translate_calls = 0
+    async def mock_translate_batch(*args, **kwargs):
+        nonlocal translate_calls
+        translate_calls += 1
+        return [{"id": 0, "text": "Hej"}]
+    monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
+
+    sv_srt_path = str(tmp_path / "test.sv.srt")
+    def mock_find(vp, lang):
+        if lang == "en": return str(en_srt)
+        return None
+
+    # We mock os.link to raise FileExistsError, simulating Bazarr creating the file EXACTLY when we publish
+    original_link = os.link
+
+    def mock_link(src, dst):
+        if dst == sv_srt_path:
+            # Create the file just before we fail, simulating race condition
+            with open(sv_srt_path, "w") as f:
+                lines = []
+                for i in range(1, 10):
+                    lines.append(f"{i}\n00:00:0{i},000 --> 00:00:0{i},500\nSvensk text extern rad {i}\n")
+                f.write("\n".join(lines))
+            raise FileExistsError(f"File exists: {dst}")
+        return original_link(src, dst)
+
+    with patch("app.services.pipeline.find_external_subtitle", side_effect=mock_find), \
+         patch("os.link", side_effect=mock_link):
+        res = await pipeline.process_video_file(str(video_path), event_source="MANUAL")
+
+    assert res["status"] != "failed"
+    assert translate_calls == 1  # AI translation happened
+
+    # Check that the external target was NOT overwritten
+    with open(sv_srt_path, "r") as f:
+        content = f.read()
+    assert "Svensk text extern" in content
+    assert "Hej" not in content
+
+    job = get_job_by_id(res["job_id"])
+    logs = "".join(job["logs"])
+    assert "External healthy sv subtitle appeared during publish. Skipping publish." in logs

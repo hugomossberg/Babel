@@ -556,11 +556,32 @@ class SubtitlePipeline:
             err = "No English subtitle source found (neither embedded, external nor via Bazarr safety net)"
             append_job_log(job_id, f"ERROR: {err}")
             duration = round(time.time() - start_time, 2)
-            update_job(job_id, status="FAILED", error_message=err, duration_seconds=duration)
-            if os.path.exists(temp_extracted_srt):
-                try: os.remove(temp_extracted_srt)
-                except: pass
-            return {"status": "failed", "reason": err, "job_id": job_id}
+
+            from app.core.db import get_job_by_id
+            job_data = get_job_by_id(job_id)
+            current_retries = job_data.get("retry_count", 0) if job_data else 0
+
+            if current_retries < 4:
+                backoff_mins = [1, 5, 15, 30][current_retries]
+                from datetime import datetime, timezone, timedelta
+                next_retry_at = (datetime.now(timezone.utc) + timedelta(minutes=backoff_mins)).isoformat()
+
+                update_job(job_id,
+                           status="WAITING_SOURCE",
+                           error_message=err,
+                           duration_seconds=duration,
+                           retry_count=current_retries + 1,
+                           next_retry_at=next_retry_at)
+                if os.path.exists(temp_extracted_srt):
+                    try: os.remove(temp_extracted_srt)
+                    except: pass
+                return {"status": "waiting_source", "reason": err, "job_id": job_id}
+            else:
+                update_job(job_id, status="FAILED", error_message=err, duration_seconds=duration)
+                if os.path.exists(temp_extracted_srt):
+                    try: os.remove(temp_extracted_srt)
+                    except: pass
+                return {"status": "failed", "reason": err, "job_id": job_id}
 
         try:
             # -------------------------------------------------------------
@@ -798,6 +819,7 @@ class SubtitlePipeline:
                                         text = r.get("text", "")
                                         if is_usable_translation(text) and text != subs[idx].content:
                                             translated_subs[idx].content = text
+                                            recovered_cues.add(idx)
                                             targeted_success += 1
                                     append_job_log(job_id, f"Targeted Recovery: translated {targeted_success}/{len(all_unresolved)}")
                                 except Exception as e:
@@ -935,9 +957,61 @@ class SubtitlePipeline:
                             logger.warning(f"Could not set permissions for {temp_output}: {e}")
 
                         # Atomic replace to prevent partial reads by media server
-                        os.replace(temp_output, target_output_path)
-                        output_files.append(target_output_path)
-                        successful_langs.append(lang_code)
+                        publish_success = False
+                        try:
+                            # Use hardlink for atomic no-clobber
+                            os.link(temp_output, target_output_path)
+                            os.remove(temp_output)
+                            publish_success = True
+                        except FileExistsError:
+                            # Someone beat us to it
+                            health = evaluate_subtitle_health(target_output_path, target_lang_code=lang_code)
+                            if health.get("status") == "GREEN":
+                                append_job_log(job_id, f"External healthy {lang_code} subtitle appeared during publish. Skipping publish.")
+                                skip_publish = True
+                                try: os.remove(temp_output)
+                                except: pass
+                            else:
+                                # Overwrite unhealthy
+                                os.replace(temp_output, target_output_path)
+                                append_job_log(job_id, f"Overwrote unhealthy external {lang_code} subtitle during publish.")
+                                publish_success = True
+                        except OSError:
+                            # Fallback if hardlinks are not supported on this filesystem
+                            if os.path.exists(target_output_path):
+                                health = evaluate_subtitle_health(target_output_path, target_lang_code=lang_code)
+                                if health.get("status") == "GREEN":
+                                    append_job_log(job_id, f"External healthy {lang_code} subtitle appeared during publish. Skipping publish.")
+                                    skip_publish = True
+                                    try: os.remove(temp_output)
+                                    except: pass
+                                else:
+                                    os.replace(temp_output, target_output_path)
+                                    append_job_log(job_id, f"Overwrote unhealthy external {lang_code} subtitle during publish.")
+                                    publish_success = True
+                            else:
+                                # To prevent TOCTOU race condition in fallback, use O_CREAT|O_EXCL to claim name
+                                try:
+                                    fd = os.open(target_output_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                                    os.close(fd)
+                                except FileExistsError:
+                                    health = evaluate_subtitle_health(target_output_path, target_lang_code=lang_code)
+                                    if health.get("status") == "GREEN":
+                                        append_job_log(job_id, f"External healthy {lang_code} subtitle appeared during publish (fallback). Skipping.")
+                                        skip_publish = True
+                                        try: os.remove(temp_output)
+                                        except: pass
+                                    else:
+                                        os.replace(temp_output, target_output_path)
+                                        publish_success = True
+                                else:
+                                    os.replace(temp_output, target_output_path)
+                                    publish_success = True
+
+                        if publish_success:
+                            output_files.append(target_output_path)
+                            successful_langs.append(lang_code)
+                            append_job_log(job_id, f"Published {os.path.basename(target_output_path)}")
 
                     # Clean up partial progress file since we successfully finished
                     from app.core.db import DB_PATH
@@ -988,9 +1062,7 @@ class SubtitlePipeline:
                 for line in summary_lines:
                     append_job_log(job_id, line)
 
-                if qa_result["passed"]:
-                    append_job_log(job_id, f"Published {os.path.basename(target_output_path)}")
-                else:
+                if not qa_result["passed"]:
                     append_job_log(job_id, f"BLOCKED: {lang_name} translation failed QA. File NOT published.")
 
             # Clean up temp file

@@ -7,7 +7,18 @@ from app.core.db import get_setting
 
 logger = logging.getLogger("babel.scanner")
 
-VIDEO_EXTS = (".mkv", ".mp4", ".avi")
+VIDEO_EXTS = (".mkv", ".mp4", ".m4v", ".avi")
+
+def _fast_count_subtitle_lines(path: str) -> int:
+    """Cheaply estimate subtitle line count by counting '-->' without parsing."""
+    try:
+        count = 0
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                count += chunk.count(b"-->")
+        return count
+    except Exception:
+        return 0
 
 def _get_target_lang_codes():
     """Get configured target language codes."""
@@ -33,7 +44,7 @@ def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[
         # Group by show directory
         try:
             for show_name in sorted(os.listdir(root_path)):
-                show_dir = os.path.join(root_path, show_name)
+                show_dir = os.path.normpath(os.path.join(root_path, show_name))
                 if not os.path.isdir(show_dir):
                     continue
 
@@ -41,26 +52,21 @@ def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[
                 for root, _, files in os.walk(show_dir):
                     for file in sorted(files):
                         if file.lower().endswith(VIDEO_EXTS):
-                            video_full_path = os.path.join(root, file)
+                            video_full_path = os.path.normpath(os.path.join(root, file))
                             base_name, _ = os.path.splitext(file)
-                            
+
                             # Check for external subtitles in the same folder (ignoring temp files)
                             subs = []
+                            import re
+                            pattern = re.compile(re.escape(base_name) + r'(\.[a-z]{2,3}(-[A-Z]{2})?)?(\.(forced|hi|sdh|cc|signs|songs))?\.srt$', re.IGNORECASE)
                             try:
                                 for f in os.listdir(root):
-                                    if f.startswith(base_name) and f.endswith(".srt") and ".temp" not in f:
-                                        sub_path = os.path.join(root, f)
-                                        line_count = 0
-                                        try:
-                                            with open(sub_path, "r", encoding="utf-8", errors="ignore") as sf:
-                                                content = sf.read()
-                                                line_count = len(list(srt.parse(content)))
-                                        except Exception:
-                                            line_count = 0
+                                    if pattern.match(f) and ".temp" not in f:
+                                        sub_path = os.path.normpath(os.path.join(root, f))
                                         subs.append({
                                             "filename": f,
                                             "path": sub_path,
-                                            "lines": line_count
+                                            "lines": _fast_count_subtitle_lines(sub_path)
                                         })
                             except Exception:
                                 pass
@@ -72,7 +78,7 @@ def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[
                                 pass
 
                             rel_season = os.path.basename(root)
-                            
+
                             has_target_sub = False
                             for sub in subs:
                                 fname_lower = sub["filename"].lower()
@@ -81,7 +87,7 @@ def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[
                                 if any(f".{lang}." in fname_lower for lang in target_langs):
                                     has_target_sub = True
                                     break
-                                    
+
                             show_episodes.append({
                                 "filename": file,
                                 "path": video_full_path,
@@ -106,25 +112,20 @@ def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[
             for root, _, files in os.walk(root_path):
                 for file in sorted(files):
                     if file.lower().endswith(VIDEO_EXTS):
-                        video_full_path = os.path.join(root, file)
+                        video_full_path = os.path.normpath(os.path.join(root, file))
                         base_name, _ = os.path.splitext(file)
-                        
+
                         subs = []
+                        import re
+                        pattern = re.compile(re.escape(base_name) + r'(\.[a-z]{2,3}(-[A-Z]{2})?)?(\.(forced|hi|sdh|cc|signs|songs))?\.srt$', re.IGNORECASE)
                         try:
                             for f in os.listdir(root):
-                                if f.startswith(base_name) and f.endswith(".srt") and ".temp" not in f:
-                                    sub_path = os.path.join(root, f)
-                                    line_count = 0
-                                    try:
-                                        with open(sub_path, "r", encoding="utf-8", errors="ignore") as sf:
-                                            content = sf.read()
-                                            line_count = len(list(srt.parse(content)))
-                                    except Exception:
-                                        line_count = 0
+                                if pattern.match(f) and ".temp" not in f:
+                                    sub_path = os.path.normpath(os.path.join(root, f))
                                     subs.append({
                                         "filename": f,
                                         "path": sub_path,
-                                        "lines": line_count
+                                        "lines": _fast_count_subtitle_lines(sub_path)
                                     })
                         except Exception:
                             pass

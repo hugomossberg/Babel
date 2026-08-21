@@ -104,7 +104,7 @@ def init_db():
             "media_movies_path": "/movies",
             "webhook_secret": os.getenv("BABEL_WEBHOOK_SECRET", ""),
             "languages": json.dumps([
-                {"name": "English", "code": "en", "enabled": True}
+                {"name": "Swedish", "code": "sv", "enabled": True}
             ])
         }
         for k, v in defaults.items():
@@ -199,7 +199,7 @@ def clear_all_jobs():
 def claim_job_for_retry(job_id: int) -> bool:
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE jobs SET status = 'QUEUED' WHERE id = ? AND status IN ('WAITING_PROVIDER', 'RETRY_PENDING', 'RECOVERING')", (job_id,))
+        cursor.execute("UPDATE jobs SET status = 'QUEUED' WHERE id = ? AND status IN ('WAITING_PROVIDER', 'RETRY_PENDING', 'RECOVERING', 'PARTIAL', 'WAITING_SOURCE')", (job_id,))
         conn.commit()
         return cursor.rowcount > 0
 

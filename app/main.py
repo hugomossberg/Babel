@@ -95,12 +95,12 @@ async def serve_ui():
 async def process_one_retry_pass():
     from app.core.db import claim_job_for_retry
     try:
-        jobs = get_jobs_by_status(["WAITING_PROVIDER", "RETRY_PENDING", "RECOVERING", "PARTIAL"])
+        jobs = get_jobs_by_status(["WAITING_PROVIDER", "RETRY_PENDING", "RECOVERING", "PARTIAL", "WAITING_SOURCE"])
         for job in jobs:
             try:
                 should_retry = False
                 now = datetime.now(timezone.utc)
-                if job["status"] in ["RETRY_PENDING", "WAITING_PROVIDER", "RECOVERING", "PARTIAL"]:
+                if job["status"] in ["RETRY_PENDING", "WAITING_PROVIDER", "RECOVERING", "PARTIAL", "WAITING_SOURCE"]:
                     if job.get("next_retry_at"):
                         next_retry_at = datetime.fromisoformat(job["next_retry_at"])
                         if now >= next_retry_at:
