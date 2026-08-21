@@ -79,10 +79,10 @@ async def test_never_give_up_fails_all_loops(setup_teardown_db):
 
     video_path = setup_teardown_db
     job_id = create_job(video_path, "MANUAL")
-    en_srt_content = "1\n00:00:00,000 --> 00:00:01,000\nLine 1\n"
+    en_srt_content = "1\n00:00:00,000 --> 00:00:01,000\nLine 1\n\n2\n00:00:01,000 --> 00:00:02,000\nLine 2\n\n3\n00:00:02,000 --> 00:00:03,000\nLine 3\n\n4\n00:00:03,000 --> 00:00:04,000\nLine 4\n"
     
     async def mock_translate(*args, **kwargs):
-        return make_srt_mock([""])
+        return make_srt_mock(["", "", ""])
             
     with patch("app.services.pipeline.find_external_subtitle", return_value=video_path), \
          patch("builtins.open", MagicMock(side_effect=lambda *a, **k: MagicMock(__enter__=lambda *x: MagicMock(read=lambda: en_srt_content), __exit__=lambda *x: None))), \
@@ -123,9 +123,9 @@ async def test_recovering_is_not_dead_state(setup_teardown_db):
     past_time = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
     update_job(job_id, status="RECOVERING", next_retry_at=past_time)
     
-    en_srt_content = "1\n00:00:00,000 --> 00:00:01,000\nLine 1\n"
+    en_srt_content = "1\n00:00:00,000 --> 00:00:01,000\nLine 1\n\n2\n00:00:01,000 --> 00:00:02,000\nLine 2\n\n3\n00:00:02,000 --> 00:00:03,000\nLine 3\n\n4\n00:00:03,000 --> 00:00:04,000\nLine 4\n"
     async def mock_translate_good(*args, **kwargs):
-        return make_srt_mock(["Detta är definitivt svensk text"])
+        return make_srt_mock(["Detta är svensk 1", "Detta är svensk 2", "Detta är svensk 3", "Detta är svensk 4"])
         
     with patch("app.services.pipeline.find_external_subtitle", return_value=video_path), \
          patch("builtins.open", MagicMock(side_effect=lambda *a, **k: MagicMock(__enter__=lambda *x: MagicMock(read=lambda: en_srt_content), __exit__=lambda *x: None))), \
@@ -154,7 +154,7 @@ async def test_generic_exception_classification(setup_teardown_db):
 
     video_path = setup_teardown_db
     job_id = create_job(video_path, "MANUAL")
-    en_srt_content = "1\n00:00:00,000 --> 00:00:01,000\nLine 1\n"
+    en_srt_content = "1\n00:00:00,000 --> 00:00:01,000\nLine 1\n\n2\n00:00:01,000 --> 00:00:02,000\nLine 2\n\n3\n00:00:02,000 --> 00:00:03,000\nLine 3\n\n4\n00:00:03,000 --> 00:00:04,000\nLine 4\n"
     
     async def mock_translate_timeout(*args, **kwargs):
         raise Exception("Request timeout after 30s")
@@ -201,10 +201,10 @@ async def test_persistent_retry_count_and_backoff(setup_teardown_db):
 
     video_path = setup_teardown_db
     job_id = create_job(video_path, "MANUAL")
-    en_srt_content = "1\n00:00:00,000 --> 00:00:01,000\nLine 1\n"
+    en_srt_content = "1\n00:00:00,000 --> 00:00:01,000\nLine 1\n\n2\n00:00:01,000 --> 00:00:02,000\nLine 2\n\n3\n00:00:02,000 --> 00:00:03,000\nLine 3\n\n4\n00:00:03,000 --> 00:00:04,000\nLine 4\n"
     
     async def mock_translate_fail(*args, **kwargs):
-        return make_srt_mock([""])
+        return make_srt_mock(["", "", ""])
 
     from app.core.db import init_db
     
