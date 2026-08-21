@@ -12,7 +12,7 @@ from app.core.extractor import extract_embedded_srt, inspect_mkv_tracks
 from app.core.validator import verify_sync, check_dropped_lines, evaluate_subtitle_health, detect_language_heuristics
 from app.core.db import create_job, update_job, append_job_log, get_setting
 from app.services.bazarr_checker import check_existing_swedish_subtitle, check_existing_english_subtitle, find_external_subtitle
-from app.services.translator import SubtitleTranslator, ProviderUnavailableError, get_provider_capabilities
+from app.services.translator import SubtitleTranslator, is_usable_translation, ProviderUnavailableError, get_provider_capabilities
 from app.services.jellyfin_notifier import notify_jellyfin_library_refresh
 
 logger = logging.getLogger("babel.pipeline")
@@ -725,7 +725,9 @@ class SubtitlePipeline:
                                                 reason_str = reason_map.get(raw_reason, raw_reason.replace("_", " ").title())
                                                 append_job_log(job_id, f"QA Recovery: Model kept line {idx} ({reason_str})")
                                             elif action == "translate" and "text" in r:
-                                                if r["text"] != subs[idx].content:
+                                                if not is_usable_translation(r["text"]):
+                                                    append_job_log(job_id, f"QA Recovery: Rejected blank/invalid translation for line {idx}")
+                                                elif r["text"] != subs[idx].content:
                                                     translated_subs[idx].content = r["text"]
                                                     append_job_log(job_id, f"QA Recovery: Translated line {idx}")
                                                     job_recovered_count += 1
@@ -744,7 +746,7 @@ class SubtitlePipeline:
                                                 append_job_log(job_id, f"QA Recovery chunk failed (DeepL): {e}")
                                                 continue
 
-                                        res_dict = {r["id"]: r["text"] for r in recovery_results if "id" in r and "text" in r}
+                                        res_dict = {r["id"]: r["text"] for r in recovery_results if "id" in r and "text" in r and is_usable_translation(r["text"])}
                                         for idx, text in res_dict.items():
                                             if text != subs[idx].content:  # actually changed
                                                 translated_subs[idx].content = text

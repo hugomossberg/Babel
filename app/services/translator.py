@@ -9,6 +9,16 @@ logger = logging.getLogger("babel.translator")
 class ProviderUnavailableError(Exception):
     pass
 
+def is_usable_translation(text) -> bool:
+    if text is None:
+        return False
+    val = str(text).strip()
+    if val == "":
+        return False
+    if val == "<i></i>":
+        return False
+    return True
+
 def with_retry(func):
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
@@ -751,7 +761,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                         context_lines=previous_context if previous_context else None,
                         show_title=show_title or ""
                     )
-                    res_dict = {r["id"]: r["text"] for r in results if "id" in r and "text" in r}
+                    res_dict = {r["id"]: r["text"] for r in results if "id" in r and "text" in r and is_usable_translation(r["text"])}
                 
                 # Merge back the already solved cues
                 for p in payload:
@@ -776,7 +786,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                             show_title=show_title or ""
                         )
                         for r in recovery_results:
-                            if "id" in r and "text" in r:
+                            if "id" in r and "text" in r and is_usable_translation(r["text"]):
                                 res_dict[r["id"]] = r["text"]
 
                         still_missing = [p["id"] for p in payload if p["id"] not in res_dict]
@@ -792,10 +802,10 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     idx = p["id"]
                     if p["text"].strip() == "<i></i>":
                         translated_subs[idx].content = "<i></i>"
+                        partial_dict[idx] = "<i></i>"
                     elif idx in res_dict:
                         translated_subs[idx].content = res_dict[idx]
-
-                    partial_dict[idx] = translated_subs[idx].content
+                        partial_dict[idx] = translated_subs[idx].content
 
                 if partial_file:
                     try:
