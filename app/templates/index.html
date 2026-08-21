@@ -148,8 +148,8 @@
                   <td class="px-5 py-4">
                     <span class="px-2 py-0.5 rounded text-xs font-medium bg-slate-800 border border-slate-700 text-slate-300" x-text="job.event_source"></span>
                   </td>
-                  <td class="px-5 py-4 cursor-pointer" x-data="{ hovered: false }" @mouseenter="hovered = true" @mouseleave="hovered = false" @click.stop="if (hovered && !['TRANSLATING', 'PROCESSING', 'QUEUED'].includes(job.status)) triggerProcess(job.video_path, true)">
-                    <div x-show="!hovered || ['TRANSLATING', 'PROCESSING', 'QUEUED'].includes(job.status)">
+                  <td class="px-5 py-4 cursor-pointer" x-data="{ hovered: false }" @mouseenter="hovered = true" @mouseleave="hovered = false" @click.stop="if (hovered && !['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER'].includes(job.status)) triggerProcess(job.video_path, true)">
+                    <div x-show="!hovered || ['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER'].includes(job.status)">
                       <template x-if="job.status === 'TRANSLATED' || job.status === 'SUCCESS'">
                         <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800/50">
                           <i class="fa-solid fa-check"></i> TRANSLATED
@@ -190,9 +190,14 @@
                           <i class="fa-solid fa-ban"></i> CANCELLED
                         </span>
                       </template>
-                      <template x-if="job.status === 'WAITING_PROVIDER' || job.status === 'RETRY_PENDING'">
+                      <template x-if="job.status === 'WAITING_PROVIDER' || job.status === 'RETRY_PENDING' || job.status === 'RECOVERING'">
                         <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-orange-950 text-orange-400 border border-orange-800/50 animate-pulse">
                           <i class="fa-solid fa-triangle-exclamation"></i> <span x-text="job.status"></span>
+                        </span>
+                      </template>
+                      <template x-if="job.status === 'ACTION_REQUIRED'">
+                        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-950 text-rose-400 border border-rose-800/50" :title="job.error_message">
+                          <i class="fa-solid fa-triangle-exclamation"></i> ACTION REQUIRED
                         </span>
                       </template>
                       <template x-if="job.status === 'BLOCKED_QA'">
@@ -201,14 +206,14 @@
                         </span>
                       </template>
                     </div>
-                    <div x-show="hovered && !['TRANSLATING', 'PROCESSING', 'QUEUED'].includes(job.status)" style="display: none;">
+                    <div x-show="hovered && !['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER'].includes(job.status)" style="display: none;">
                       <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-600 text-white border border-blue-500 shadow-lg shadow-blue-600/20 transition-transform active:scale-95">
                         <i class="fa-solid fa-rotate-right"></i> RETRY
                       </span>
                     </div>
                   </td>
                   <td class="px-5 py-4">
-                    <template x-if="job.status === 'TRANSLATING' || job.status === 'PROCESSING'">
+                    <template x-if="['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER'].includes(job.status)">
                       <div class="space-y-1 min-w-[130px]">
                         <div class="flex items-center justify-between text-[11px] font-mono">
                           <span class="text-amber-300" x-text="(job.processed_lines || 0) + '/' + (job.total_lines || '?')"></span>
@@ -219,7 +224,7 @@
                         </div>
                       </div>
                     </template>
-                    <template x-if="job.status !== 'TRANSLATING' && job.status !== 'PROCESSING'">
+                    <template x-if="!['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER'].includes(job.status)">
                       <div>
                         <span x-text="job.total_lines || 0"></span>
                         <span class="text-xs text-slate-500" x-show="job.cleaned_sdh_lines > 0" x-text="'(' + job.cleaned_sdh_lines + ' sdh)'"></span>
