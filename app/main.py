@@ -127,11 +127,13 @@ async def process_one_retry_pass():
     except Exception as e:
         logging.error(f"Error in retry loop: {e}")
 
+background_tasks = set()
+
 async def retry_waiting_jobs():
     while True:
-        # consume the generator
-        async for _ in process_one_retry_pass():
-            pass
+        async for task in process_one_retry_pass():
+            background_tasks.add(task)
+            task.add_done_callback(background_tasks.discard)
         await asyncio.sleep(10)
 
 @app.get("/health")
