@@ -50,6 +50,136 @@ def detect_language_heuristics(text: str) -> dict:
     except Exception:
         return {"lang": "unknown", "confidence": 0.0}
 
+def extract_representative_dialogue_samples(sub_blocks: List[srt.Subtitle], max_blocks: int = 90) -> Dict[str, List[str]]:
+    """
+    Extracts stratified representative dialogue text from subtitle blocks across
+    beginning, middle, and end of the subtitle file.
+    Returns a dict with 'beginning', 'middle', 'end', and 'all'.
+    """
+    valid_texts = [
+        s.content.strip() for s in sub_blocks
+        if hasattr(s, "content") and s.content and s.content.strip() and s.content.strip() != "<i></i>"
+    ]
+    n = len(valid_texts)
+    if n == 0:
+        return {"beginning": [], "middle": [], "end": [], "all": []}
+
+    if n <= max_blocks:
+        chunk_size = max(1, n // 3)
+        return {
+            "beginning": valid_texts[:chunk_size],
+            "middle": valid_texts[chunk_size:chunk_size * 2],
+            "end": valid_texts[chunk_size * 2:],
+            "all": valid_texts
+        }
+
+    per_stratum = max_blocks // 3  # 30
+
+    # 1. Beginning
+    beg = valid_texts[:per_stratum]
+
+    # 2. Middle
+    mid_start = max(0, (n // 2) - (per_stratum // 2))
+    mid = valid_texts[mid_start:mid_start + per_stratum]
+
+    # 3. End
+    end = valid_texts[-per_stratum:]
+
+    return {
+        "beginning": beg,
+        "middle": mid,
+        "end": end,
+        "all": beg + mid + end
+    }
+
+def check_language_representative(sub_blocks: List[srt.Subtitle], target_lang_code: str) -> Dict[str, Any]:
+    """
+    Evaluates language across stratified samples of the file.
+    Returns: {
+        "confident_wrong_language": bool,
+        "detected_lang": str,
+        "confidence": float,
+        "section": str,
+        "details": str
+    }
+    """
+    samples = extract_representative_dialogue_samples(sub_blocks)
+    target_norm = target_lang_code[:2].lower()
+
+    if not samples["all"]:
+        return {
+            "confident_wrong_language": False,
+            "detected_lang": "unknown",
+            "confidence": 0.0,
+            "section": "overall",
+            "details": "No dialogue text found"
+        }
+
+    # 1. Overall check
+    full_sample_text = " ".join(samples["all"])
+    if len(full_sample_text) >= 20:
+        lang_info = detect_language_heuristics(full_sample_text)
+        det = lang_info["lang"]
+        conf = lang_info["confidence"]
+
+        # Check Swedish fallback
+        if target_norm == "sv" and det != "sv":
+            words = set(re.findall(r"\b\w+\b", full_sample_text.lower()))
+            if len(words & SWEDISH_COMMON_WORDS) >= 2:
+                det = "sv"
+                conf = 0.95
+
+        if det != "unknown" and det != target_norm and conf > 0.8:
+            return {
+                "confident_wrong_language": True,
+                "detected_lang": det,
+                "confidence": conf,
+                "section": "overall",
+                "details": f"Overall sample detected as {det} ({conf*100:.0f}% conf)"
+            }
+
+    # 2. Stratified section checks (beginning, middle, end)
+    for sec in ["beginning", "middle", "end"]:
+        sec_texts = samples[sec]
+        sec_text = " ".join(sec_texts)
+        if len(sec_text) >= 50 and len(sec_texts) >= 5:
+            lang_info = detect_language_heuristics(sec_text)
+            det = lang_info["lang"]
+            conf = lang_info["confidence"]
+
+            if target_norm == "sv" and det != "sv":
+                words = set(re.findall(r"\b\w+\b", sec_text.lower()))
+                if len(words & SWEDISH_COMMON_WORDS) >= 2:
+                    det = "sv"
+                    conf = 0.95
+
+            if det != "unknown" and det != target_norm and conf > 0.85:
+                return {
+                    "confident_wrong_language": True,
+                    "detected_lang": det,
+                    "confidence": conf,
+                    "section": sec,
+                    "details": f"{sec.capitalize()} section detected as {det} ({conf*100:.0f}% conf)"
+                }
+
+    # Return overall detected language info
+    lang_info = detect_language_heuristics(" ".join(samples["all"]))
+    det = lang_info["lang"]
+    conf = lang_info["confidence"]
+    if target_norm == "sv" and det != "sv":
+        words = set(re.findall(r"\b\w+\b", full_sample_text.lower()))
+        if len(words & SWEDISH_COMMON_WORDS) >= 2:
+            det = "sv"
+            conf = 0.95
+
+    return {
+        "confident_wrong_language": False,
+        "detected_lang": det,
+        "confidence": conf,
+        "section": "overall",
+        "details": "Language check passed"
+    }
+
 def parse_srt_safe(srt_text: str) -> List[srt.Subtitle]:
     try:
         return list(srt.parse(srt_text))
@@ -180,35 +310,28 @@ def evaluate_subtitle_health(
         }
 
     # 1. Språkdetektering
-    full_sample_text = " ".join([s.content for s in sub_blocks[:80]])
-    lang_info = detect_language_heuristics(full_sample_text)
-    detected_lang = lang_info["lang"]
-    confidence = lang_info["confidence"]
+    lang_check = check_language_representative(sub_blocks, target_lang_code)
+    detected_lang = lang_check["detected_lang"]
+    confidence = lang_check["confidence"]
+
+    if lang_check["confident_wrong_language"]:
+        return {
+            "status": "RED",
+            "health_score": 10,
+            "reason": f"Wrong language detected in {lang_check['section']}: Found {detected_lang} (conf: {confidence:.2f}), expected {target_lang_code}",
+            "lines": len(sub_blocks),
+            "detected_language": detected_lang
+        }
 
     target_norm = target_lang_code[:2].lower()
-    if target_norm == "sv" and detected_lang != "sv":
-        words = set(re.findall(r"\b\w+\b", full_sample_text.lower()))
-        if len(words & SWEDISH_COMMON_WORDS) >= 2:
-            detected_lang = "sv"
-            confidence = 0.95
-
-    if detected_lang != "unknown" and detected_lang != target_norm:
-        if confidence < 0.8:
-            return {
-                "status": "YELLOW",
-                "health_score": 50,
-                "reason": f"Low confidence language mismatch: Found {detected_lang} (conf: {confidence:.2f}), expected {target_lang_code}",
-                "lines": len(sub_blocks),
-                "detected_language": detected_lang
-            }
-        else:
-            return {
-                "status": "RED",
-                "health_score": 10,
-                "reason": f"Wrong language detected: Found {detected_lang} (conf: {confidence:.2f}), expected {target_lang_code}",
-                "lines": len(sub_blocks),
-                "detected_language": detected_lang
-            }
+    if detected_lang != "unknown" and detected_lang != target_norm and confidence < 0.8:
+        return {
+            "status": "YELLOW",
+            "health_score": 50,
+            "reason": f"Low confidence language mismatch: Found {detected_lang} (conf: {confidence:.2f}), expected {target_lang_code}",
+            "lines": len(sub_blocks),
+            "detected_language": detected_lang
+        }
 
     # 2. Tomma rader
     empty_lines = sum(1 for s in sub_blocks if not s.content.strip() or s.content.strip() == "...")

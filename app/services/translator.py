@@ -1133,25 +1133,25 @@ CRITICAL INSTRUCTIONS:
                         logger.info(f"Escalation line {target_idx} attempt {i+1}/3: rejected blank")
                         if job_id:
                             from app.core.db import append_job_log
-                            append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: rejected blank")
+                            append_job_log(job_id, f"Escalation cue {target_idx + 1} attempt {i+1}/3: rejected blank")
                         return None
                     if not is_meaningful_translation(target_text, res):
                         logger.info(f"Escalation line {target_idx} attempt {i+1}/3: rejected identical source")
                         if job_id:
                             from app.core.db import append_job_log
-                            append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: rejected identical source")
+                            append_job_log(job_id, f"Escalation cue {target_idx + 1} attempt {i+1}/3: rejected identical source")
                         return None
 
                     logger.info(f"Escalation line {target_idx} attempt {i+1}/3: translated successfully")
                     if job_id:
                         from app.core.db import append_job_log
-                        append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: translated successfully")
+                        append_job_log(job_id, f"Escalation cue {target_idx + 1} attempt {i+1}/3: translated successfully")
                     return res
                 except Exception as e:
                     logger.error(f"Escalation line {target_idx} attempt {i+1}/3 JSON parse failed: {e}. Raw: {raw_resp[:50]}")
                     if job_id:
                         from app.core.db import append_job_log
-                        append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: invalid semantic response")
+                        append_job_log(job_id, f"Escalation cue {target_idx + 1} attempt {i+1}/3: invalid semantic response")
                     return None
 
             try:
@@ -1220,17 +1220,17 @@ CRITICAL INSTRUCTIONS:
                             logger.info(f"Escalation line {target_idx} attempt {i+1}/3: rejected blank")
                             if job_id:
                                 from app.core.db import append_job_log
-                                append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: rejected blank")
+                                append_job_log(job_id, f"Escalation cue {target_idx + 1} attempt {i+1}/3: rejected blank")
                         elif not is_meaningful_translation(target_text, raw_res):
                             logger.info(f"Escalation line {target_idx} attempt {i+1}/3: rejected identical source")
                             if job_id:
                                 from app.core.db import append_job_log
-                                append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: rejected identical source")
+                                append_job_log(job_id, f"Escalation cue {target_idx + 1} attempt {i+1}/3: rejected identical source")
                         else:
                             logger.info(f"Escalation line {target_idx} attempt {i+1}/3: translated successfully")
                             if job_id:
                                 from app.core.db import append_job_log
-                                append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: translated successfully")
+                                append_job_log(job_id, f"Escalation cue {target_idx + 1} attempt {i+1}/3: translated successfully")
                             return raw_res
 
                 if exhausted_strategies is not None:
@@ -1242,7 +1242,7 @@ CRITICAL INSTRUCTIONS:
 
         if job_id:
             from app.core.db import append_job_log
-            append_job_log(job_id, f"Escalation line {target_idx} exhausted 3 semantic attempts")
+            append_job_log(job_id, f"Escalation cue {target_idx + 1} exhausted 3 semantic attempts")
         return None
 
     @with_retry
@@ -1603,11 +1603,11 @@ CRITICAL INSTRUCTIONS:
                                                 res_dict[rid] = cand
                                                 recovered_micro_count += 1
                             if job_id:
-                                append_job_log(job_id, f"First-Pass Micro Repair: evaluated {len(failed_cues)} missing/identical cues (batch {start_idx}-{end_idx}) -> recovered {recovered_micro_count}/{len(failed_cues)}")
+                                append_job_log(job_id, f"First-Pass Micro Repair: evaluated {len(failed_cues)} missing/identical cues (batch {start_idx + 1}-{end_idx}) -> recovered {recovered_micro_count}/{len(failed_cues)}")
                         except Exception as e:
-                            logger.warning(f"First-pass micro repair exception for batch {start_idx}: {e}")
+                            logger.warning(f"First-pass micro repair exception for batch {start_idx + 1}-{end_idx}: {e}")
                             if job_id:
-                                append_job_log(job_id, f"First-Pass Micro Repair failed for batch {start_idx}-{end_idx}: {e}")
+                                append_job_log(job_id, f"First-Pass Micro Repair failed for batch {start_idx + 1}-{end_idx}: {e}")
 
                 for p in payload:
                     if p["id"] in partial_dict:

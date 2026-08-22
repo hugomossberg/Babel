@@ -80,11 +80,11 @@ async def test_blank_recovery_regression(setup_teardown_db):
     # Blank translation from primary recovery should have been rejected
     logs = job["logs"] if isinstance(job["logs"], list) else []
 
-    rejected_log = next((log for log in logs if "QA Recovery: Rejected blank/invalid translation for line 1" in log), None)
+    rejected_log = next((log for log in logs if "QA Recovery: Rejected blank/invalid translation for cue 2" in log), None)
     assert rejected_log is not None
 
-    esc_log = next((log for log in logs if "Escalation: Translated line 1 using dialogue context" in log), None)
+    esc_log = next((log for log in logs if "Escalation: Translated cue 2 using dialogue context" in log), None)
     assert esc_log is not None
 
-    # Line 1 is actually index 1 in Python since it's 0-indexed. ID 2 -> index 1.
+    # Line 1 is actually index 1 in Python since it's 0-indexed. ID 2 -> cue 2.
     assert job["dropped_lines"] == 0

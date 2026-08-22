@@ -219,7 +219,7 @@ def create_job(video_path: str, event_source: str = "MANUAL", title: Optional[st
         return cursor.lastrowid
 
 def append_job_log(job_id: int, message: str):
-    now = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
     formatted = f"[{now}] {message}"
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
@@ -370,7 +370,11 @@ def get_translation_memory(series_title: str, limit: int = 20) -> list:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT original_text, translated_text FROM translation_memory WHERE series_title = ? ORDER BY RANDOM() LIMIT ?", (series_title, limit))
+        escaped_title = series_title.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        cursor.execute(
+            "SELECT original_text, translated_text FROM translation_memory WHERE series_title = ? OR series_title LIKE ? ESCAPE '\\' ORDER BY RANDOM() LIMIT ?",
+            (series_title, f"{escaped_title} - %", limit)
+        )
         rows = cursor.fetchall()
         return [{"original": r["original_text"], "translated": r["translated_text"]} for r in rows]
 

@@ -10,7 +10,7 @@ import uuid
 
 from app.core.cleaner import sanitize_srt_content, subs_to_srt_string
 from app.core.extractor import extract_embedded_srt, inspect_mkv_tracks
-from app.core.validator import verify_sync, check_dropped_lines, evaluate_subtitle_health, detect_language_heuristics
+from app.core.validator import verify_sync, check_dropped_lines, evaluate_subtitle_health, detect_language_heuristics, check_language_representative
 from app.core.db import (
     create_job, update_job, append_job_log, get_setting,
     get_positive_int_setting, get_int_setting, get_float_setting,
@@ -178,19 +178,21 @@ def qa_gate(
     # 5. Målspråkskontroll (Semantisk)
     confident_wrong_language = False
     if translated_subs:
-        sample_text = " ".join([s.content for s in translated_subs[:80] if s.content.strip() and s.content.strip() != "<i></i>"])
-        if len(sample_text) >= 20:
-            lang_info = detect_language_heuristics(sample_text)
-            detected = lang_info["lang"]
+        lang_check = check_language_representative(translated_subs, target_lang_code)
+        if lang_check["confident_wrong_language"]:
+            confident_wrong_language = True
+            detected = lang_check["detected_lang"]
+            conf = lang_check["confidence"]
+            sec = lang_check["section"]
+            issues.append(f"Language mismatch in {sec}: expected {target_lang_code}, detected {detected} ({conf*100:.0f}% confidence)")
+            score -= 45
+        else:
+            detected = lang_check["detected_lang"]
+            conf = lang_check["confidence"]
             target_norm = target_lang_code[:2].lower()
-            if detected != "unknown" and detected != target_norm:
-                if lang_info["confidence"] > 0.8:
-                    confident_wrong_language = True
-                    issues.append(f"Language mismatch: expected {target_lang_code}, detected {detected} ({lang_info['confidence']*100:.0f}% confidence)")
-                    score -= 45
-                else:
-                    warnings.append(f"Low confidence language detection: expected {target_lang_code}, detected {detected} ({lang_info['confidence']*100:.0f}% confidence)")
-                    score -= 10
+            if detected != "unknown" and detected != target_norm and conf < 0.8:
+                warnings.append(f"Low confidence language detection: expected {target_lang_code}, detected {detected} ({conf*100:.0f}% confidence)")
+                score -= 10
 
     # 6. Valid SRT structure
     structure_valid = True
@@ -682,9 +684,15 @@ class SubtitlePipeline:
                 # 1. Try Movies
                 m_res = await client.get(f"{bazarr_url}/api/movies", headers=headers)
                 if m_res.status_code == 200:
-                    movies = m_res.json().get("data", [])
+                    try:
+                        m_json = m_res.json()
+                        movies = m_json.get("data", []) if isinstance(m_json, dict) else (m_json if isinstance(m_json, list) else [])
+                    except Exception:
+                        movies = []
                     norm_target = os.path.normpath(video_path)
                     for m in movies:
+                        if not isinstance(m, dict):
+                            continue
                         m_path = os.path.normpath(m.get("path", ""))
                         if m_path == norm_target or os.path.basename(m_path) == os.path.basename(norm_target):
                             r_id = m.get("radarrId")
@@ -705,9 +713,16 @@ class SubtitlePipeline:
                 # 2. Try Series — get all series first, then find episodes for matching series
                 s_res = await client.get(f"{bazarr_url}/api/series", headers=headers)
                 if s_res.status_code == 200:
+                    try:
+                        s_json = s_res.json()
+                        all_series = s_json.get("data", []) if isinstance(s_json, dict) else (s_json if isinstance(s_json, list) else [])
+                    except Exception:
+                        all_series = []
                     from pathlib import Path
                     target_p = Path(video_path).resolve()
                     for series in all_series:
+                        if not isinstance(series, dict):
+                            continue
                         raw_series_path = series.get("path", "")
                         if not raw_series_path:
                             continue
@@ -729,8 +744,14 @@ class SubtitlePipeline:
                                 params={"seriesid[]": s_id}
                             )
                             if ep_res.status_code == 200:
-                                episodes = ep_res.json().get("data", [])
+                                try:
+                                    ep_json = ep_res.json()
+                                    episodes = ep_json.get("data", []) if isinstance(ep_json, dict) else (ep_json if isinstance(ep_json, list) else [])
+                                except Exception:
+                                    episodes = []
                                 for ep in episodes:
+                                    if not isinstance(ep, dict):
+                                        continue
                                     ep_raw_path = ep.get("path", "")
                                     if not ep_raw_path:
                                         continue
@@ -762,7 +783,8 @@ class SubtitlePipeline:
         event_source: str = "MANUAL",
         title: Optional[str] = None,
         force_retranslate: bool = False,
-        job_id: Optional[int] = None
+        job_id: Optional[int] = None,
+        series_title: Optional[str] = None
     ) -> Dict[str, Any]:
         # Bug #17: Prevent duplicate processing of the same video
         async with self._video_lock:
@@ -792,7 +814,8 @@ class SubtitlePipeline:
                 wait_seconds=wait_seconds,
                 event_source=event_source,
                 force_retranslate=force_retranslate,
-                title=title
+                title=title,
+                series_title=series_title
             )
         except asyncio.CancelledError:
             logger.info(f"Job {job_id} was cancelled by user.")
@@ -816,7 +839,8 @@ class SubtitlePipeline:
         wait_seconds: Optional[int] = None,
         event_source: str = "MANUAL",
         force_retranslate: bool = False,
-        title: Optional[str] = None
+        title: Optional[str] = None,
+        series_title: Optional[str] = None
     ) -> Dict[str, Any]:
         sem = self._get_semaphore()
         async with sem:
@@ -826,7 +850,8 @@ class SubtitlePipeline:
                 wait_seconds=wait_seconds,
                 event_source=event_source,
                 force_retranslate=force_retranslate,
-                title=title
+                title=title,
+                series_title=series_title
             )
 
     async def _maybe_notify_jellyfin(self):
@@ -841,7 +866,8 @@ class SubtitlePipeline:
         wait_seconds: Optional[int] = None,
         event_source: str = "MANUAL",
         force_retranslate: bool = False,
-        title: Optional[str] = None
+        title: Optional[str] = None,
+        series_title: Optional[str] = None
     ) -> Dict[str, Any]:
 
         enable_bazarr = get_setting("enable_bazarr_check", "true").lower() == "true"
@@ -849,6 +875,7 @@ class SubtitlePipeline:
         extract_source_embedded = get_setting("extract_source_embedded", "true").lower() == "true"
         auto_repair_unhealthy = get_setting("auto_repair_unhealthy", "true").lower() == "true"
         strict_sync_lock = get_setting("strict_sync_lock", "true").lower() == "true"
+        effective_tm_key = series_title or (title.split(" - S")[0] if title and " - S" in title else title)
 
         start_time = time.time()
         update_job(job_id, status="TRANSLATING")
@@ -1160,7 +1187,7 @@ class SubtitlePipeline:
                     target_language=lang_name,
                     batch_size=batch_size,
                     job_id=job_id,
-                    show_title=title
+                    show_title=effective_tm_key or title
                 )
                 t_main_end = time.time()
                 append_job_log(job_id, f"Timing: Main translation phase completed in {round(t_main_end - t_main_start, 1)}s")
@@ -1174,6 +1201,7 @@ class SubtitlePipeline:
                 previous_unresolved_set: Optional[Set[int]] = None
                 recovered_at_loop_start = 0
                 source_preserved_cues = set()
+                initial_identical_candidates_set: Set[int] = set()
 
                 while qa_loop_count < max_qa_loops:
                     qa_loop_count += 1
@@ -1202,7 +1230,7 @@ class SubtitlePipeline:
                     )
 
                     if qa_loop_count == 1:
-                        initial_candidates_count = len(qa_result.get("untranslated_ids", []))
+                        initial_identical_candidates_set = set(qa_result.get("untranslated_ids", []))
 
                     if qa_result["passed"]:
                         break  # Clean PASS! Exit the recovery loop.
@@ -1241,15 +1269,17 @@ class SubtitlePipeline:
                                             try:
                                                 try:
                                                     chunk_res = await self.translator.classify_and_recover_identical(
-                                                        chunk, lang_name, title or "",
+                                                        chunk, lang_name, effective_tm_key or title or "",
                                                         source_subs=subs,
                                                         translated_subs=translated_subs
                                                     )
                                                 except TypeError:
                                                     chunk_res = await self.translator.classify_and_recover_identical(
-                                                        chunk, lang_name, title or ""
+                                                        chunk, lang_name, effective_tm_key or title or ""
                                                     )
                                                 recovery_results.extend(chunk_res)
+                                            except (ProviderUnavailableError, ProviderConfigurationError):
+                                                raise
                                             except Exception as e:
                                                 append_job_log(job_id, f"QA Primary Recovery chunk failed: {e}")
                                                 continue
@@ -1268,9 +1298,9 @@ class SubtitlePipeline:
                                                         safe_ids.append(idx)
                                                     if is_ctx_safe:
                                                         context_verified_ids.add(idx)
-                                                        append_job_log(job_id, f"QA Recovery: Model kept line {idx} (Context-verified Entity: '{subs[idx].content.strip()}')")
+                                                        append_job_log(job_id, f"QA Recovery: Model kept cue {idx + 1} (Context-verified Entity: '{subs[idx].content.strip()}')")
                                                     elif is_ev_safe and not is_det_safe:
-                                                        append_job_log(job_id, f"QA Recovery: Model kept line {idx} (Evidence-based Entity: '{subs[idx].content.strip()}')")
+                                                        append_job_log(job_id, f"QA Recovery: Model kept cue {idx + 1} (Evidence-based Entity: '{subs[idx].content.strip()}')")
                                                     else:
                                                         reason_map = {
                                                             "proper_noun": "Name / Proper Noun",
@@ -1282,16 +1312,16 @@ class SubtitlePipeline:
                                                             "none": "Unspecified Reason"
                                                         }
                                                         reason_str = reason_map.get(raw_reason, raw_reason.replace("_", " ").title())
-                                                        append_job_log(job_id, f"QA Recovery: Model kept line {idx} ({reason_str})")
+                                                        append_job_log(job_id, f"QA Recovery: Model kept cue {idx + 1} ({reason_str})")
                                                 else:
-                                                    append_job_log(job_id, f"QA Recovery: Rejected unsafe KEEP for line {idx} ('{subs[idx].content}'). Forcing translation.")
+                                                    append_job_log(job_id, f"QA Recovery: Rejected unsafe KEEP for cue {idx + 1} ('{subs[idx].content}'). Forcing translation.")
                                                     known_untranslated_ids.add(idx)
                                             elif action == "translate" and "text" in r:
                                                 if not is_usable_translation(r["text"]):
-                                                    append_job_log(job_id, f"QA Recovery: Rejected blank/invalid translation for line {idx}")
+                                                    append_job_log(job_id, f"QA Recovery: Rejected blank/invalid translation for cue {idx + 1}")
                                                 elif is_meaningful_translation(subs[idx].content, r["text"]):
                                                     translated_subs[idx].content = r["text"]
-                                                    append_job_log(job_id, f"QA Recovery: Translated line {idx}")
+                                                    append_job_log(job_id, f"QA Recovery: Translated cue {idx + 1}")
                                                     recovered_cues.add(idx)
                                     else:
                                         # Deterministic fallback for DeepL
@@ -1301,9 +1331,11 @@ class SubtitlePipeline:
                                             chunk = recovery_payload[i:i + chunk_size]
                                             try:
                                                 chunk_res = await self.translator.translate_batch(
-                                                    chunk, target_language=lang_name, show_title=title or ""
+                                                    chunk, target_language=lang_name, show_title=effective_tm_key or title or ""
                                                 )
                                                 recovery_results.extend(chunk_res)
+                                            except (ProviderUnavailableError, ProviderConfigurationError):
+                                                raise
                                             except Exception as e:
                                                 append_job_log(job_id, f"QA Recovery chunk failed (DeepL): {e}")
                                                 continue
@@ -1314,7 +1346,7 @@ class SubtitlePipeline:
                                             text = r.get("text", "")
                                             if is_meaningful_translation(subs[idx].content, text):
                                                 translated_subs[idx].content = text
-                                                append_job_log(job_id, f"QA Recovery: Translated line {idx}")
+                                                append_job_log(job_id, f"QA Recovery: Translated cue {idx + 1}")
                                                 recovered_cues.add(idx)
 
                             # Re-run QA after primary recovery with safe_ids context
@@ -1336,7 +1368,7 @@ class SubtitlePipeline:
                                 batch_payload = [{"id": idx, "text": subs[idx].content} for idx in all_unresolved]
 
                                 try:
-                                    targeted_results = await self.translator.translate_batch(batch_payload, target_language=lang_name, show_title=title or "")
+                                    targeted_results = await self.translator.translate_batch(batch_payload, target_language=lang_name, show_title=effective_tm_key or title or "")
                                     targeted_success = 0
                                     for r in targeted_results:
                                         idx = r.get("id")
@@ -1349,6 +1381,8 @@ class SubtitlePipeline:
                                     append_job_log(job_id, f"Targeted Recovery: translated {targeted_success}/{len(all_unresolved)}")
                                     if targeted_success > 0:
                                         recovered_at_loop_start = -1  # Mark progress
+                                except (ProviderUnavailableError, ProviderConfigurationError):
+                                    raise
                                 except Exception as e:
                                     append_job_log(job_id, f"Targeted Recovery failed: {e}")
 
@@ -1379,7 +1413,7 @@ class SubtitlePipeline:
                                     async with esc_sem:
                                         try:
                                             esc_text = await self.translator.escalate_single_line(
-                                                idx, target_text, prev_text, next_text, lang_name, title or "",
+                                                idx, target_text, prev_text, next_text, lang_name, effective_tm_key or title or "",
                                                 is_real_untranslated=(idx in real_unresolved),
                                                 job_id=job_id,
                                                 exhausted_strategies=exhausted_strategies
@@ -1391,17 +1425,19 @@ class SubtitlePipeline:
                                                 is_orig_real = orig_clean and orig_clean != "<i></i>"
                                                 is_esc_empty = not esc_clean or esc_clean == "<i></i>"
                                                 if not esc_clean:
-                                                    append_job_log(job_id, f"Escalation: Rejected empty text for line {idx}")
+                                                    append_job_log(job_id, f"Escalation: Rejected empty text for cue {idx + 1}")
                                                 elif is_orig_real and is_esc_empty:
-                                                    append_job_log(job_id, f"Escalation: Rejected fake empty/tag for real dialogue at line {idx}")
+                                                    append_job_log(job_id, f"Escalation: Rejected fake empty/tag for real dialogue at cue {idx + 1}")
                                                 elif not is_meaningful_translation(target_text, esc_text):
-                                                    append_job_log(job_id, f"Escalation: Rejected identical fallback for line {idx}")
+                                                    append_job_log(job_id, f"Escalation: Rejected identical fallback for cue {idx + 1}")
                                                 else:
                                                     translated_subs[idx].content = esc_text
-                                                    append_job_log(job_id, f"Escalation: Translated line {idx} using dialogue context")
+                                                    append_job_log(job_id, f"Escalation: Translated cue {idx + 1} using dialogue context")
                                                     recovered_cues.add(idx)
+                                        except (ProviderUnavailableError, ProviderConfigurationError):
+                                            raise
                                         except Exception as e:
-                                            append_job_log(job_id, f"Escalation failed for line {idx}: {e}")
+                                            append_job_log(job_id, f"Escalation failed for cue {idx + 1}: {e}")
 
                                 esc_tasks = [escalate_one(idx) for idx in all_unresolved]
                                 if esc_tasks:
@@ -1462,10 +1498,12 @@ class SubtitlePipeline:
                                         results_1 = await self.translator.fast_final_rescue_batch(
                                             rescue_items_1,
                                             target_language=lang_name,
-                                            show_title=title or "",
+                                            show_title=effective_tm_key or title or "",
                                             attempt=1,
                                             job_id=job_id
                                         )
+                                    except (ProviderUnavailableError, ProviderConfigurationError):
+                                        raise
                                     except Exception as e:
                                         append_job_log(job_id, f"Fast Final Rescue attempt 1 failed: {e}")
                                         results_1 = []
@@ -1503,10 +1541,12 @@ class SubtitlePipeline:
                                             results_2 = await self.translator.fast_final_rescue_batch(
                                                 rescue_items_2,
                                                 target_language=lang_name,
-                                                show_title=title or "",
+                                                show_title=effective_tm_key or title or "",
                                                 attempt=2,
                                                 job_id=job_id
                                             )
+                                        except (ProviderUnavailableError, ProviderConfigurationError):
+                                            raise
                                         except Exception as e:
                                             append_job_log(job_id, f"Fast Final Rescue attempt 2 failed: {e}")
                                             results_2 = []
@@ -1581,6 +1621,8 @@ class SubtitlePipeline:
                                         append_job_log(job_id, f"QA loop exhausted ({max_qa_loops} attempts). Stopping recovery loop for {lang_name}.")
                                         is_semantic_deadlock = True
 
+                        except (ProviderUnavailableError, ProviderConfigurationError):
+                            raise
                         except Exception as e:
                             append_job_log(job_id, f"QA Recovery/Escalation failed: {e}")
 
@@ -1666,7 +1708,7 @@ class SubtitlePipeline:
                     if pub_res.get("published"):
                         # Save Translation Memory only after QA PASS and if we actually published
                         # Exclude fallback source-preserved cues
-                        if title:
+                        if effective_tm_key:
                             try:
                                 from app.core.db import save_translation_memory_bulk
                                 tm_items = []
@@ -1678,14 +1720,14 @@ class SubtitlePipeline:
                                     if orig_t and trans_t and orig_t != "<i></i>" and trans_t != "<i></i>" and orig_t != trans_t:
                                         tm_items.append({"original": orig_t, "translated": trans_t})
                                 if tm_items:
-                                    save_translation_memory_bulk(title, tm_items)
+                                    save_translation_memory_bulk(effective_tm_key, tm_items)
                             except Exception as e:
                                 logger.error(f"Failed to save translation memory: {e}")
 
                 # Build a detailed QA summary for the user
                 unresolved_count = len(qa_result.get("real_untranslated_ids", []))
-                identical_candidates = initial_candidates_count if 'initial_candidates_count' in locals() else 0
-                kept_count = len(safe_ids) if 'safe_ids' in locals() else 0
+                initial_candidates_count = len(initial_identical_candidates_set)
+                kept_count = sum(1 for idx in initial_identical_candidates_set if idx in safe_ids and idx not in qa_result.get("real_untranslated_ids", []) and idx not in recovered_cues)
                 recovered_count = len(recovered_cues) if 'recovered_cues' in locals() else 0
                 source_preserved_count = len(source_preserved_cues)
 
@@ -1697,7 +1739,7 @@ class SubtitlePipeline:
                     "--- QA Summary ---",
                     f"{dropped_count} dropped lines",
                     f"{this_max_diff} ms sync drift",
-                    f"{identical_candidates} identical candidates",
+                    f"{initial_candidates_count} identical candidates",
                     f"{kept_count} classified as KEEP (safe)",
                     f"{recovered_count} translated on recovery",
                     unresolved_label,

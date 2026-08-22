@@ -35,6 +35,10 @@ def mock_db_settings(monkeypatch, tmp_path):
     monkeypatch.setattr("app.services.pipeline.get_setting", mock_get_setting)
     monkeypatch.setattr("app.services.translator.get_setting", mock_get_setting)
 
+    async def mock_escalate_none(*args, **kwargs):
+        return None
+    monkeypatch.setattr("app.services.translator.SubtitleTranslator.escalate_single_line", mock_escalate_none)
+
 
 @pytest.mark.asyncio
 async def test_1_batch_rescue_success(mock_db_settings, tmp_path, monkeypatch):

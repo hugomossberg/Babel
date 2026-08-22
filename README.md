@@ -59,21 +59,23 @@ Translation features include:
 - Configurable providers and models
 - Provider fallback and retry handling
 
-### Strict Quality Assurance
+### Strict Quality Assurance & QA Policy
 
-Every generated subtitle is validated before publication.
+Every generated subtitle is validated before publication. Babel evaluates subtitles against a three-tiered QA policy:
+
+- **`PASS`**: All structural, synchronicity, and linguistic checks pass with zero unresolved cues (100% translated/verified). Published with full confidence and saved to Translation Memory.
+- **`PASS_WITH_WARNINGS`**: All structural and timing checks pass, and all recoverable dialogue is translated, but a small bounded number of stubborn cues ($\le 1\%$ or max 5 cues) were safely preserved from source to prevent deadlock. Published cleanly; source-preserved cues are excluded from Translation Memory.
+- **`FAIL`**: Structural defects, line count mismatches, timestamp corruption, significant untranslated dialogue, or detected wrong language immediately block publication and trigger automatic recovery or retry.
 
 Babel checks:
 
-- Subtitle structure
-- Line count
-- Dropped lines
-- Timestamp synchronization
-- Target language
-- Untranslated dialogue
+- Subtitle structure & formatting
+- Line count & cue ordering
+- Dropped lines & missing blocks
+- Timestamp synchronization (millisecond precision)
+- Stratified target language distribution (beginning, middle, and end)
+- Untranslated dialogue & normalized echo detection
 - Invalid or incomplete AI output
-
-A QA score alone can never override hard validation requirements.
 
 ### Automatic Recovery
 

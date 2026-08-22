@@ -219,7 +219,7 @@ async def test_targeted_recovery_rejects_normalized_echo(tmp_path, monkeypatch):
     # Verify that Targeted Recovery logged translated 0/1
     combined_logs = "\n".join(job["logs"])
     assert "Targeted Recovery: translated 0/1" in combined_logs
-    assert "Escalation: Translated line 25 using dialogue context" in combined_logs
+    assert "Escalation: Translated cue 26 using dialogue context" in combined_logs
 
 
 @pytest.mark.asyncio
@@ -286,7 +286,7 @@ async def test_pipeline_escalation_defense_in_depth(tmp_path, monkeypatch):
     # The pipeline must fail closed because escalation's returned echo was rejected
     assert job["status"] == "FAILED" or job["status"] == "RECOVERING"
     combined_logs = "\n".join(job["logs"])
-    assert "Escalation: Rejected identical fallback for line 25" in combined_logs
+    assert "Escalation: Rejected identical fallback for cue 26" in combined_logs
     # Final sv.srt must NOT exist
     sv_srt = tmp_path / "TestShow.S01E02.sv.srt"
     assert not sv_srt.exists()

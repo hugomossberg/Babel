@@ -98,6 +98,8 @@ async def sonarr_webhook(request: Request, background_tasks: BackgroundTasks):
             e_num = episodes[0].get("episodeNumber", 0)
             title = f"{series.get('title', '')} - S{s_num:02d}E{e_num:02d} - {ep_title}"
 
+        series_title = series.get("title", "") if series else None
+
         if video_path:
             video_path = translate_path(video_path)
             try: video_path = validate_path(video_path)
@@ -109,7 +111,8 @@ async def sonarr_webhook(request: Request, background_tasks: BackgroundTasks):
                 pipeline.process_video_file,
                 video_path=video_path,
                 event_source="SONARR",
-                title=title
+                title=title,
+                series_title=series_title
             )
             return {"status": "queued", "event": event_type, "video_path": video_path, "title": title}
 
@@ -157,7 +160,8 @@ async def radarr_webhook(request: Request, background_tasks: BackgroundTasks):
                 pipeline.process_video_file,
                 video_path=video_path,
                 event_source="RADARR",
-                title=title
+                title=title,
+                series_title=title
             )
             return {"status": "queued", "event": event_type, "video_path": video_path, "title": title}
 

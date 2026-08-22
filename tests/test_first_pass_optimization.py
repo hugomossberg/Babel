@@ -506,6 +506,7 @@ async def test_16_downstream_fast_final_rescue_still_works(mock_db_settings, tmp
     monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
     monkeypatch.setattr(pipeline.translator, "first_pass_micro_repair_batch", mock_first_pass_micro_repair)
     monkeypatch.setattr(pipeline.translator, "classify_and_recover_identical", mock_classify)
+    monkeypatch.setattr(pipeline.translator, "escalate_single_line", AsyncMock(return_value=None))
     monkeypatch.setattr(pipeline.translator, "fast_final_rescue_batch", mock_fast_final_rescue)
 
     res = await pipeline.process_video_file(str(video_path), event_source="MANUAL")
