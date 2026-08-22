@@ -16,7 +16,8 @@ from app.services.bazarr_checker import check_existing_swedish_subtitle, check_e
 from app.services.translator import (
     SubtitleTranslator, is_usable_translation, is_meaningful_translation, ProviderUnavailableError,
     ProviderConfigurationError, get_provider_capabilities, is_deterministically_safe_keep,
-    normalize_for_compare, is_safe_keep_prefilter, has_entity_evidence
+    normalize_for_compare, is_safe_keep_prefilter, has_entity_evidence,
+    is_strictly_valid_entity_candidate
 )
 from app.services.jellyfin_notifier import notify_jellyfin_library_refresh
 
@@ -33,7 +34,8 @@ def qa_gate(
     target_lang_code: str,
     job_id: Optional[int] = None,
     safe_ids: Optional[list] = None,
-    show_title: str = ""
+    show_title: str = "",
+    context_verified_ids: Optional[set] = None
 ) -> Dict[str, Any]:
     """
     Final Quality Assurance gate. Returns a dict with:
@@ -75,7 +77,7 @@ def qa_gate(
             return True
         return False
 
-    # Defense-in-depth: safe_ids are only honored if deterministically safe or backed by same-run evidence
+    # Defense-in-depth: safe_ids are only honored if deterministically safe or backed by same-run evidence / context verification
     real_untranslated_ids = []
     for i in untranslated_ids:
         orig_content = source_subs[i].content
@@ -88,7 +90,8 @@ def qa_gate(
             is_deterministically_safe_keep(orig_content, "number", show_title=show_title) or
             is_deterministically_safe_keep(orig_content, "symbol", show_title=show_title) or
             is_deterministically_safe_keep(orig_content, "non_verbal", show_title=show_title) or
-            has_entity_evidence(orig_content, source_subs, translated_subs, target_idx=i)
+            has_entity_evidence(orig_content, source_subs, translated_subs, target_idx=i) or
+            (context_verified_ids is not None and i in context_verified_ids and is_strictly_valid_entity_candidate(orig_content))
         ):
             continue
         real_untranslated_ids.append(i)
@@ -971,6 +974,7 @@ class SubtitlePipeline:
             skipped_langs = []
             total_dropped = 0
             max_sync_diff = 0
+            is_semantic_deadlock = False
 
             # -------------------------------------------------------------
             # TRANSLATION & QUALITY ASSURANCE
@@ -1003,6 +1007,7 @@ class SubtitlePipeline:
                 lang_code = lang_info["code"]
                 target_output_path = f"{base_path}.{lang_code}.srt"
                 safe_ids = [idx for idx, sub in enumerate(subs) if is_safe_keep_prefilter(sub.content)]
+                context_verified_ids = set()
 
                 # Check Original Language Guard
                 if original_language_guard:
@@ -1063,7 +1068,7 @@ class SubtitlePipeline:
                     # -------------------------------------------------------
                     # Bug #1, #5: FINAL QA GATE — never publish a broken file
                     # -------------------------------------------------------
-                    qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "")
+                    qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids)
 
                     if qa_loop_count == 1:
                         initial_candidates_count = len(qa_result.get("untranslated_ids", []))
@@ -1076,6 +1081,7 @@ class SubtitlePipeline:
                     # Stagnation Guard: If unresolved set is unchanged and 0 new cues were recovered, break immediately
                     if previous_unresolved_set is not None and current_unresolved_set == previous_unresolved_set and len(recovered_cues) == recovered_at_loop_start:
                         append_job_log(job_id, f"QA Recovery: Stagnation detected ({len(current_unresolved_set)} unresolved cues unchanged with 0 progress). Breaking QA recovery loop.")
+                        is_semantic_deadlock = True
                         break
 
                     previous_unresolved_set = set(current_unresolved_set)
@@ -1125,10 +1131,14 @@ class SubtitlePipeline:
                                                 raw_reason = r.get("reason", "none").lower()
                                                 is_det_safe = is_deterministically_safe_keep(subs[idx].content, raw_reason, show_title=title or "")
                                                 is_ev_safe = has_entity_evidence(subs[idx].content, subs, translated_subs, target_idx=idx)
-                                                if is_det_safe or is_ev_safe:
+                                                is_ctx_safe = ("context_verified" in raw_reason) and is_strictly_valid_entity_candidate(subs[idx].content)
+                                                if is_det_safe or is_ev_safe or is_ctx_safe:
                                                     if idx not in safe_ids:
                                                         safe_ids.append(idx)
-                                                    if is_ev_safe and not is_det_safe:
+                                                    if is_ctx_safe:
+                                                        context_verified_ids.add(idx)
+                                                        append_job_log(job_id, f"QA Recovery: Model kept line {idx} (Context-verified Entity: '{subs[idx].content.strip()}')")
+                                                    elif is_ev_safe and not is_det_safe:
                                                         append_job_log(job_id, f"QA Recovery: Model kept line {idx} (Evidence-based Entity: '{subs[idx].content.strip()}')")
                                                     else:
                                                         reason_map = {
@@ -1177,7 +1187,7 @@ class SubtitlePipeline:
                                                 recovered_cues.add(idx)
 
                             # Re-run QA after primary recovery with safe_ids context
-                            qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "")
+                            qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids)
                             if qa_result["passed"]:
                                 break
 
@@ -1212,7 +1222,7 @@ class SubtitlePipeline:
                                     append_job_log(job_id, f"Targeted Recovery failed: {e}")
 
                                 # Re-run QA again to get the remaining stubborn cues
-                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "")
+                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids)
                                 real_unresolved = qa_result.get("real_untranslated_ids", [])
                                 dropped_unresolved = [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])]
                                 all_unresolved = list(set(real_unresolved + dropped_unresolved))
@@ -1270,7 +1280,7 @@ class SubtitlePipeline:
                                     append_job_log(job_id, f"Timing: Escalation phase ({len(esc_tasks)} cues) completed in {round(t_esc_end - t_esc_start, 1)}s")
 
                                 # Final QA rerun after escalation
-                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "")
+                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids)
                                 if qa_result["passed"]:
                                     break
 
@@ -1403,7 +1413,7 @@ class SubtitlePipeline:
                                         append_job_log(job_id, f"Fast Final Rescue completed: {len(final_unresolved_rescue)} cues remain unresolved")
 
                                 # Final QA rerun after Fast Final Rescue
-                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "")
+                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids)
                                 if qa_result["passed"]:
                                     break
                                 else:
@@ -1430,6 +1440,7 @@ class SubtitlePipeline:
                                     # To prevent getting completely stuck in a loop, throw an error if this was the last loop
                                     if qa_loop_count == max_qa_loops:
                                         append_job_log(job_id, f"QA loop exhausted ({max_qa_loops} attempts). Stopping recovery loop for {lang_name}.")
+                                        is_semantic_deadlock = True
 
                         except Exception as e:
                             append_job_log(job_id, f"QA Recovery/Escalation failed: {e}")
@@ -1531,6 +1542,8 @@ class SubtitlePipeline:
                     final_status = "SKIPPED"
             elif successful_langs:
                 final_status = "PARTIAL"
+            elif is_semantic_deadlock or not qa_result["passed"]:
+                final_status = "FAILED"
             else:
                 final_status = "RECOVERING"
 
@@ -1544,7 +1557,16 @@ class SubtitlePipeline:
                 "output_files": json.dumps(output_files),
                 "duration_seconds": total_duration
             }
-            if final_status in ["RECOVERING", "PARTIAL"]:
+            if final_status == "FAILED":
+                unresolved_count = len(qa_result.get("real_untranslated_ids", []))
+                if is_semantic_deadlock:
+                    update_args["error_message"] = f"Semantic deadlock: {unresolved_count} unresolved cues failed QA. Bounded recovery exhausted."
+                    append_job_log(job_id, f"PERMANENT FAILURE: Semantic deadlock detected. Provider succeeded but bounded recovery exhausted with 0 progress. File NOT published.")
+                else:
+                    update_args["error_message"] = f"QA Gate failed: {unresolved_count} unresolved cues. File NOT published."
+                    append_job_log(job_id, f"PERMANENT FAILURE: QA Gate failed with {unresolved_count} unresolved cues. File NOT published.")
+                update_args["next_retry_at"] = None
+            elif final_status in ["RECOVERING", "PARTIAL"]:
                 from datetime import datetime, timezone, timedelta
                 from app.core.db import get_job_by_id
                 job_data = get_job_by_id(job_id)

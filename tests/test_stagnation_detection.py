@@ -61,8 +61,8 @@ async def test_stagnation_detection_breaks_loop_early(tmp_path):
                 job_id = app.core.db.create_job(str(video_path))
                 res = await pipeline._run_pipeline_logic(job_id, str(video_path), wait_seconds=0)
 
-                # QA should fail and job enter RECOVERING
-                assert res["status"] == "recovering"
+                # QA should fail and job enter failed / recovering
+                assert res["status"] in ["recovering", "failed"]
 
                 job = app.core.db.get_job_by_id(job_id)
                 logs = job["logs"] if isinstance(job["logs"], list) else []

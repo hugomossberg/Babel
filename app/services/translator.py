@@ -221,7 +221,8 @@ ENGLISH_COMMON_WORDS = {
     # Common verbs & contractions
     "is", "am", "are", "was", "were", "be", "been", "being",
     "have", "has", "had", "having", "do", "does", "did", "doing",
-    "would", "should", "could", "ought", "i'm", "you're", "he's", "she's",
+    "will", "wills", "shall", "must", "can", "could", "may", "might",
+    "would", "should", "ought", "i'm", "you're", "he's", "she's",
     "it's", "we're", "they're", "i've", "you've", "we've", "they've",
     "i'd", "you'd", "he'd", "she'd", "we'd", "they'd", "i'll", "you'll",
     "he'll", "she'll", "we'll", "they'll", "isn't", "aren't", "wasn't",
@@ -316,7 +317,8 @@ ENGLISH_COMMON_WORDS = {
     # Months & seasons & numbers as words
     "january", "february", "march", "april", "may", "june",
     "july", "august", "september", "october", "november", "december",
-    "spring", "summer", "autumn", "fall", "winter", "rose",
+    "spring", "summer", "autumn", "fall", "winter", "rose", "roses", "flower", "flowers",
+    "bear", "bears", "born", "bore", "borne", "bearing",
     "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
     "eleven", "twelve", "twenty", "thirty", "fifty", "hundred", "thousand", "million",
     "first", "second", "third", "last", "next",
@@ -503,6 +505,116 @@ def has_entity_evidence(
 
     return True
 
+def is_strictly_valid_entity_candidate(text: str) -> bool:
+    """
+    Fail-closed deterministic check to verify if candidate text has the lexical form
+    of a valid named entity token before allowing contextual entity verification.
+
+    Invariants:
+    1. Must not be empty or placeholder (<i></i>).
+    2. Must contain 1 to 3 alphabetic tokens.
+    3. Every token must start with an uppercase letter.
+    4. No token may match ANY word in ENGLISH_COMMON_WORDS.
+    5. No token may match ANY word in KNOWN_NON_VERBAL_SOUNDS.
+    6. No token may match ANY word in KNOWN_TECH_TERMS_AND_BRANDS (handled separately).
+    7. Every token must be at least 2 characters long.
+    """
+    if not text:
+        return False
+    clean_text = text.strip()
+    clean_text = re.sub(r'<[^>]+>', '', clean_text)
+    clean_text = re.sub(r'\{[^}]+\}', '', clean_text).strip()
+    if not clean_text or clean_text == "<i></i>":
+        return False
+
+    tokens = [t for t in re.split(r"[^\w\x27-]+", clean_text) if t and any(c.isalpha() for c in t)]
+    if not tokens or len(tokens) > 3:
+        return False
+
+    for t in tokens:
+        clean_t = re.sub(r"[^\w]", "", t).lower()
+        if not clean_t or len(clean_t) < 2:
+            return False
+        if clean_t in ENGLISH_COMMON_WORDS:
+            return False
+        if clean_t in KNOWN_NON_VERBAL_SOUNDS:
+            return False
+        if clean_t in KNOWN_TECH_TERMS_AND_BRANDS:
+            return False
+        # Must start with uppercase
+        first_alpha = next((c for c in t if c.isalpha()), None)
+        if not first_alpha or not first_alpha.isupper():
+            return False
+
+    return True
+
+def validate_entity_verification_output(
+    raw_text: str,
+    candidates: list,
+    show_title: str = ""
+) -> set:
+    """
+    Validates the AI entity verification output fail-closed.
+    Returns a set of verified cue IDs that are proven to be proper named entities in context.
+
+    Invariants:
+    1. Candidate must strictly pass is_strictly_valid_entity_candidate(target).
+    2. Verdict must be NAMED_ENTITY.
+    3. Entity type must be in {'PERSON_NAME', 'PLACE_NAME', 'ORGANIZATION'}.
+    4. Confidence MUST be HIGH.
+    5. Any ambiguity, medium/low confidence, or schema violation -> rejected (not in returned set).
+    """
+    if not raw_text or not candidates:
+        return set()
+
+    candidate_map = {c["id"]: c.get("target", "") for c in candidates}
+    verified_ids = set()
+
+    clean_text = raw_text.strip()
+    if clean_text.startswith("```"):
+        lines = clean_text.split('\n')
+        if lines[0].startswith("```"): lines = lines[1:]
+        if lines and lines[-1].startswith("```"): lines = lines[:-1]
+        clean_text = "\n".join(lines).strip()
+
+    try:
+        data = json.loads(clean_text)
+        if isinstance(data, dict):
+            results = data.get("results", [])
+        elif isinstance(data, list):
+            results = data
+        else:
+            results = []
+
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            rid = r.get("id")
+            if rid not in candidate_map:
+                continue
+            target_text = candidate_map[rid]
+            if not is_strictly_valid_entity_candidate(target_text):
+                logger.warning(f"Entity Verification: ID {rid} ('{target_text}') rejected: failed deterministic candidate check")
+                continue
+
+            verdict = str(r.get("verdict", "")).upper()
+            entity_type = str(r.get("entity_type", "")).upper()
+            confidence = str(r.get("confidence", "")).upper()
+
+            if (
+                verdict == "NAMED_ENTITY"
+                and entity_type in {"PERSON_NAME", "PLACE_NAME", "ORGANIZATION"}
+                and confidence == "HIGH"
+            ):
+                logger.info(f"Entity Verification: ID {rid} ('{target_text}') verified as {entity_type} with HIGH confidence ({r.get('explanation', '')})")
+                verified_ids.add(rid)
+            else:
+                logger.info(f"Entity Verification: ID {rid} ('{target_text}') rejected (verdict={verdict}, confidence={confidence})")
+    except Exception as e:
+        logger.error(f"Entity Verification: JSON parse failed: {e}")
+
+    return verified_ids
+
 def validate_classifier_output(
     raw_text: str,
     items: list,
@@ -568,9 +680,15 @@ def validate_classifier_output(
                     logger.info(f"Classifier validation: ID {rid} allowed KEEP via same-run entity evidence ('{original_text}')")
                     reason = f"evidence_{reason}"
                 elif not is_det_safe:
-                    logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (not deterministically safe: reason={reason}, text='{original_text}')")
-                    act = "translate"
-                    r["text"] = ""
+                    if is_strictly_valid_entity_candidate(original_text):
+                        logger.info(f"Classifier validation: ID {rid} flagged for context entity verification ('{original_text}')")
+                        act = "translate"
+                        reason = "needs_context_verification"
+                        r["text"] = ""
+                    else:
+                        logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (not deterministically safe: reason={reason}, text='{original_text}')")
+                        act = "translate"
+                        r["text"] = ""
 
             if act == "keep":
                 kept += 1
@@ -649,6 +767,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             "required": ["results"]
         }
 
+        raw_resp = ""
         # We will reuse the client calls directly here to keep it self-contained
         if provider == "gemini":
             from google import genai
@@ -670,7 +789,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 )
             loop = asyncio.get_event_loop()
             resp = await loop.run_in_executor(None, do_gemini)
-            return validate_classifier_output(resp.text, items, show_title=show_title, source_subs=source_subs, translated_subs=translated_subs)
+            raw_resp = resp.text
 
         elif provider == "openai":
             import openai
@@ -691,10 +810,9 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             loop = asyncio.get_event_loop()
             resp = await loop.run_in_executor(None, do_openai)
             try:
-                content = resp.choices[0].message.content
-                return validate_classifier_output(content, items, show_title=show_title, source_subs=source_subs, translated_subs=translated_subs)
+                raw_resp = resp.choices[0].message.content
             except Exception:
-                return []
+                raw_resp = ""
 
         elif provider == "ollama":
             import httpx
@@ -707,11 +825,209 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     json={"model": model_name, "prompt": full_prompt, "format": "json", "stream": False}
                 )
                 try:
-                    return validate_classifier_output(resp.json()["response"], items, show_title=show_title, source_subs=source_subs, translated_subs=translated_subs)
+                    raw_resp = resp.json()["response"]
                 except Exception:
-                    return []
+                    raw_resp = ""
 
-        return []
+        if not raw_resp:
+            return []
+
+        validated_results = validate_classifier_output(raw_resp, items, show_title=show_title, source_subs=source_subs, translated_subs=translated_subs)
+
+        # Check if any single-occurrence entity candidate needs bounded contextual verification
+        items_map = {item["id"]: item["text"] for item in items}
+        context_candidates = []
+        for r in validated_results:
+            if r.get("reason") == "needs_context_verification" and source_subs is not None:
+                rid = r["id"]
+                target_text = items_map.get(rid, "")
+
+                # Build local dialogue context: up to 3 cues before and 3 cues after
+                ctx_b_parts = []
+                for b_idx in range(max(0, rid - 3), rid):
+                    bc = source_subs[b_idx].content.strip()
+                    if bc and bc != "<i></i>":
+                        btc = translated_subs[b_idx].content.strip() if translated_subs and b_idx < len(translated_subs) else ""
+                        if btc and btc != "<i></i>" and is_meaningful_translation(bc, btc):
+                            ctx_b_parts.append(f"{bc} [SV: {btc}]")
+                        else:
+                            ctx_b_parts.append(bc)
+
+                ctx_a_parts = []
+                for a_idx in range(rid + 1, min(len(source_subs), rid + 4)):
+                    ac = source_subs[a_idx].content.strip()
+                    if ac and ac != "<i></i>":
+                        ctx_a_parts.append(ac)
+
+                context_candidates.append({
+                    "id": rid,
+                    "target": target_text,
+                    "context_before": " | ".join(ctx_b_parts) if ctx_b_parts else "(none)",
+                    "context_after": " | ".join(ctx_a_parts) if ctx_a_parts else "(none)"
+                })
+
+        if context_candidates:
+            logger.info(f"Context Entity Verification: evaluating {len(context_candidates)} single-occurrence candidates")
+            try:
+                verified_ids = await self.verify_single_occurrence_entities(
+                    context_candidates,
+                    target_language,
+                    show_title=show_title
+                )
+                for r in validated_results:
+                    rid = r["id"]
+                    if r.get("reason") == "needs_context_verification":
+                        if rid in verified_ids:
+                            r["action"] = "keep"
+                            r["reason"] = "context_verified_proper_noun"
+                            r["text"] = items_map.get(rid, "")
+                            logger.info(f"Context Entity Verification: ID {rid} ('{r['text']}') ACCEPTED as context-verified KEEP")
+                        else:
+                            r["reason"] = "unverified_entity"
+                            logger.info(f"Context Entity Verification: ID {rid} ('{items_map.get(rid, '')}') REJECTED -> remains TRANSLATE")
+            except Exception as e:
+                logger.error(f"Context Entity Verification call failed: {e}")
+
+        return validated_results
+
+    @with_retry
+    async def verify_single_occurrence_entities(
+        self,
+        candidates: list,
+        target_language: str,
+        show_title: str = "",
+        job_id: Optional[int] = None
+    ) -> set:
+        """
+        Bounded, structured single-call AI entity classifier with local cue context.
+        Only classifies entity vs translatable text. Never writes translations.
+        Only HIGH confidence named entities may be accepted.
+        """
+        if not candidates:
+            return set()
+
+        provider = get_setting("ai_provider", "gemini").lower()
+        if provider == "deepl":
+            return set()
+
+        system_prompt = f"""You are a linguistic named-entity classifier for subtitle localization ({target_language}).
+Your sole task is to analyze whether the target subtitle text in each dialogue excerpt is strictly an invariant proper named entity (such as a person's name or place name that should remain unchanged in {target_language} subtitles) or translatable conversational English.
+
+CRITICAL INSTRUCTIONS:
+1. NEVER provide translations. Only classify the target text into the specified schema.
+2. If the target text is a common English word, phrase, greeting, exclamation, action, verb, or translatable expression, classify as TRANSLATABLE_TEXT.
+3. If the context is unclear, ambiguous, or the target text could be a normal word/phrase rather than a proper noun, classify as AMBIGUOUS with LOW or MEDIUM confidence.
+4. Only classify as NAMED_ENTITY with HIGH confidence if the local dialogue context clearly and unambiguously demonstrates that the target is a proper name (e.g., a person being directly addressed, called upon, or referred to as a person).
+5. Output strict structured JSON with key 'results' containing an array of classification objects."""
+
+        items_formatted = []
+        for it in candidates:
+            item_str = (
+                f"Item ID {it['id']}:\n"
+                f"CONTEXT BEFORE: {it.get('context_before', '(none)')}\n"
+                f"TARGET: {it['target']}\n"
+                f"CONTEXT AFTER: {it.get('context_after', '(none)')}"
+            )
+            items_formatted.append(item_str)
+
+        prompt = (
+            f"Show Context: {show_title}\n\n"
+            + "\n\n".join(items_formatted)
+            + f"\n\nClassify each of the {len(candidates)} items strictly as JSON."
+        )
+
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "results": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "id": {"type": "INTEGER"},
+                            "verdict": {
+                                "type": "STRING",
+                                "enum": ["NAMED_ENTITY", "TRANSLATABLE_TEXT", "AMBIGUOUS"]
+                            },
+                            "entity_type": {
+                                "type": "STRING",
+                                "enum": ["PERSON_NAME", "PLACE_NAME", "ORGANIZATION", "NOT_AN_ENTITY"]
+                            },
+                            "confidence": {
+                                "type": "STRING",
+                                "enum": ["HIGH", "MEDIUM", "LOW"]
+                            },
+                            "explanation": {"type": "STRING"}
+                        },
+                        "required": ["id", "verdict", "entity_type", "confidence"]
+                    }
+                }
+            },
+            "required": ["results"]
+        }
+
+        if provider == "gemini":
+            from google import genai
+            from google.genai import types
+            api_key = get_setting("gemini_api_key", "")
+            model_name = get_setting("gemini_model", "gemini-3.5-flash-lite")
+            client = genai.Client(api_key=api_key)
+
+            def do_gemini():
+                return client.models.generate_content(
+                    model=model_name,
+                    contents=[prompt],
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        response_mime_type="application/json",
+                        response_schema=schema,
+                        temperature=0.0
+                    )
+                )
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(None, do_gemini)
+            return validate_entity_verification_output(resp.text, candidates, show_title=show_title)
+
+        elif provider == "openai":
+            import openai
+            api_key = get_setting("openai_api_key", "")
+            model_name = get_setting("openai_model", "gpt-4o-mini")
+            client = openai.Client(api_key=api_key)
+
+            def do_openai():
+                return client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.0
+                )
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(None, do_openai)
+            try:
+                content = resp.choices[0].message.content
+                return validate_entity_verification_output(content, candidates, show_title=show_title)
+            except Exception:
+                return set()
+
+        elif provider == "ollama":
+            import httpx
+            ollama_url = get_setting("ollama_url", "http://localhost:11434").rstrip("/")
+            model_name = get_setting("ollama_model", "llama3")
+            full_prompt = f"{system_prompt}\n\n{prompt}"
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{ollama_url}/api/generate",
+                    json={"model": model_name, "prompt": full_prompt, "format": "json", "stream": False}
+                )
+                try:
+                    return validate_entity_verification_output(resp.json()["response"], candidates, show_title=show_title)
+                except Exception:
+                    return set()
+
+        return set()
 
     def __init__(self):
         self._cached_gemini_key = None

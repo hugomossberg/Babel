@@ -99,13 +99,13 @@ async def test_never_give_up_fails_all_loops(setup_teardown_db):
 
         result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
 
-    assert result["status"] == "recovering"
+    assert result["status"] == "failed"
     job = get_job_by_id(job_id)
-    assert job["status"] == "RECOVERING"
-    assert job["next_retry_at"] is not None
+    assert job["status"] == "FAILED"
+    assert job["next_retry_at"] is None
 
     past_time = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
-    update_job(job_id, next_retry_at=past_time)
+    update_job(job_id, status="RECOVERING", next_retry_at=past_time)
 
     with patch("app.services.pipeline.SubtitlePipeline.process_video_file") as mock_process:
         task = asyncio.create_task(retry_waiting_jobs())
@@ -192,42 +192,39 @@ async def test_persistent_retry_count_and_backoff(setup_teardown_db):
     job_id = create_job(video_path, "MANUAL")
     en_srt_content = "1\n00:00:00,000 --> 00:00:01,000\nLine 1\n\n2\n00:00:01,000 --> 00:00:02,000\nLine 2\n\n3\n00:00:02,000 --> 00:00:03,000\nLine 3\n\n4\n00:00:03,000 --> 00:00:04,000\nLine 4\n"
 
+    from app.services.translator import ProviderUnavailableError
     async def mock_translate_fail(*args, **kwargs):
-        return make_srt_mock(["", "", ""])
+        raise ProviderUnavailableError("Temporary upstream 503 error")
 
     en_srt_path = str(video_path).replace(".mkv", ".en.srt")
     with open(en_srt_path, "w", encoding="utf-8") as f:
         f.write(en_srt_content)
 
-    # Attempt 0 -> exhaustion -> retry 1, ~1 min
+    # Attempt 0 -> exhaustion -> retry 1, ~2 min
     with patch("app.services.pipeline.find_external_subtitle", return_value=en_srt_path), \
-         patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate_fail), \
-         patch("app.services.translator.SubtitleTranslator.classify_and_recover_identical", return_value=[]), \
-         patch("app.services.translator.SubtitleTranslator.escalate_single_line", return_value=""):
+         patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate_fail):
 
         await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
 
     job = get_job_by_id(job_id)
-    assert job["status"] == "RECOVERING"
+    assert job["status"] == "WAITING_PROVIDER"
     assert job["retry_count"] == 1
     t1 = datetime.fromisoformat(job["next_retry_at"])
     now = datetime.now(timezone.utc)
     diff_mins = (t1 - now).total_seconds() / 60
-    assert 0 <= diff_mins <= 1.5
+    assert 1.5 <= diff_mins <= 2.5
 
     # Simulate restart
     init_db()
 
     # Attempt 1 -> exhaustion -> retry 2, ~5 min
     with patch("app.services.pipeline.find_external_subtitle", return_value=en_srt_path), \
-         patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate_fail), \
-         patch("app.services.translator.SubtitleTranslator.classify_and_recover_identical", return_value=[]), \
-         patch("app.services.translator.SubtitleTranslator.escalate_single_line", return_value=""):
+         patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate_fail):
 
         await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
 
     job = get_job_by_id(job_id)
-    assert job["status"] == "RECOVERING"
+    assert job["status"] == "WAITING_PROVIDER"
     assert job["retry_count"] == 2
     t2 = datetime.fromisoformat(job["next_retry_at"])
     now = datetime.now(timezone.utc)
@@ -239,14 +236,12 @@ async def test_persistent_retry_count_and_backoff(setup_teardown_db):
 
     # Attempt 2 -> exhaustion -> retry 3, ~15 min
     with patch("app.services.pipeline.find_external_subtitle", return_value=en_srt_path), \
-         patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate_fail), \
-         patch("app.services.translator.SubtitleTranslator.classify_and_recover_identical", return_value=[]), \
-         patch("app.services.translator.SubtitleTranslator.escalate_single_line", return_value=""):
+         patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate_fail):
 
         await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
 
     job = get_job_by_id(job_id)
-    assert job["status"] == "RECOVERING"
+    assert job["status"] == "WAITING_PROVIDER"
     assert job["retry_count"] == 3
     t3 = datetime.fromisoformat(job["next_retry_at"])
     now = datetime.now(timezone.utc)

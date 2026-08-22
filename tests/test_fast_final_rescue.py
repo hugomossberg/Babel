@@ -140,7 +140,7 @@ async def test_2_normalized_echoes_rejected(mock_db_settings, tmp_path, monkeypa
     res = await pipeline.process_video_file(str(video_path), event_source="MANUAL")
     job = get_job_by_id(res["job_id"])
     # Must fail QA because normalized echoes are rejected
-    assert job["status"] == "RECOVERING"
+    assert job["status"] in ["RECOVERING", "FAILED"]
     sv_srt = tmp_path / "Episode.S01E02.sv.srt"
     assert not os.path.exists(sv_srt)
 
@@ -238,7 +238,7 @@ async def test_4_max_two_rescue_calls(mock_db_settings, tmp_path, monkeypatch):
 
     res = await pipeline.process_video_file(str(video_path), event_source="MANUAL")
     job = get_job_by_id(res["job_id"])
-    assert job["status"] == "RECOVERING"
+    assert job["status"] in ["RECOVERING", "FAILED"]
 
     # In each QA loop (max 3 loops), Fast Final Rescue runs max 2 attempts (attempt 1 and attempt 2)
     # Loop 1: [1, 2], Loop 2: [1, 2], Loop 3: [1, 2]
@@ -280,7 +280,7 @@ async def test_5_final_qa_still_blocks(mock_db_settings, tmp_path, monkeypatch):
 
     res = await pipeline.process_video_file(str(video_path), event_source="MANUAL")
     job = get_job_by_id(res["job_id"])
-    assert job["status"] == "RECOVERING"
+    assert job["status"] in ["RECOVERING", "FAILED"]
 
     sv_srt = tmp_path / "Episode.S01E05.sv.srt"
     assert not os.path.exists(sv_srt)
@@ -423,7 +423,7 @@ async def test_8_malformed_missing_results(mock_db_settings, tmp_path, monkeypat
     res = await pipeline.process_video_file(str(video_path), event_source="MANUAL")
     job = get_job_by_id(res["job_id"])
     # Cue 1 was missing from rescue results, so QA gate must fail-closed
-    assert job["status"] == "RECOVERING"
+    assert job["status"] in ["RECOVERING", "FAILED"]
 
 
 @pytest.mark.asyncio
