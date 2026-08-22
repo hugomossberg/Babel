@@ -16,7 +16,7 @@ from app.services.bazarr_checker import check_existing_swedish_subtitle, check_e
 from app.services.translator import (
     SubtitleTranslator, is_usable_translation, is_meaningful_translation, ProviderUnavailableError,
     ProviderConfigurationError, get_provider_capabilities, is_deterministically_safe_keep,
-    normalize_for_compare, is_safe_keep_prefilter
+    normalize_for_compare, is_safe_keep_prefilter, has_entity_evidence
 )
 from app.services.jellyfin_notifier import notify_jellyfin_library_refresh
 
@@ -75,7 +75,7 @@ def qa_gate(
             return True
         return False
 
-    # Defense-in-depth: safe_ids are only honored if deterministically safe
+    # Defense-in-depth: safe_ids are only honored if deterministically safe or backed by same-run evidence
     real_untranslated_ids = []
     for i in untranslated_ids:
         orig_content = source_subs[i].content
@@ -87,7 +87,8 @@ def qa_gate(
             is_deterministically_safe_keep(orig_content, "acronym", show_title=show_title) or
             is_deterministically_safe_keep(orig_content, "number", show_title=show_title) or
             is_deterministically_safe_keep(orig_content, "symbol", show_title=show_title) or
-            is_deterministically_safe_keep(orig_content, "non_verbal", show_title=show_title)
+            is_deterministically_safe_keep(orig_content, "non_verbal", show_title=show_title) or
+            has_entity_evidence(orig_content, source_subs, translated_subs, target_idx=i)
         ):
             continue
         real_untranslated_ids.append(i)
@@ -1043,6 +1044,8 @@ class SubtitlePipeline:
                 known_untranslated_ids = set()
                 exhausted_strategies = set()
                 recovered_cues = set()
+                previous_unresolved_set: Optional[Set[int]] = None
+                recovered_at_loop_start = 0
 
                 while qa_loop_count < max_qa_loops:
                     qa_loop_count += 1
@@ -1068,6 +1071,16 @@ class SubtitlePipeline:
                     if qa_result["passed"]:
                         break # Success! Exit the recovery loop.
 
+                    current_unresolved_set = set(qa_result.get("real_untranslated_ids", []) + [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])])
+
+                    # Stagnation Guard: If unresolved set is unchanged and 0 new cues were recovered, break immediately
+                    if previous_unresolved_set is not None and current_unresolved_set == previous_unresolved_set and len(recovered_cues) == recovered_at_loop_start:
+                        append_job_log(job_id, f"QA Recovery: Stagnation detected ({len(current_unresolved_set)} unresolved cues unchanged with 0 progress). Breaking QA recovery loop.")
+                        break
+
+                    previous_unresolved_set = set(current_unresolved_set)
+                    recovered_at_loop_start = len(recovered_cues)
+
                     # Attempt recovery for any untranslated or dropped lines
                     if qa_result["untranslated_ids"] or qa_result.get("dropped_count", 0) > 0:
                         try:
@@ -1089,9 +1102,16 @@ class SubtitlePipeline:
                                         for i in range(0, len(recovery_payload), chunk_size):
                                             chunk = recovery_payload[i:i + chunk_size]
                                             try:
-                                                chunk_res = await self.translator.classify_and_recover_identical(
-                                                    chunk, lang_name, title or ""
-                                                )
+                                                try:
+                                                    chunk_res = await self.translator.classify_and_recover_identical(
+                                                        chunk, lang_name, title or "",
+                                                        source_subs=subs,
+                                                        translated_subs=translated_subs
+                                                    )
+                                                except TypeError:
+                                                    chunk_res = await self.translator.classify_and_recover_identical(
+                                                        chunk, lang_name, title or ""
+                                                    )
                                                 recovery_results.extend(chunk_res)
                                             except Exception as e:
                                                 append_job_log(job_id, f"QA Primary Recovery chunk failed: {e}")
@@ -1103,20 +1123,25 @@ class SubtitlePipeline:
                                             action = r.get("action")
                                             if action == "keep":
                                                 raw_reason = r.get("reason", "none").lower()
-                                                if is_deterministically_safe_keep(subs[idx].content, raw_reason, show_title=title or ""):
+                                                is_det_safe = is_deterministically_safe_keep(subs[idx].content, raw_reason, show_title=title or "")
+                                                is_ev_safe = has_entity_evidence(subs[idx].content, subs, translated_subs, target_idx=idx)
+                                                if is_det_safe or is_ev_safe:
                                                     if idx not in safe_ids:
                                                         safe_ids.append(idx)
-                                                    reason_map = {
-                                                        "proper_noun": "Name / Proper Noun",
-                                                        "brand": "Brand Name",
-                                                        "acronym": "Acronym / Abbreviation",
-                                                        "number": "Number",
-                                                        "symbol": "Symbol / Punctuation",
-                                                        "non_verbal": "Non-verbal Sound",
-                                                        "none": "Unspecified Reason"
-                                                    }
-                                                    reason_str = reason_map.get(raw_reason, raw_reason.replace("_", " ").title())
-                                                    append_job_log(job_id, f"QA Recovery: Model kept line {idx} ({reason_str})")
+                                                    if is_ev_safe and not is_det_safe:
+                                                        append_job_log(job_id, f"QA Recovery: Model kept line {idx} (Evidence-based Entity: '{subs[idx].content.strip()}')")
+                                                    else:
+                                                        reason_map = {
+                                                            "proper_noun": "Name / Proper Noun",
+                                                            "brand": "Brand Name",
+                                                            "acronym": "Acronym / Abbreviation",
+                                                            "number": "Number",
+                                                            "symbol": "Symbol / Punctuation",
+                                                            "non_verbal": "Non-verbal Sound",
+                                                            "none": "Unspecified Reason"
+                                                        }
+                                                        reason_str = reason_map.get(raw_reason, raw_reason.replace("_", " ").title())
+                                                        append_job_log(job_id, f"QA Recovery: Model kept line {idx} ({reason_str})")
                                                 else:
                                                     append_job_log(job_id, f"QA Recovery: Rejected unsafe KEEP for line {idx} ('{subs[idx].content}'). Forcing translation.")
                                                     known_untranslated_ids.add(idx)
@@ -1158,7 +1183,7 @@ class SubtitlePipeline:
 
                             # 2. Escalation Stage: Contextual Single-Line Recovery (Dropped + Unresolved Identical)
                             real_unresolved = qa_result.get("real_untranslated_ids", [])
-                            dropped_unresolved = [d["index"] - 1 for d in qa_result.get("dropped_details", [])]
+                            dropped_unresolved = [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])]
                             all_unresolved = list(set(real_unresolved + dropped_unresolved))
                             all_unresolved.sort()
 
@@ -1189,7 +1214,7 @@ class SubtitlePipeline:
                                 # Re-run QA again to get the remaining stubborn cues
                                 qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "")
                                 real_unresolved = qa_result.get("real_untranslated_ids", [])
-                                dropped_unresolved = [d["index"] - 1 for d in qa_result.get("dropped_details", [])]
+                                dropped_unresolved = [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])]
                                 all_unresolved = list(set(real_unresolved + dropped_unresolved))
                                 all_unresolved.sort()
 
@@ -1251,7 +1276,7 @@ class SubtitlePipeline:
 
                                 # 3. FAST FINAL RESCUE (Batch recovery for stubborn unresolved dialogue cues)
                                 real_unresolved = qa_result.get("real_untranslated_ids", [])
-                                dropped_unresolved = [d["index"] - 1 for d in qa_result.get("dropped_details", [])]
+                                dropped_unresolved = [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])]
                                 rescue_candidate_ids = [
                                     idx for idx in sorted(set(real_unresolved + dropped_unresolved))
                                     if idx not in safe_ids and subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>"

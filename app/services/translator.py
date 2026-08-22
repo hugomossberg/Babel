@@ -430,7 +430,79 @@ def is_meaningful_translation(source_text: str, candidate_text: str) -> bool:
         return False
     return normalize_for_compare(candidate_text) != normalize_for_compare(source_text)
 
-def validate_classifier_output(raw_text: str, items: list, show_title: str = "") -> list:
+def has_entity_evidence(
+    target_text: str,
+    source_subs: list,
+    translated_subs: list,
+    target_idx: Optional[int] = None,
+    min_evidence: int = 1
+) -> bool:
+    """
+    Strict evidence-based entity resolver (same subtitle run).
+    Verifies if every entity token in target_text is proven to be an unchanged
+    proper noun / entity name across English source and translated target text
+    within genuinely translated cues from the exact same subtitle run.
+
+    Invariants:
+    1. Returns False if target_text is empty or contains any word in ENGLISH_COMMON_WORDS.
+    2. Candidate must contain only non-common-word alphabetic tokens.
+    3. Every entity token must appear with exact token boundaries (\\b) in BOTH source and
+       translated text of at least min_evidence distinct, genuinely translated cues (where
+       is_meaningful_translation(source, translated) is True).
+    4. Never derives evidence from source-copy, identical, or KEEP cues.
+    5. No substring matching, no fuzzy matching, no loose TitleCase heuristics.
+    """
+    if not target_text or not source_subs or not translated_subs:
+        return False
+
+    clean_text = target_text.strip()
+    clean_text = re.sub(r'<[^>]+>', '', clean_text)
+    clean_text = re.sub(r'\{[^}]+\}', '', clean_text).strip()
+    if not clean_text or clean_text == "<i></i>":
+        return False
+
+    # Extract alphabetic words/tokens
+    words = [w for w in re.split(r"[^\w\x27-]+", clean_text) if w and any(c.isalpha() for c in w)]
+    if not words:
+        return False
+
+    # Reject if ANY word is in ENGLISH_COMMON_WORDS or is too short
+    for w in words:
+        w_clean = re.sub(r"[^\w]", "", w).lower()
+        if not w_clean or w_clean in ENGLISH_COMMON_WORDS or len(w_clean) < 2:
+            return False
+
+    min_len = min(len(source_subs), len(translated_subs))
+    for w in words:
+        w_pattern = re.compile(rf"\b{re.escape(w)}\b", re.IGNORECASE)
+        evidence_count = 0
+        for k in range(min_len):
+            if target_idx is not None and k == target_idx:
+                continue
+            src = source_subs[k].content.strip()
+            trans = translated_subs[k].content.strip()
+            if not src or src == "<i></i>" or not trans or trans == "<i></i>":
+                continue
+            # CRITICAL: Evidence MUST come from genuinely translated lines, NOT copies/KEEPs
+            if not is_meaningful_translation(src, trans):
+                continue
+            if w_pattern.search(src) and w_pattern.search(trans):
+                evidence_count += 1
+                if evidence_count >= min_evidence:
+                    break
+
+        if evidence_count < min_evidence:
+            return False
+
+    return True
+
+def validate_classifier_output(
+    raw_text: str,
+    items: list,
+    show_title: str = "",
+    source_subs: Optional[list] = None,
+    translated_subs: Optional[list] = None
+) -> list:
     logger.info(f"Classifier validation: received {len(items)} candidates. Raw type: {type(raw_text)}")
 
     valid_results = []
@@ -480,7 +552,15 @@ def validate_classifier_output(raw_text: str, items: list, show_title: str = "")
             reason = str(r.get("reason", "")).lower()
 
             if act == "keep":
-                if not is_deterministically_safe_keep(original_text, reason, show_title=show_title):
+                is_det_safe = is_deterministically_safe_keep(original_text, reason, show_title=show_title)
+                is_ev_safe = False
+                if not is_det_safe and source_subs is not None and translated_subs is not None:
+                    is_ev_safe = has_entity_evidence(original_text, source_subs, translated_subs, target_idx=rid)
+
+                if is_ev_safe:
+                    logger.info(f"Classifier validation: ID {rid} allowed KEEP via same-run entity evidence ('{original_text}')")
+                    reason = f"evidence_{reason}"
+                elif not is_det_safe:
                     logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (not deterministically safe: reason={reason}, text='{original_text}')")
                     act = "translate"
                     r["text"] = ""
@@ -517,7 +597,14 @@ def validate_classifier_output(raw_text: str, items: list, show_title: str = "")
 
 class SubtitleTranslator:
     @with_retry
-    async def classify_and_recover_identical(self, items: list, target_language: str, show_title: str) -> list:
+    async def classify_and_recover_identical(
+        self,
+        items: list,
+        target_language: str,
+        show_title: str,
+        source_subs: Optional[list] = None,
+        translated_subs: Optional[list] = None
+    ) -> list:
         provider = get_setting("ai_provider", "gemini").lower()
         if provider == "deepl":
             return [] # fallback to translation
@@ -576,7 +663,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 )
             loop = asyncio.get_event_loop()
             resp = await loop.run_in_executor(None, do_gemini)
-            return validate_classifier_output(resp.text, items, show_title=show_title)
+            return validate_classifier_output(resp.text, items, show_title=show_title, source_subs=source_subs, translated_subs=translated_subs)
 
         elif provider == "openai":
             import openai
@@ -598,7 +685,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             resp = await loop.run_in_executor(None, do_openai)
             try:
                 content = resp.choices[0].message.content
-                return validate_classifier_output(content, items, show_title=show_title)
+                return validate_classifier_output(content, items, show_title=show_title, source_subs=source_subs, translated_subs=translated_subs)
             except Exception:
                 return []
 
@@ -613,7 +700,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     json={"model": model_name, "prompt": full_prompt, "format": "json", "stream": False}
                 )
                 try:
-                    return validate_classifier_output(resp.json()["response"], items, show_title=show_title)
+                    return validate_classifier_output(resp.json()["response"], items, show_title=show_title, source_subs=source_subs, translated_subs=translated_subs)
                 except Exception:
                     return []
 
@@ -1181,6 +1268,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                                 show_title=show_title or "",
                                 job_id=job_id
                             )
+                            recovered_micro_count = 0
                             if isinstance(repair_results, list):
                                 for r in repair_results:
                                     if isinstance(r, dict) and "id" in r and "text" in r:
@@ -1189,8 +1277,13 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                                             cand = r["text"]
                                             if is_meaningful_translation(orig_map[rid], cand):
                                                 res_dict[rid] = cand
+                                                recovered_micro_count += 1
+                            if job_id:
+                                append_job_log(job_id, f"First-Pass Micro Repair: evaluated {len(failed_cues)} missing/identical cues (batch {start_idx}-{end_idx}) -> recovered {recovered_micro_count}/{len(failed_cues)}")
                         except Exception as e:
                             logger.warning(f"First-pass micro repair exception for batch {start_idx}: {e}")
+                            if job_id:
+                                append_job_log(job_id, f"First-Pass Micro Repair failed for batch {start_idx}-{end_idx}: {e}")
 
                 for p in payload:
                     if p["id"] in partial_dict:
