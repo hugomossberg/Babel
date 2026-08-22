@@ -336,6 +336,15 @@ def normalize_for_compare(text: str) -> str:
     t = re.sub(r'[^\w]', '', t)
     return t.casefold()
 
+def is_meaningful_translation(source_text: str, candidate_text: str) -> bool:
+    """
+    Fail-closed check to verify if candidate_text is a usable translation
+    that is not identical or normalized-equivalent to source_text (consistent with FINAL QA).
+    """
+    if not is_usable_translation(candidate_text):
+        return False
+    return normalize_for_compare(candidate_text) != normalize_for_compare(source_text)
+
 def validate_classifier_output(raw_text: str, items: list) -> list:
     logger.info(f"Classifier validation: received {len(items)} candidates. Raw type: {type(raw_text)}")
 
@@ -399,7 +408,7 @@ def validate_classifier_output(raw_text: str, items: list) -> list:
                 translated += 1
                 provided_text = str(r.get("text", "")).strip()
                 # If provided translation is empty, unusable, or echoes source, clear text to force recovery
-                if not is_usable_translation(provided_text) or normalize_for_compare(provided_text) == normalize_for_compare(original_text):
+                if not is_meaningful_translation(original_text, provided_text):
                     logger.info(f"Classifier validation: ID {rid} TRANSLATE has empty/echo text, clearing to force recovery")
                     provided_text = ""
                 valid_results.append({"id": rid, "action": "translate", "reason": reason or "translate", "text": provided_text})
@@ -557,12 +566,6 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         import re
         logger = logging.getLogger(__name__)
 
-        def normalize(text: str) -> str:
-            if not text: return ""
-            t = unicodedata.normalize('NFKC', text)
-            t = re.sub(r'\s+', '', t).lower()
-            return t
-
         primary_provider = get_setting("ai_provider", "gemini").lower()
         escalate_enabled = get_setting("escalate_to_pro", "false").lower() == "true"
         esc_provider = get_setting("escalation_provider", "none").lower()
@@ -635,7 +638,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                             from app.core.db import append_job_log
                             append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: rejected blank")
                         return None
-                    if normalize(res) == normalize(target_text):
+                    if not is_meaningful_translation(target_text, res):
                         logger.info(f"Escalation line {target_idx} attempt {i+1}/3: rejected identical source")
                         if job_id:
                             from app.core.db import append_job_log
@@ -721,7 +724,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                             if job_id:
                                 from app.core.db import append_job_log
                                 append_job_log(job_id, f"Escalation line {target_idx} attempt {i+1}/3: rejected blank")
-                        elif normalize(raw_res) == normalize(target_text):
+                        elif not is_meaningful_translation(target_text, raw_res):
                             logger.info(f"Escalation line {target_idx} attempt {i+1}/3: rejected identical source")
                             if job_id:
                                 from app.core.db import append_job_log

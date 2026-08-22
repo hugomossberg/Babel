@@ -14,7 +14,7 @@ from app.core.validator import verify_sync, check_dropped_lines, evaluate_subtit
 from app.core.db import create_job, update_job, append_job_log, get_setting, get_positive_int_setting, save_translation_memory_bulk
 from app.services.bazarr_checker import check_existing_swedish_subtitle, check_existing_english_subtitle, find_external_subtitle
 from app.services.translator import (
-    SubtitleTranslator, is_usable_translation, ProviderUnavailableError,
+    SubtitleTranslator, is_usable_translation, is_meaningful_translation, ProviderUnavailableError,
     ProviderConfigurationError, get_provider_capabilities, is_deterministically_safe_keep,
     normalize_for_compare
 )
@@ -1119,7 +1119,7 @@ class SubtitlePipeline:
                                             elif action == "translate" and "text" in r:
                                                 if not is_usable_translation(r["text"]):
                                                     append_job_log(job_id, f"QA Recovery: Rejected blank/invalid translation for line {idx}")
-                                                elif r["text"] != subs[idx].content:
+                                                elif is_meaningful_translation(subs[idx].content, r["text"]):
                                                     translated_subs[idx].content = r["text"]
                                                     append_job_log(job_id, f"QA Recovery: Translated line {idx}")
                                                     recovered_cues.add(idx)
@@ -1142,7 +1142,7 @@ class SubtitlePipeline:
                                             idx = r.get("id")
                                             if idx is None: continue
                                             text = r.get("text", "")
-                                            if is_usable_translation(text) and text != subs[idx].content and text != translated_subs[idx].content:
+                                            if is_meaningful_translation(subs[idx].content, text):
                                                 translated_subs[idx].content = text
                                                 append_job_log(job_id, f"QA Recovery: Translated line {idx}")
                                                 recovered_cues.add(idx)
@@ -1174,7 +1174,7 @@ class SubtitlePipeline:
                                         idx = r.get("id")
                                         if idx is None: continue
                                         text = r.get("text", "")
-                                        if is_usable_translation(text) and text != subs[idx].content:
+                                        if is_meaningful_translation(subs[idx].content, text):
                                             translated_subs[idx].content = text
                                             recovered_cues.add(idx)
                                             targeted_success += 1
@@ -1224,9 +1224,9 @@ class SubtitlePipeline:
                                                     append_job_log(job_id, f"Escalation: Rejected empty text for line {idx}")
                                                 elif is_orig_real and is_esc_empty:
                                                     append_job_log(job_id, f"Escalation: Rejected fake empty/tag for real dialogue at line {idx}")
-                                                elif is_dropped and esc_clean == orig_clean:
-                                                    append_job_log(job_id, f"Escalation: Rejected identical fallback for dropped line {idx}")
-                                                elif esc_text != translated_subs[idx].content:
+                                                elif not is_meaningful_translation(target_text, esc_text):
+                                                    append_job_log(job_id, f"Escalation: Rejected identical fallback for line {idx}")
+                                                else:
                                                     translated_subs[idx].content = esc_text
                                                     append_job_log(job_id, f"Escalation: Translated line {idx} using dialogue context")
                                                     recovered_cues.add(idx)
