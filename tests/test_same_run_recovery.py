@@ -44,7 +44,7 @@ async def test_first_execution_success(mock_db_settings, tmp_path, monkeypatch):
     # Create 26 lines. 11 will be legitimate KEEP, 15 will be REAL dialogue.
     for i in range(26):
         if i < 11:
-            text = f"John Smith {i}" # legitimate KEEP
+            text = "NASA" # legitimate KEEP
         else:
             text = f"Dialogue line {i}" # REAL dialogue
         subs.append(srt.Subtitle(index=i+1, start=timedelta(seconds=i), end=timedelta(seconds=i+1), content=text))
@@ -84,8 +84,8 @@ async def test_first_execution_success(mock_db_settings, tmp_path, monkeypatch):
         results = []
         for item in items:
             idx = item["id"]
-            if "John Smith" in item["text"]:
-                results.append({"id": idx, "action": "keep", "reason": "proper_noun", "text": item["text"]})
+            if item["text"] == "NASA":
+                results.append({"id": idx, "action": "keep", "reason": "acronym", "text": item["text"]})
             else:
                 results.append({"id": idx, "action": "translate", "reason": "none", "text": ""}) # simulate blank/identical
         return results

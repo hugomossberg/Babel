@@ -25,18 +25,38 @@ def test_deterministic_safe_keep_rules():
     assert not is_deterministically_safe_keep("What happened?", "proper_noun")
     assert not is_deterministically_safe_keep("Thank you", "non_verbal")
 
-    # Valid proper nouns
-    assert is_deterministically_safe_keep("John Smith", "proper_noun")
-    assert is_deterministically_safe_keep("New York", "proper_noun")
+    # Proper nouns fail-closed to False (must default to TRANSLATE)
+    assert not is_deterministically_safe_keep("John Smith", "proper_noun")
+    assert not is_deterministically_safe_keep("New York", "proper_noun")
+    assert not is_deterministically_safe_keep("Red Alert", "proper_noun")
+    assert not is_deterministically_safe_keep("Green Light", "proper_noun")
+    assert not is_deterministically_safe_keep("Dead Body", "proper_noun")
+    assert not is_deterministically_safe_keep("Black Car", "proper_noun")
+    assert not is_deterministically_safe_keep("White House", "proper_noun")
+    assert not is_deterministically_safe_keep("Good Morning", "proper_noun")
+    assert not is_deterministically_safe_keep("Happy Birthday", "proper_noun")
+    assert not is_deterministically_safe_keep("Big Problem", "proper_noun")
+    assert not is_deterministically_safe_keep("Last Chance", "proper_noun")
+    assert not is_deterministically_safe_keep("First Time", "proper_noun")
+    assert not is_deterministically_safe_keep("New Plan", "proper_noun")
+    assert not is_deterministically_safe_keep("Bad Idea", "proper_noun")
+    assert not is_deterministically_safe_keep("Blue Moon", "proper_noun")
+
     # Brand is fail-closed
     assert not is_deterministically_safe_keep("Microsoft", "brand")
+    assert not is_deterministically_safe_keep("Apple", "brand")
 
-    # Valid acronyms, tech brands and numbers
+    # Valid acronyms, tech brands and numbers from explicit allowlist
     assert is_deterministically_safe_keep("NASA", "acronym")
     assert is_deterministically_safe_keep("FBI", "acronym")
+    assert is_deterministically_safe_keep("CIA", "acronym")
+    assert is_deterministically_safe_keep("GPS", "acronym")
+    assert is_deterministically_safe_keep("USB", "acronym")
+    assert is_deterministically_safe_keep("DNA", "acronym")
     assert is_deterministically_safe_keep("WiFi!", "brand")
     assert is_deterministically_safe_keep("WiFi!", "acronym")
     assert is_deterministically_safe_keep("Wi-Fi", "acronym")
+    assert is_deterministically_safe_keep("Bluetooth", "brand")
     assert is_deterministically_safe_keep("911", "number")
     assert is_deterministically_safe_keep("2026", "number")
 
@@ -55,15 +75,67 @@ def test_deterministic_safe_keep_rules():
     assert is_deterministically_safe_keep("Hmm...", "non_verbal")
     assert is_deterministically_safe_keep("Ugh!", "non_verbal")
 
-    # Proper nouns in show_title
-    assert is_deterministically_safe_keep("Millennials!", "proper_noun", show_title="Mostly 4 Millennials")
-    assert is_deterministically_safe_keep("Seinfeld", "proper_noun", show_title="Seinfeld")
-    # Common words in show_title are rejected
-    assert not is_deterministically_safe_keep("Mostly", "proper_noun", show_title="Mostly 4 Millennials")
-    assert not is_deterministically_safe_keep("Bad", "proper_noun", show_title="Breaking Bad")
-    # Single words not in show_title are rejected
-    assert not is_deterministically_safe_keep("Millennials!", "proper_noun", show_title="The Office")
-    assert not is_deterministically_safe_keep("Millennials!", "proper_noun")
+    # Proper nouns in show_title or single words must NOT be auto-kept
+    assert not is_deterministically_safe_keep("Millennials!", "proper_noun", show_title="Mostly 4 Millennials")
+    assert not is_deterministically_safe_keep("Seinfeld", "proper_noun", show_title="Seinfeld")
+    assert not is_deterministically_safe_keep("Bear!", "proper_noun", show_title="The Bear")
+    assert not is_deterministically_safe_keep("Office!", "proper_noun", show_title="The Office")
+    assert not is_deterministically_safe_keep("Friends!", "proper_noun", show_title="Friends")
+    assert not is_deterministically_safe_keep("Lost!", "proper_noun", show_title="Lost")
+    assert not is_deterministically_safe_keep("House!", "proper_noun", show_title="House")
+    assert not is_deterministically_safe_keep("You!", "proper_noun", show_title="You")
+    assert not is_deterministically_safe_keep("May!", "proper_noun", show_title="May")
+    assert not is_deterministically_safe_keep("From!", "proper_noun", show_title="From")
+
+    # Single words / names without multi-token proof are rejected
+    assert not is_deterministically_safe_keep("May!", "proper_noun")
+    assert not is_deterministically_safe_keep("Will!", "proper_noun")
+    assert not is_deterministically_safe_keep("Rose!", "proper_noun")
+    assert not is_deterministically_safe_keep("Falcon?", "proper_noun")
+    assert not is_deterministically_safe_keep("Falcon?", "acronym")
+    assert not is_deterministically_safe_keep("Falcon?", "brand")
+    assert not is_deterministically_safe_keep("SadStar.", "proper_noun")
+    assert not is_deterministically_safe_keep("SadStar.", "brand")
+    assert not is_deterministically_safe_keep("BlueMoon", "brand")
+    assert not is_deterministically_safe_keep("GreenLight", "brand")
+
+    # Real dialogue words must never be kept as non-verbal
+    for word in ["No!", "Yes!", "Why?", "Hey!", "Stop!", "Help!", "Right!", "Okay!", "What?", "Go!", "Run!"]:
+        assert not is_deterministically_safe_keep(word, "non_verbal")
+
+def test_adversarial_keep_cases():
+    # 1. Title Case multi-word phrases must NOT be kept as proper nouns
+    for phrase in [
+        "Red Alert", "Green Light", "Dead Body", "Black Car", "White House",
+        "Good Morning", "Happy Birthday", "Big Problem", "Last Chance",
+        "First Time", "New Plan", "Bad Idea", "Blue Moon", "John Smith", "New York"
+    ]:
+        assert not is_deterministically_safe_keep(phrase, "proper_noun")
+
+    # 2. Generic all-caps / consonant heuristics must NOT be kept as acronyms
+    for pseudo_acronym in [
+        "BRR", "PSST", "SHH", "GRR", "HMM", "WTF", "OMG", "LOL",
+        "RUN", "STOP", "HELP", "FALCON", "ATTACK"
+    ]:
+        assert not is_deterministically_safe_keep(pseudo_acronym, "acronym")
+        assert not is_deterministically_safe_keep(pseudo_acronym, "brand")
+
+    # 3. show_title="Mostly 4 Millennials", cue="Millennials!" -> NOT KEEP on title-match
+    assert not is_deterministically_safe_keep("Millennials!", "proper_noun", show_title="Mostly 4 Millennials")
+
+    # 4. show_title matches for other series -> NOT KEEP
+    assert not is_deterministically_safe_keep("Bear!", "proper_noun", show_title="The Bear")
+    assert not is_deterministically_safe_keep("Office!", "proper_noun", show_title="The Office")
+    assert not is_deterministically_safe_keep("Friends!", "proper_noun", show_title="Friends")
+
+    # 5. Ambiguous single names / words -> NOT KEEP
+    assert not is_deterministically_safe_keep("May!", "proper_noun")
+    assert not is_deterministically_safe_keep("Will!", "proper_noun")
+    assert not is_deterministically_safe_keep("Rose!", "proper_noun")
+
+    # 6. Strict allowlist for tech & brand & acronyms -> KEEP
+    for token in ["WiFi", "Wi-Fi", "Bluetooth", "GPS", "USB", "DNA", "FBI", "NASA", "CIA"]:
+        assert is_deterministically_safe_keep(token, "acronym") or is_deterministically_safe_keep(token, "brand")
 
 def test_normalize_for_compare():
     assert normalize_for_compare("Hello, World!") == normalize_for_compare("hello world")

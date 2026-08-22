@@ -36,13 +36,14 @@ def test_strict_non_verbal():
 def test_strict_proper_nouns():
     raw_proper = '{"results": [{"id": 1, "action": "keep", "reason": "proper_noun"}]}'
 
-    # Valid multi-token proper nouns -> KEEP
-    for name in ["John Smith", "New York", "Los Angeles", "Harry Potter"]:
-        res = validate_classifier_output(raw_proper, [{"id": 1, "text": name}])
-        assert res[0]["action"] == "keep"
-        assert res[0]["text"] == name
-
-    # Sentences or dialogue with common words -> TRANSLATE (downgraded)
-    for dialogue in ["Hello", "Good Morning", "This Is My House", "I Love You", "Netflix", "Apple", "John"]:
-        res = validate_classifier_output(raw_proper, [{"id": 1, "text": dialogue}])
+    # Proper nouns fail closed to TRANSLATE (downgraded) so the model evaluates context and localization
+    for candidate in [
+        "John Smith", "New York", "Los Angeles", "Harry Potter",
+        "Red Alert", "Green Light", "Dead Body", "Black Car", "White House",
+        "Good Morning", "Happy Birthday", "Big Problem", "Last Chance",
+        "First Time", "New Plan", "Bad Idea", "Blue Moon",
+        "Hello", "This Is My House", "I Love You", "Netflix", "Apple", "John"
+    ]:
+        res = validate_classifier_output(raw_proper, [{"id": 1, "text": candidate}])
+        assert res[0]["action"] == "translate"
         assert res[0]["text"] == ""  # Downgraded to empty text (TRANSLATE)

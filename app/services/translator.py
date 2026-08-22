@@ -338,20 +338,8 @@ KNOWN_TECH_TERMS_AND_BRANDS = {
 }
 
 def _looks_like_strict_proper_noun(text: str) -> bool:
-    """Strict deterministic check for multi-token proper nouns (2-3 words)."""
-    words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ'’-]+", text)
-    if not 2 <= len(words) <= 3:
-        return False
-    minor_words = {"of", "the", "de", "la", "von", "van", "los", "las", "el", "del", "di", "da"}
-    for word in words:
-        lower = word.casefold()
-        if lower in minor_words:
-            continue
-        if lower in ENGLISH_COMMON_WORDS:
-            return False
-        if not word[0].isupper():
-            return False
-    return True
+    """Proper nouns cannot be deterministically proven safe to leave untranslated."""
+    return False
 
 def is_deterministically_safe_keep(text: str, reason: str, show_title: str = "") -> bool:
     """
@@ -411,32 +399,14 @@ def is_deterministically_safe_keep(text: str, reason: str, show_title: str = "")
         if full_clean in KNOWN_TECH_TERMS_AND_BRANDS:
             return True
         for w in words:
-            w_clean = re.sub(r"[^\w]", "", w)
-            if not w_clean:
-                continue
-            lower = w_clean.lower()
-            if lower in ENGLISH_COMMON_WORDS:
-                return False
-            is_upper_acronym = w_clean.isupper() and len(w_clean) <= 8
-            is_known_tech = lower in KNOWN_TECH_TERMS_AND_BRANDS
-            if not (is_upper_acronym or is_known_tech):
+            w_clean = re.sub(r"[^\w-]", "", w).lower()
+            if not w_clean or w_clean not in KNOWN_TECH_TERMS_AND_BRANDS:
                 return False
         return True
 
     elif reason == "proper_noun":
-        if _looks_like_strict_proper_noun(clean_text):
-            return True
-        if show_title and words:
-            st_lower = show_title.casefold()
-            for w in words:
-                w_lower = w.casefold()
-                if w_lower in ENGLISH_COMMON_WORDS:
-                    return False
-                if not w[0].isupper():
-                    return False
-                if w_lower not in st_lower:
-                    return False
-            return True
+        # Fail-closed: Proper nouns cannot be deterministically proven safe to leave untranslated.
+        # Defaults to TRANSLATE so the AI model safely evaluates context and localization.
         return False
 
     return False

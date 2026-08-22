@@ -2,8 +2,8 @@ import pytest
 from app.services.translator import validate_classifier_output
 
 def test_classifier_correct_dict_root():
-    items = [{"id": 1, "text": "John Smith"}]
-    raw = '{"results": [{"id": 1, "action": "keep", "reason": "proper_noun", "text": "John Smith"}]}'
+    items = [{"id": 1, "text": "WiFi"}]
+    raw = '{"results": [{"id": 1, "action": "keep", "reason": "brand", "text": "WiFi"}]}'
     out = validate_classifier_output(raw, items)
     assert len(out) == 1
     assert out[0]["id"] == 1
@@ -25,8 +25,8 @@ def test_classifier_list_of_strings():
     assert out[0]["reason"] == "malformed_fallback"
 
 def test_classifier_missing_result_id():
-    items = [{"id": 1, "text": "John Smith"}, {"id": 2, "text": "World"}]
-    raw = '{"results": [{"id": 1, "action": "keep", "reason": "proper_noun"}]}'
+    items = [{"id": 1, "text": "WiFi"}, {"id": 2, "text": "World"}]
+    raw = '{"results": [{"id": 1, "action": "keep", "reason": "brand"}]}'
     out = validate_classifier_output(raw, items)
     assert len(out) == 2
     
@@ -50,8 +50,8 @@ def test_classifier_keep_invalid_reason():
     assert out[0]["action"] == "translate"
 
 def test_classifier_markdown_wrapping():
-    items = [{"id": 1, "text": "John Smith"}]
-    raw = "```json\n{\"results\": [{\"id\": 1, \"action\": \"keep\", \"reason\": \"proper_noun\"}]}\n```"
+    items = [{"id": 1, "text": "WiFi"}]
+    raw = "```json\n{\"results\": [{\"id\": 1, \"action\": \"keep\", \"reason\": \"brand\"}]}\n```"
     out = validate_classifier_output(raw, items)
     assert len(out) == 1
     assert out[0]["action"] == "keep"
@@ -115,7 +115,7 @@ def test_validate_classifier_output_strict_keep():
     assert results_map[1] == "translate"
     assert results_map[2] == "keep"
     assert results_map[3] == "keep"
-    assert results_map[4] == "keep"
-    assert results_map[5] == "keep"
+    assert results_map[4] == "translate"
+    assert results_map[5] == "translate"
     assert results_map[6] == "translate"
     assert results_map[7] == "translate"
