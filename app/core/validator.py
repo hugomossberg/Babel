@@ -34,6 +34,14 @@ def detect_language_heuristics(text: str) -> dict:
         detected_code = best_match.lang.lower()
         confidence = best_match.prob
         
+        # Heuristic assistance: If Swedish common words are present in text, resolve to 'sv'
+        # to prevent Scandinavian ambiguity (no/da) or short dialog uncertainty
+        words = set(re.findall(r"\b\w+\b", text.lower()))
+        swedish_word_matches = words & SWEDISH_COMMON_WORDS
+        if len(swedish_word_matches) >= 2 and detected_code in {"no", "da", "unknown"}:
+            detected_code = "sv"
+            confidence = max(confidence, 0.95)
+
         # Normalize via central language registry
         registry_lang = get_language(detected_code)
         normalized_code = registry_lang.code if registry_lang else detected_code
@@ -177,7 +185,14 @@ def evaluate_subtitle_health(
     detected_lang = lang_info["lang"]
     confidence = lang_info["confidence"]
 
-    if detected_lang != "unknown" and detected_lang != target_lang_code[:2].lower():
+    target_norm = target_lang_code[:2].lower()
+    if target_norm == "sv" and detected_lang != "sv":
+        words = set(re.findall(r"\b\w+\b", full_sample_text.lower()))
+        if len(words & SWEDISH_COMMON_WORDS) >= 2:
+            detected_lang = "sv"
+            confidence = 0.95
+
+    if detected_lang != "unknown" and detected_lang != target_norm:
         if confidence < 0.8:
             return {
                 "status": "YELLOW",
@@ -194,14 +209,6 @@ def evaluate_subtitle_health(
                 "lines": len(sub_blocks),
                 "detected_language": detected_lang
             }
-    elif detected_lang == "unknown":
-        return {
-            "status": "RED",
-            "health_score": 0,
-            "reason": "Language detection failed (unknown)",
-            "lines": len(sub_blocks),
-            "detected_language": "unknown"
-        }
 
     # 2. Tomma rader
     empty_lines = sum(1 for s in sub_blocks if not s.content.strip() or s.content.strip() == "...")
@@ -243,6 +250,15 @@ def evaluate_subtitle_health(
                 "dropped_lines": dropped_count,
                 "detected_language": detected_lang
             }
+
+    if detected_lang == "unknown":
+        return {
+            "status": "YELLOW",
+            "health_score": 75,
+            "reason": f"Healthy structure ({len(sub_blocks)} lines), language detection uncertain (unknown)",
+            "lines": len(sub_blocks),
+            "detected_language": "unknown"
+        }
 
     return {
         "status": "GREEN",

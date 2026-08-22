@@ -115,6 +115,8 @@ def init_db():
             "media_series_path": "/tv",
             "media_movies_path": "/movies",
             "webhook_secret": os.getenv("BABEL_WEBHOOK_SECRET", ""),
+            "qa_max_unresolved_cues": "3",
+            "qa_max_unresolved_ratio": "0.01",
             "languages": json.dumps([
                 {"name": "Swedish", "code": "sv", "enabled": True}
             ])
@@ -150,6 +152,42 @@ def get_positive_int_setting(key: str, default: int) -> int:
         )
         return max(1, default)
     return max(1, value)
+
+def get_int_setting(key: str, default: int, min_val: Optional[int] = None, max_val: Optional[int] = None) -> int:
+    """
+    Safely retrieves an integer setting with optional min/max bounds.
+    """
+    raw_value = get_setting(key, str(default))
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        logger.warning(
+            f"Invalid integer setting {key}={raw_value!r}; using default {default}"
+        )
+        value = default
+    if min_val is not None:
+        value = max(min_val, value)
+    if max_val is not None:
+        value = min(max_val, value)
+    return value
+
+def get_float_setting(key: str, default: float, min_val: Optional[float] = None, max_val: Optional[float] = None) -> float:
+    """
+    Safely retrieves a float setting with optional min/max bounds.
+    """
+    raw_value = get_setting(key, str(default))
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        logger.warning(
+            f"Invalid float setting {key}={raw_value!r}; using default {default}"
+        )
+        value = default
+    if min_val is not None:
+        value = max(min_val, value)
+    if max_val is not None:
+        value = min(max_val, value)
+    return value
 
 def create_job(video_path: str, event_source: str = "MANUAL", title: Optional[str] = None) -> int:
     now = datetime.now(timezone.utc).isoformat()

@@ -97,6 +97,7 @@ async def test_675_worker_targeted_retry(tmp_path):
         if key == "languages":
             return '[{"name": "Swedish", "code": "sv", "enabled": true}]'
         if key == "auto_repair_unhealthy": return "false"
+        if key == "qa_max_unresolved_cues": return "0"
         return default
 
     translate_calls = []

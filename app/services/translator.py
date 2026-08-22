@@ -343,7 +343,8 @@ KNOWN_TECH_TERMS_AND_BRANDS = {
     "wifi", "wi-fi", "bluetooth", "youtube", "google", "tiktok", "instagram", "twitter",
     "facebook", "netflix", "spotify", "xbox", "playstation", "iphone", "ipad", "android",
     "gps", "usb", "vip", "tv", "dj", "pc", "sim", "pin", "led", "lcd", "ai", "vr", "hd",
-    "4k", "uhd", "dvd", "vcr", "cd", "fbi", "cia", "nasa", "dna", "nato", "unicef", "interpol"
+    "4k", "uhd", "dvd", "vcr", "cd", "fbi", "cia", "nasa", "dna", "nato", "unicef", "interpol",
+    "bmw"
 }
 
 def _looks_like_strict_proper_noun(text: str) -> bool:

@@ -11,7 +11,11 @@ import uuid
 from app.core.cleaner import sanitize_srt_content, subs_to_srt_string
 from app.core.extractor import extract_embedded_srt, inspect_mkv_tracks
 from app.core.validator import verify_sync, check_dropped_lines, evaluate_subtitle_health, detect_language_heuristics
-from app.core.db import create_job, update_job, append_job_log, get_setting, get_positive_int_setting, save_translation_memory_bulk
+from app.core.db import (
+    create_job, update_job, append_job_log, get_setting,
+    get_positive_int_setting, get_int_setting, get_float_setting,
+    save_translation_memory_bulk
+)
 from app.services.bazarr_checker import check_existing_swedish_subtitle, check_existing_english_subtitle, find_external_subtitle
 from app.services.translator import (
     SubtitleTranslator, is_usable_translation, is_meaningful_translation, ProviderUnavailableError,
@@ -22,6 +26,14 @@ from app.services.translator import (
 from app.services.jellyfin_notifier import notify_jellyfin_library_refresh
 
 logger = logging.getLogger("babel.pipeline")
+
+# QA Policy Status and Default Thresholds
+QA_STATUS_PASS = "PASS"
+QA_STATUS_PASS_WITH_WARNINGS = "PASS_WITH_WARNINGS"
+QA_STATUS_FAIL = "FAIL"
+
+DEFAULT_QA_MAX_UNRESOLVED_COUNT = 3
+DEFAULT_QA_MAX_UNRESOLVED_RATIO = 0.01  # 1.0% of total cues
 
 
 # ---------------------------------------------------------------------------
@@ -35,27 +47,63 @@ def qa_gate(
     job_id: Optional[int] = None,
     safe_ids: Optional[list] = None,
     show_title: str = "",
-    context_verified_ids: Optional[set] = None
+    context_verified_ids: Optional[set] = None,
+    allow_warnings: bool = True,
+    max_unresolved_count: Optional[int] = None,
+    max_unresolved_ratio: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    Final Quality Assurance gate. Returns a dict with:
-      - passed: bool
+    Final Quality Assurance gate. Evaluates structural integrity and semantic quality against QA policy.
+    Returns a dict with:
+      - passed: bool (True for PASS and PASS_WITH_WARNINGS when allow_warnings is True)
+      - status: "PASS" | "PASS_WITH_WARNINGS" | "FAIL"
       - score: int (0-100)
-      - issues: list of strings describing problems
+      - issues: list of strings describing hard problems/failures
+      - warnings: list of strings describing tolerated warnings
       - untranslated_ids: list of subtitle indices where original text was kept
+      - real_untranslated_ids: list of indices that are real unresolved dialogue cues
+      - preserved_untranslated_ids: list of indices preserved as source fallback
+      - dropped_count: int
+      - dropped_details: list
+      - sync_diff_ms: int
+      - policy_details: dict
     """
     issues = []
+    warnings = []
     untranslated_ids = []
     safe_ids = safe_ids or []
     score = 100
 
+    total_source = len(source_subs)
+    total_trans = len(translated_subs)
+
+    # 0. Structural check: empty list
+    if total_source == 0 or total_trans == 0:
+        issues.append("Empty subtitle list")
+        score = 0
+        return {
+            "passed": False,
+            "status": QA_STATUS_FAIL,
+            "score": 0,
+            "issues": issues,
+            "warnings": warnings,
+            "untranslated_ids": [],
+            "real_untranslated_ids": [],
+            "preserved_untranslated_ids": [],
+            "dropped_count": 0,
+            "dropped_details": [],
+            "sync_diff_ms": -1,
+            "policy_details": {"structural_passed": False, "reason": "empty_subtitles"}
+        }
+
     # 1. Line count must match exactly
-    if len(translated_subs) != len(source_subs):
-        issues.append(f"Line count mismatch: source={len(source_subs)}, translated={len(translated_subs)}")
+    line_count_match = (total_trans == total_source)
+    if not line_count_match:
+        issues.append(f"Line count mismatch: source={total_source}, translated={total_trans}")
         score -= 50
 
     # 2. Check for untranslated lines (original English still present)
-    min_len = min(len(source_subs), len(translated_subs))
+    min_len = min(total_source, total_trans)
     for i in range(min_len):
         orig = source_subs[i].content.strip()
         trans = translated_subs[i].content.strip()
@@ -110,7 +158,7 @@ def qa_gate(
     # 3. Check for completely empty translations (dropped lines)
     dropped_count, dropped_details = check_dropped_lines(source_subs, translated_subs)
     if dropped_count > 0:
-        pct = round(dropped_count / len(source_subs) * 100, 1) if len(source_subs) > 0 else 0
+        pct = round(dropped_count / total_source * 100, 1) if total_source > 0 else 0
         issues.append(f"{dropped_count} lines ({pct}%) were dropped (empty in translation)")
         if pct > 2.0:
             score -= 30
@@ -127,17 +175,22 @@ def qa_gate(
         elif max_drift > 50:
             score -= 10
 
-    # 5. Målspråkskontroll (Grov)
-    wrong_language = False
+    # 5. Målspråkskontroll (Semantisk)
+    confident_wrong_language = False
     if translated_subs:
         sample_text = " ".join([s.content for s in translated_subs[:80] if s.content.strip() and s.content.strip() != "<i></i>"])
         if len(sample_text) >= 20:
             lang_info = detect_language_heuristics(sample_text)
             detected = lang_info["lang"]
-            if detected != "unknown" and detected != target_lang_code[:2].lower() and lang_info["confidence"] > 0.8:
-                wrong_language = True
-                issues.append(f"Language mismatch: expected {target_lang_code}, detected {detected} ({lang_info['confidence']*100:.0f}% confidence)")
-                score -= 30
+            target_norm = target_lang_code[:2].lower()
+            if detected != "unknown" and detected != target_norm:
+                if lang_info["confidence"] > 0.8:
+                    confident_wrong_language = True
+                    issues.append(f"Language mismatch: expected {target_lang_code}, detected {detected} ({lang_info['confidence']*100:.0f}% confidence)")
+                    score -= 45
+                else:
+                    warnings.append(f"Low confidence language detection: expected {target_lang_code}, detected {detected} ({lang_info['confidence']*100:.0f}% confidence)")
+                    score -= 10
 
     # 6. Valid SRT structure
     structure_valid = True
@@ -155,26 +208,95 @@ def qa_gate(
 
     score = max(0, score)
 
-    sync_valid = max_drift == 0
-    passed = (
-        score >= 60
-        and dropped_count == 0
-        and len(real_untranslated_ids) == 0
-        and sync_valid
-        and not wrong_language
+    sync_valid = (max_drift == 0)
+    # Pure structural integrity check: completely decoupled from semantic scores & language detection
+    structural_passed = bool(
+        total_source > 0
+        and total_trans > 0
+        and line_count_match
         and structure_valid
-        and len(translated_subs) == len(source_subs)
+        and sync_valid
+        and dropped_count == 0
     )
+
+    if max_unresolved_count is not None:
+        limit_count = max_unresolved_count
+    else:
+        try:
+            limit_count = max(0, int(get_setting("qa_max_unresolved_cues", str(DEFAULT_QA_MAX_UNRESOLVED_COUNT))))
+        except Exception:
+            limit_count = DEFAULT_QA_MAX_UNRESOLVED_COUNT
+
+    if max_unresolved_ratio is not None:
+        limit_ratio = max_unresolved_ratio
+    else:
+        try:
+            limit_ratio = max(0.0, float(get_setting("qa_max_unresolved_ratio", str(DEFAULT_QA_MAX_UNRESOLVED_RATIO))))
+        except Exception:
+            limit_ratio = DEFAULT_QA_MAX_UNRESOLVED_RATIO
+
+    unresolved_count = len(real_untranslated_ids)
+    unresolved_ratio = (unresolved_count / total_source) if total_source > 0 else 0.0
+
+    preserved_untranslated_ids = []
+    failure_type = None  # None | "structural" | "semantic"
+
+    if not structural_passed:
+        qa_status = QA_STATUS_FAIL
+        passed = False
+        failure_type = "structural"
+    elif confident_wrong_language:
+        qa_status = QA_STATUS_FAIL
+        passed = False
+        failure_type = "semantic"
+    elif unresolved_count == 0:
+        if score >= 60:
+            qa_status = QA_STATUS_PASS
+            passed = True
+        else:
+            qa_status = QA_STATUS_FAIL
+            passed = False
+            failure_type = "semantic"
+            issues.append(f"Semantic quality score too low ({score}/100, min 60)")
+    elif allow_warnings and (unresolved_count <= limit_count) and (unresolved_ratio <= limit_ratio):
+        if score >= 60:
+            qa_status = QA_STATUS_PASS_WITH_WARNINGS
+            passed = True
+            preserved_untranslated_ids = list(real_untranslated_ids)
+            warnings.append(f"{unresolved_count} unresolved English {'line' if unresolved_count == 1 else 'lines'} ({unresolved_ratio*100:.1f}%) preserved as source text")
+        else:
+            qa_status = QA_STATUS_FAIL
+            passed = False
+            failure_type = "semantic"
+            issues.append(f"Semantic quality score too low ({score}/100, min 60)")
+    else:
+        qa_status = QA_STATUS_FAIL
+        passed = False
+        failure_type = "semantic"
+        issues.append(f"{unresolved_count} unresolved English {'line' if unresolved_count == 1 else 'lines'} ({unresolved_ratio*100:.1f}%) exceeds QA policy limit (max {limit_count} cues, {limit_ratio*100:.1f}%)")
 
     return {
         "passed": passed,
+        "status": qa_status,
         "score": score,
         "issues": issues,
+        "warnings": warnings,
         "untranslated_ids": untranslated_ids,  # Keep full list for recovery attempts
         "real_untranslated_ids": real_untranslated_ids,
+        "preserved_untranslated_ids": preserved_untranslated_ids,
         "dropped_count": dropped_count,
         "dropped_details": dropped_details,
         "sync_diff_ms": max_drift,
+        "policy_details": {
+            "limit_count": limit_count,
+            "limit_ratio": limit_ratio,
+            "unresolved_count": unresolved_count,
+            "unresolved_ratio": unresolved_ratio,
+            "structural_passed": structural_passed,
+            "semantic_passed": (qa_status in {QA_STATUS_PASS, QA_STATUS_PASS_WITH_WARNINGS}),
+            "failure_type": failure_type,
+            "confident_wrong_language": confident_wrong_language,
+        }
     }
 
 
@@ -1051,13 +1173,13 @@ class SubtitlePipeline:
                 recovered_cues = set()
                 previous_unresolved_set: Optional[Set[int]] = None
                 recovered_at_loop_start = 0
+                source_preserved_cues = set()
 
                 while qa_loop_count < max_qa_loops:
                     qa_loop_count += 1
 
                     if qa_loop_count > 1:
                         append_job_log(job_id, f"--- QA RECOVERY LOOP {qa_loop_count}/{max_qa_loops} ---")
-
 
                     # Strict Sync Lock: Match source timestamps exactly to guarantee 0ms drift
                     if strict_sync_lock and len(translated_subs) == len(subs):
@@ -1067,14 +1189,23 @@ class SubtitlePipeline:
 
                     # -------------------------------------------------------
                     # Bug #1, #5: FINAL QA GATE — never publish a broken file
+                    # Inside recovery loop: require clean pass without warnings to attempt recovery
                     # -------------------------------------------------------
-                    qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids)
+                    qa_result = qa_gate(
+                        subs, translated_subs,
+                        target_lang_code=lang_code,
+                        job_id=job_id,
+                        safe_ids=safe_ids,
+                        show_title=title or "",
+                        context_verified_ids=context_verified_ids,
+                        allow_warnings=False
+                    )
 
                     if qa_loop_count == 1:
                         initial_candidates_count = len(qa_result.get("untranslated_ids", []))
 
                     if qa_result["passed"]:
-                        break # Success! Exit the recovery loop.
+                        break  # Clean PASS! Exit the recovery loop.
 
                     current_unresolved_set = set(qa_result.get("real_untranslated_ids", []) + [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])])
 
@@ -1187,7 +1318,7 @@ class SubtitlePipeline:
                                                 recovered_cues.add(idx)
 
                             # Re-run QA after primary recovery with safe_ids context
-                            qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids)
+                            qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids, allow_warnings=False)
                             if qa_result["passed"]:
                                 break
 
@@ -1197,9 +1328,7 @@ class SubtitlePipeline:
                             all_unresolved = list(set(real_unresolved + dropped_unresolved))
                             all_unresolved.sort()
 
-
                             if all_unresolved:
-                                # Add to known untranslated so they don't get classified again
                                 for uid in all_unresolved:
                                     known_untranslated_ids.add(uid)
 
@@ -1218,11 +1347,13 @@ class SubtitlePipeline:
                                             recovered_cues.add(idx)
                                             targeted_success += 1
                                     append_job_log(job_id, f"Targeted Recovery: translated {targeted_success}/{len(all_unresolved)}")
+                                    if targeted_success > 0:
+                                        recovered_at_loop_start = -1  # Mark progress
                                 except Exception as e:
                                     append_job_log(job_id, f"Targeted Recovery failed: {e}")
 
                                 # Re-run QA again to get the remaining stubborn cues
-                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids)
+                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids, allow_warnings=False)
                                 real_unresolved = qa_result.get("real_untranslated_ids", [])
                                 dropped_unresolved = [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])]
                                 all_unresolved = list(set(real_unresolved + dropped_unresolved))
@@ -1280,7 +1411,7 @@ class SubtitlePipeline:
                                     append_job_log(job_id, f"Timing: Escalation phase ({len(esc_tasks)} cues) completed in {round(t_esc_end - t_esc_start, 1)}s")
 
                                 # Final QA rerun after escalation
-                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids)
+                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids, allow_warnings=False)
                                 if qa_result["passed"]:
                                     break
 
@@ -1413,7 +1544,7 @@ class SubtitlePipeline:
                                         append_job_log(job_id, f"Fast Final Rescue completed: {len(final_unresolved_rescue)} cues remain unresolved")
 
                                 # Final QA rerun after Fast Final Rescue
-                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids)
+                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids, allow_warnings=False)
                                 if qa_result["passed"]:
                                     break
                                 else:
@@ -1437,16 +1568,60 @@ class SubtitlePipeline:
                                         except Exception as e:
                                             append_job_log(job_id, f"Failed to clean partial state: {e}")
 
-                                    # To prevent getting completely stuck in a loop, throw an error if this was the last loop
+                                    # Early Stagnation / Deadlock check at end of loop:
+                                    # If all unresolved cues were attempted across all recovery stages without progress, stop redundant calls now!
+                                    current_unresolved_after_rescue = set(qa_result.get("real_untranslated_ids", []) + [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])])
+                                    if current_unresolved_after_rescue and len(recovered_cues) == recovered_at_loop_start:
+                                        append_job_log(job_id, f"QA Recovery: Stagnation detected ({len(current_unresolved_after_rescue)} unresolved cues unchanged with 0 progress). Breaking QA recovery loop.")
+                                        is_semantic_deadlock = True
+                                        break
+
+                                    # To prevent getting completely stuck in a loop, mark deadlock if this was the last loop
                                     if qa_loop_count == max_qa_loops:
                                         append_job_log(job_id, f"QA loop exhausted ({max_qa_loops} attempts). Stopping recovery loop for {lang_name}.")
                                         is_semantic_deadlock = True
 
                         except Exception as e:
                             append_job_log(job_id, f"QA Recovery/Escalation failed: {e}")
+
+                # ---------------------------------------------------------------------------
+                # POST-RECOVERY EVALUATION & QA FALLBACK
+                # If bounded recovery is exhausted and some unresolved English cues remain:
+                # Check if they meet semantic deadlock criteria and apply source preservation fallback.
+                # ---------------------------------------------------------------------------
+                real_unresolved_remaining = qa_result.get("real_untranslated_ids", [])
+                if real_unresolved_remaining:
+                    is_semantic_deadlock = True
+                    for cue_idx in real_unresolved_remaining:
+                        cue_id = subs[cue_idx].index if hasattr(subs[cue_idx], 'index') and subs[cue_idx].index else cue_idx + 1
+                        append_job_log(job_id, f"Semantic deadlock detected for cue {cue_id}")
+                        append_job_log(job_id, "QA fallback: preserving original source text")
+                        translated_subs[cue_idx].content = subs[cue_idx].content
+                        source_preserved_cues.add(cue_idx)
+
+                # Strict Sync Lock: guarantee 0ms drift
+                if strict_sync_lock and len(translated_subs) == len(subs):
+                    for idx in range(len(subs)):
+                        translated_subs[idx].start = subs[idx].start
+                        translated_subs[idx].end = subs[idx].end
+
+                # Final QA Evaluation against central QA policy (allow_warnings=True)
+                qa_result = qa_gate(
+                    subs,
+                    translated_subs,
+                    target_lang_code=lang_code,
+                    job_id=job_id,
+                    safe_ids=safe_ids,
+                    show_title=title or "",
+                    context_verified_ids=context_verified_ids,
+                    allow_warnings=True
+                )
+
                 # Final QA Log
                 score = qa_result["score"]
-                if qa_result["passed"]:
+                if qa_result.get("status") == QA_STATUS_PASS_WITH_WARNINGS:
+                    append_job_log(job_id, f"QA Gate PASSED_WITH_WARNINGS (Score: {score}/100)")
+                elif qa_result["passed"]:
                     append_job_log(job_id, f"QA Gate PASSED (Score: {score}/100)")
                 else:
                     issues_str = "; ".join(qa_result.get("issues", []))
@@ -1490,16 +1665,20 @@ class SubtitlePipeline:
 
                     if pub_res.get("published"):
                         # Save Translation Memory only after QA PASS and if we actually published
+                        # Exclude fallback source-preserved cues
                         if title:
                             try:
                                 from app.core.db import save_translation_memory_bulk
                                 tm_items = []
                                 for idx in range(len(subs)):
+                                    if idx in source_preserved_cues:
+                                        continue
                                     orig_t = subs[idx].content.strip()
                                     trans_t = translated_subs[idx].content.strip()
-                                    if orig_t and trans_t and orig_t != "<i></i>" and trans_t != "<i></i>":
+                                    if orig_t and trans_t and orig_t != "<i></i>" and trans_t != "<i></i>" and orig_t != trans_t:
                                         tm_items.append({"original": orig_t, "translated": trans_t})
-                                save_translation_memory_bulk(title, tm_items)
+                                if tm_items:
+                                    save_translation_memory_bulk(title, tm_items)
                             except Exception as e:
                                 logger.error(f"Failed to save translation memory: {e}")
 
@@ -1508,8 +1687,12 @@ class SubtitlePipeline:
                 identical_candidates = initial_candidates_count if 'initial_candidates_count' in locals() else 0
                 kept_count = len(safe_ids) if 'safe_ids' in locals() else 0
                 recovered_count = len(recovered_cues) if 'recovered_cues' in locals() else 0
+                source_preserved_count = len(source_preserved_cues)
 
-                summary_status = "PASS" if qa_result["passed"] else "FAIL"
+                summary_status = qa_result.get("status", "PASS" if qa_result["passed"] else "FAIL")
+                unresolved_label = f"{unresolved_count} unresolved English {'line' if unresolved_count == 1 else 'lines'}"
+                fallback_label = f"{source_preserved_count} source-preserved {'fallback' if source_preserved_count == 1 else 'fallbacks'}"
+
                 summary_lines = [
                     "--- QA Summary ---",
                     f"{dropped_count} dropped lines",
@@ -1517,7 +1700,8 @@ class SubtitlePipeline:
                     f"{identical_candidates} identical candidates",
                     f"{kept_count} classified as KEEP (safe)",
                     f"{recovered_count} translated on recovery",
-                    f"{unresolved_count} unresolved English lines",
+                    unresolved_label,
+                    fallback_label,
                     f"Result: {summary_status} (Score: {qa_result['score']}/100)",
                     "------------------"
                 ]
@@ -1542,7 +1726,7 @@ class SubtitlePipeline:
                     final_status = "SKIPPED"
             elif successful_langs:
                 final_status = "PARTIAL"
-            elif is_semantic_deadlock or not qa_result["passed"]:
+            elif not qa_result["passed"]:
                 final_status = "FAILED"
             else:
                 final_status = "RECOVERING"
