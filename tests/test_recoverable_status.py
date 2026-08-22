@@ -4,26 +4,29 @@ import asyncio
 from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone, timedelta
 import srt
+import json
 
-from app.core.db import init_db, create_job, get_job_by_id, update_job, clear_all_jobs
+from app.core import db
+from app.core.db import init_db, create_job, get_job_by_id, update_job, clear_all_jobs, set_setting
 from app.services.pipeline import pipeline
 from app.main import retry_waiting_jobs
 
 @pytest.fixture(autouse=True)
 def setup_teardown_db(tmp_path):
-    import app.core.db
-    original_db = app.core.db.DB_PATH
-    app.core.db.DB_PATH = "/tmp/test_babel_recovery_loop.db"
-    app.core.db.init_db()
-    app.core.db.clear_all_jobs()
+    original_db = db.DB_PATH
+    test_db = str(tmp_path / "test_babel_recovery_loop.db")
+    db.DB_PATH = test_db
+    db.init_db()
+    db.set_setting("target_language", "sv")
+    db.set_setting("languages", json.dumps([{"code": "sv", "name": "Swedish", "enabled": True}]))
 
     video = tmp_path / "test.mkv"
     video.touch()
 
     yield str(video)
 
-    app.core.db.clear_all_jobs()
-    app.core.db.DB_PATH = original_db
+    db.clear_all_jobs()
+    db.DB_PATH = original_db
 
 def make_srt_mock(texts):
     subs = []
@@ -34,12 +37,6 @@ def make_srt_mock(texts):
 @pytest.mark.asyncio
 async def test_never_give_up_recovers_in_loop(setup_teardown_db):
     """A) Primary translation 3 lines, line 2 empty. Recovery round 1 repairs -> QA PASS -> TRANSLATED."""
-    import sqlite3
-    with sqlite3.connect("/tmp/test_babel_recovery_loop.db") as conn:
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('target_language', 'sv')")
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('languages', '[{\"code\": \"sv\", \"name\": \"Swedish\", \"enabled\": true}]')")
-        conn.commit()
-
     video_path = setup_teardown_db
     job_id = create_job(video_path, "MANUAL")
 
@@ -84,12 +81,6 @@ async def test_never_give_up_recovers_in_loop(setup_teardown_db):
 @pytest.mark.asyncio
 async def test_never_give_up_fails_all_loops(setup_teardown_db):
     """C) All 3 internal QA loops fail -> status RECOVERING. Background worker picks it up."""
-    import sqlite3
-    with sqlite3.connect("/tmp/test_babel_recovery_loop.db") as conn:
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('target_language', 'sv')")
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('languages', '[{\"code\": \"sv\", \"name\": \"Swedish\", \"enabled\": true}]')")
-        conn.commit()
-
     video_path = setup_teardown_db
     job_id = create_job(video_path, "MANUAL")
     en_srt_content = "1\n00:00:00,000 --> 00:00:01,000\nLine 1\n\n2\n00:00:01,000 --> 00:00:02,000\nLine 2\n\n3\n00:00:02,000 --> 00:00:03,000\nLine 3\n\n4\n00:00:03,000 --> 00:00:04,000\nLine 4\n"
@@ -97,8 +88,11 @@ async def test_never_give_up_fails_all_loops(setup_teardown_db):
     async def mock_translate(*args, **kwargs):
         return make_srt_mock(["", "", ""])
 
-    with patch("app.services.pipeline.find_external_subtitle", return_value=video_path), \
-         patch("builtins.open", MagicMock(side_effect=lambda *a, **k: MagicMock(__enter__=lambda *x: MagicMock(read=lambda: en_srt_content), __exit__=lambda *x: None))), \
+    en_srt_path = str(video_path).replace(".mkv", ".en.srt")
+    with open(en_srt_path, "w", encoding="utf-8") as f:
+        f.write(en_srt_content)
+
+    with patch("app.services.pipeline.find_external_subtitle", return_value=en_srt_path), \
          patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate), \
          patch("app.services.translator.SubtitleTranslator.classify_and_recover_identical", return_value=[]), \
          patch("app.services.translator.SubtitleTranslator.escalate_single_line", return_value=""):
@@ -125,12 +119,6 @@ async def test_never_give_up_fails_all_loops(setup_teardown_db):
 @pytest.mark.asyncio
 async def test_recovering_is_not_dead_state(setup_teardown_db):
     """Test RECOVERING -> worker picks same job_id -> processing resumes -> QA PASS -> TRANSLATED"""
-    import sqlite3
-    with sqlite3.connect("/tmp/test_babel_recovery_loop.db") as conn:
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('target_language', 'sv')")
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('languages', '[{\"code\": \"sv\", \"name\": \"Swedish\", \"enabled\": true}]')")
-        conn.commit()
-
     video_path = setup_teardown_db
     job_id = create_job(video_path, "MANUAL")
     past_time = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
@@ -140,15 +128,15 @@ async def test_recovering_is_not_dead_state(setup_teardown_db):
     async def mock_translate_good(*args, **kwargs):
         return make_srt_mock(["Detta är svensk 1", "Detta är svensk 2", "Detta är svensk 3", "Detta är svensk 4"])
 
-    with patch("app.services.pipeline.find_external_subtitle", return_value=video_path), \
-         patch("builtins.open", MagicMock(side_effect=lambda *a, **k: MagicMock(__enter__=lambda *x: MagicMock(read=lambda: en_srt_content), __exit__=lambda *x: None))), \
-         patch("os.chmod"), patch("os.replace"), \
+    en_srt_path = str(video_path).replace(".mkv", ".en.srt")
+    with open(en_srt_path, "w", encoding="utf-8") as f:
+        f.write(en_srt_content)
+
+    with patch("app.services.pipeline.find_external_subtitle", return_value=en_srt_path), \
          patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate_good), \
          patch("app.services.translator.SubtitleTranslator.classify_and_recover_identical", return_value=[]), \
          patch("app.services.translator.SubtitleTranslator.escalate_single_line", return_value=""):
 
-        # Instead of running the background loop as a task and guessing sleep time,
-        # we can just use the extracted process_one_retry_pass
         from app.main import process_one_retry_pass
         tasks = [t async for t in process_one_retry_pass()]
         await asyncio.gather(*tasks)
@@ -159,12 +147,6 @@ async def test_recovering_is_not_dead_state(setup_teardown_db):
 @pytest.mark.asyncio
 async def test_generic_exception_classification(setup_teardown_db):
     """Ensure generic exceptions are classified correctly."""
-    import sqlite3
-    with sqlite3.connect("/tmp/test_babel_recovery_loop.db") as conn:
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('target_language', 'sv')")
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('languages', '[{\"code\": \"sv\", \"name\": \"Swedish\", \"enabled\": true}]')")
-        conn.commit()
-
     video_path = setup_teardown_db
     job_id = create_job(video_path, "MANUAL")
     en_srt_content = "1\n00:00:00,000 --> 00:00:01,000\nLine 1\n\n2\n00:00:01,000 --> 00:00:02,000\nLine 2\n\n3\n00:00:02,000 --> 00:00:03,000\nLine 3\n\n4\n00:00:03,000 --> 00:00:04,000\nLine 4\n"
@@ -172,8 +154,11 @@ async def test_generic_exception_classification(setup_teardown_db):
     async def mock_translate_timeout(*args, **kwargs):
         raise Exception("Request timeout after 30s")
 
-    with patch("app.services.pipeline.find_external_subtitle", return_value=video_path), \
-         patch("builtins.open", MagicMock(side_effect=lambda *a, **k: MagicMock(__enter__=lambda *x: MagicMock(read=lambda: en_srt_content), __exit__=lambda *x: None))), \
+    en_srt_path = str(video_path).replace(".mkv", ".en.srt")
+    with open(en_srt_path, "w", encoding="utf-8") as f:
+        f.write(en_srt_content)
+
+    with patch("app.services.pipeline.find_external_subtitle", return_value=en_srt_path), \
          patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate_timeout):
         await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
 
@@ -183,8 +168,7 @@ async def test_generic_exception_classification(setup_teardown_db):
     async def mock_translate_terminal(*args, **kwargs):
         raise Exception("Permission denied: /path/to/file")
 
-    with patch("app.services.pipeline.find_external_subtitle", return_value=video_path), \
-         patch("builtins.open", MagicMock(side_effect=lambda *a, **k: MagicMock(__enter__=lambda *x: MagicMock(read=lambda: en_srt_content), __exit__=lambda *x: None))), \
+    with patch("app.services.pipeline.find_external_subtitle", return_value=en_srt_path), \
          patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate_terminal):
         await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
 
@@ -194,24 +178,16 @@ async def test_generic_exception_classification(setup_teardown_db):
     async def mock_translate_generic(*args, **kwargs):
         raise Exception("Something weird happened in JSON parsing")
 
-    with patch("app.services.pipeline.find_external_subtitle", return_value=video_path), \
-         patch("builtins.open", MagicMock(side_effect=lambda *a, **k: MagicMock(__enter__=lambda *x: MagicMock(read=lambda: en_srt_content), __exit__=lambda *x: None))), \
+    with patch("app.services.pipeline.find_external_subtitle", return_value=en_srt_path), \
          patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate_generic):
         await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
 
     job = get_job_by_id(job_id)
     assert job["status"] == "RETRY_PENDING"
 
-
 @pytest.mark.asyncio
 async def test_persistent_retry_count_and_backoff(setup_teardown_db):
     """Ensure retry_count and backoff increment across exhausted attempts and survive restart."""
-    import sqlite3
-    with sqlite3.connect("/tmp/test_babel_recovery_loop.db") as conn:
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('target_language', 'sv')")
-        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('languages', '[{\"code\": \"sv\", \"name\": \"Swedish\", \"enabled\": true}]')")
-        conn.commit()
-
     video_path = setup_teardown_db
     job_id = create_job(video_path, "MANUAL")
     en_srt_content = "1\n00:00:00,000 --> 00:00:01,000\nLine 1\n\n2\n00:00:01,000 --> 00:00:02,000\nLine 2\n\n3\n00:00:02,000 --> 00:00:03,000\nLine 3\n\n4\n00:00:03,000 --> 00:00:04,000\nLine 4\n"
@@ -219,11 +195,12 @@ async def test_persistent_retry_count_and_backoff(setup_teardown_db):
     async def mock_translate_fail(*args, **kwargs):
         return make_srt_mock(["", "", ""])
 
-    from app.core.db import init_db
+    en_srt_path = str(video_path).replace(".mkv", ".en.srt")
+    with open(en_srt_path, "w", encoding="utf-8") as f:
+        f.write(en_srt_content)
 
     # Attempt 0 -> exhaustion -> retry 1, ~1 min
-    with patch("app.services.pipeline.find_external_subtitle", return_value=video_path), \
-         patch("builtins.open", MagicMock(side_effect=lambda *a, **k: MagicMock(__enter__=lambda *x: MagicMock(read=lambda: en_srt_content), __exit__=lambda *x: None))), \
+    with patch("app.services.pipeline.find_external_subtitle", return_value=en_srt_path), \
          patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate_fail), \
          patch("app.services.translator.SubtitleTranslator.classify_and_recover_identical", return_value=[]), \
          patch("app.services.translator.SubtitleTranslator.escalate_single_line", return_value=""):
@@ -242,8 +219,7 @@ async def test_persistent_retry_count_and_backoff(setup_teardown_db):
     init_db()
 
     # Attempt 1 -> exhaustion -> retry 2, ~5 min
-    with patch("app.services.pipeline.find_external_subtitle", return_value=video_path), \
-         patch("builtins.open", MagicMock(side_effect=lambda *a, **k: MagicMock(__enter__=lambda *x: MagicMock(read=lambda: en_srt_content), __exit__=lambda *x: None))), \
+    with patch("app.services.pipeline.find_external_subtitle", return_value=en_srt_path), \
          patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate_fail), \
          patch("app.services.translator.SubtitleTranslator.classify_and_recover_identical", return_value=[]), \
          patch("app.services.translator.SubtitleTranslator.escalate_single_line", return_value=""):
@@ -262,8 +238,7 @@ async def test_persistent_retry_count_and_backoff(setup_teardown_db):
     init_db()
 
     # Attempt 2 -> exhaustion -> retry 3, ~15 min
-    with patch("app.services.pipeline.find_external_subtitle", return_value=video_path), \
-         patch("builtins.open", MagicMock(side_effect=lambda *a, **k: MagicMock(__enter__=lambda *x: MagicMock(read=lambda: en_srt_content), __exit__=lambda *x: None))), \
+    with patch("app.services.pipeline.find_external_subtitle", return_value=en_srt_path), \
          patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate_fail), \
          patch("app.services.translator.SubtitleTranslator.classify_and_recover_identical", return_value=[]), \
          patch("app.services.translator.SubtitleTranslator.escalate_single_line", return_value=""):

@@ -11,7 +11,9 @@ async def test_resume_translation(tmp_path, monkeypatch):
     db_path = tmp_path / "test.db"
     # Create the db directory
     os.makedirs(db_path.parent, exist_ok=True)
-    monkeypatch.setattr("app.services.translator.DB_PATH", str(db_path))
+    monkeypatch.setattr("app.core.db.DB_PATH", str(db_path))
+    from app.core.db import init_db
+    init_db()
     
     # Mock update_job to track progress
     job_id = 999

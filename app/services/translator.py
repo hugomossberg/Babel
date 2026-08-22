@@ -1,12 +1,19 @@
 import asyncio
 import json
-import asyncio
 import logging
 import functools
+import unicodedata
+import re
+from typing import List, Optional, Dict, Any
 
 logger = logging.getLogger("babel.translator")
 
 class ProviderUnavailableError(Exception):
+    """Transient error: rate limit, network timeout, 5xx server error."""
+    pass
+
+class ProviderConfigurationError(Exception):
+    """Permanent error: 401 Unauthorized, 403 Forbidden, invalid API key, invalid model name."""
     pass
 
 def is_usable_translation(text) -> bool:
@@ -29,7 +36,18 @@ def with_retry(func):
                 return await func(*args, **kwargs)
             except Exception as e:
                 err_str = str(e).lower()
-                recoverable = any(x in err_str for x in ["429", "500", "502", "503", "504", "timeout", "connection", "rate limit", "quota"])
+                # Check for permanent configuration errors
+                permanent = any(x in err_str for x in [
+                    "401", "403", "unauthorized", "forbidden", "api key not valid",
+                    "invalid api key", "not found", "model_not_found", "permission_denied"
+                ])
+                if permanent:
+                    raise ProviderConfigurationError(f"Permanent provider configuration error in {func.__name__}: {str(e)}")
+
+                recoverable = any(x in err_str for x in [
+                    "429", "500", "502", "503", "504", "timeout", "connection",
+                    "rate limit", "quota", "resource_exhausted", "service unavailable", "overloaded"
+                ])
                 if not recoverable or attempt == retries:
                     if recoverable:
                         raise ProviderUnavailableError(f"Provider unavailable after {retries} retries: {str(e)}")
@@ -40,18 +58,13 @@ def with_retry(func):
                 await asyncio.sleep(wait_time)
     return wrapper
 
-import logging
-import re
-from typing import List, Optional
 from google import genai
 from google.genai import types
 import openai
 import httpx
 import srt
 
-from app.core.db import DB_PATH, get_setting, update_job, append_job_log, save_translation_memory, get_translation_memory
-
-logger = logging.getLogger("babel.translator")
+from app.core.db import DB_PATH, get_setting, update_job, append_job_log, save_translation_memory, get_translation_memory, get_positive_int_setting
 
 def get_system_instruction(target_language: str, glossary: str = "", show_title: str = "") -> str:
     glossary_section = ""
@@ -71,7 +84,7 @@ STRICT RULES:
 3. If a block is empty or contains only '<i></i>', keep it exactly as '<i></i>'.
 4. If a line starts with a speaker name or label in capital letters (e.g. ALICE:, OFFICER:), keep character names intact and only translate descriptive titles if appropriate, maintaining the colon separator.
 5. You MUST return a JSON object with a key "translations" containing the array of objects with integer "id" and string "text".
-6. Keep translations concise. Split lines naturally using "\n" if a line exceeds 42 characters, but NEVER exceed 2 lines per subtitle block. Combine or condense text if necessary.
+6. Keep translations concise. Split lines naturally using "\\n" if a line exceeds 42 characters, but NEVER exceed 2 lines per subtitle block. Combine or condense text if necessary.
 Example:
 {{"translations": [{{"id": 1, "text": "Translated text"}}, {{"id": 2, "text": "Translated text"}}]}}
 """
@@ -89,9 +102,9 @@ def extract_json_safely(raw_text: str) -> List[dict]:
     except Exception:
         pass
 
-    # Repair common JSON issues before regex fallback
+    # Repair common JSON issues without stripping \t, \n, \r
     try:
-        repaired_text = re.sub(r'[\x00-\x1F]+', '', raw_text)
+        repaired_text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]+', '', raw_text)
         repaired_text = re.sub(r',\s*([\]}])', r'\1', repaired_text)
         data = json.loads(repaired_text)
         if isinstance(data, dict) and "translations" in data:
@@ -125,7 +138,6 @@ def extract_json_safely(raw_text: str) -> List[dict]:
 
     raise ValueError(f"Could not extract JSON translation array from response: {raw_text[:100]}...")
 
-
 def get_provider_capabilities(provider: str) -> dict:
     if provider == "deepl":
         return {
@@ -139,9 +151,192 @@ def get_provider_capabilities(provider: str) -> dict:
         "supports_context": True
     }
 
+ENGLISH_COMMON_WORDS = {
+    # Pronouns & determiners
+    "i", "me", "my", "myself", "you", "your", "yours", "yourself", "yourselves",
+    "he", "him", "his", "himself", "she", "her", "hers", "herself",
+    "it", "its", "itself", "they", "them", "their", "theirs", "themselves",
+    "we", "us", "our", "ours", "ourselves", "this", "that", "these", "those",
+    "what", "which", "who", "whom", "whose", "where", "when", "why", "how",
+    "all", "any", "both", "each", "few", "more", "most", "other", "some", "such",
+    "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very",
+    "a", "an", "the",
+    # Prepositions & conjunctions
+    "and", "but", "if", "or", "because", "as", "until", "while", "of", "at",
+    "by", "for", "with", "about", "against", "between", "into", "through",
+    "during", "before", "after", "above", "below", "to", "from", "up", "down",
+    "in", "out", "on", "off", "over", "under", "again", "further", "then", "once",
+    # Common verbs & contractions
+    "is", "am", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "having", "do", "does", "did", "doing",
+    "would", "should", "could", "ought", "i'm", "you're", "he's", "she's",
+    "it's", "we're", "they're", "i've", "you've", "we've", "they've",
+    "i'd", "you'd", "he'd", "she'd", "we'd", "they'd", "i'll", "you'll",
+    "he'll", "she'll", "we'll", "they'll", "isn't", "aren't", "wasn't",
+    "weren't", "hasn't", "haven't", "hadn't", "doesn't", "don't", "didn't",
+    "won't", "wouldn't", "shan't", "shouldn't", "can't", "cannot", "couldn't",
+    "mustn't", "let's", "that's", "who's", "what's", "here's", "there's",
+    "when's", "where's", "why's", "how's",
+    # Common conversational words & verbs
+    "hello", "hi", "hey", "goodbye", "bye", "please", "thanks", "thank",
+    "welcome", "yes", "yeah", "yep", "sure", "ok", "okay", "alright",
+    "nope", "maybe", "sorry", "excuse", "pardon",
+    "come", "came", "go", "goes", "went", "gone", "going",
+    "get", "gets", "got", "gotten", "getting",
+    "make", "makes", "made", "making",
+    "know", "knows", "knew", "known", "knowing",
+    "think", "thinks", "thought", "thinking",
+    "take", "takes", "took", "taken", "taking",
+    "see", "sees", "saw", "seen", "seeing",
+    "look", "looks", "looked", "looking",
+    "give", "gives", "gave", "given", "giving",
+    "tell", "tells", "told", "telling",
+    "ask", "asks", "asked", "asking",
+    "work", "works", "worked", "working",
+    "seem", "seems", "seemed", "seeming",
+    "feel", "feels", "felt", "feeling",
+    "try", "tries", "tried", "trying",
+    "leave", "leaves", "left", "leaving",
+    "call", "calls", "called", "calling",
+    "need", "needs", "needed", "needing",
+    "want", "wants", "wanted", "wanting",
+    "help", "helps", "helped", "helping",
+    "talk", "talks", "talked", "talking",
+    "turn", "turns", "turned", "turning",
+    "start", "starts", "started", "starting",
+    "show", "shows", "showed", "shown", "showing",
+    "hear", "hears", "heard", "hearing",
+    "play", "plays", "played", "playing",
+    "run", "runs", "ran", "running",
+    "move", "moves", "moved", "moving",
+    "like", "likes", "liked", "liking",
+    "live", "lives", "lived", "living",
+    "believe", "believes", "believed", "believing",
+    "hold", "holds", "held", "holding",
+    "bring", "brings", "brought", "bringing",
+    "happen", "happens", "happened", "happening",
+    "write", "writes", "wrote", "written", "writing",
+    "sit", "sits", "sat", "sitting",
+    "stand", "stands", "stood", "standing",
+    "lose", "loses", "lost", "losing",
+    "pay", "pays", "paid", "paying",
+    "meet", "meets", "met", "meeting",
+    "stop", "stops", "stopped", "stopping",
+    "speak", "speaks", "spoke", "spoken", "speaking",
+    "read", "reads", "reading",
+    "allow", "allows", "allowed", "allowing",
+    "open", "opens", "opened", "opening",
+    "walk", "walks", "walked", "walking",
+    "win", "wins", "won", "winning",
+    "remember", "remembers", "remembered", "remembering",
+    "love", "loves", "loved", "loving",
+    "wait", "waits", "waited", "waiting",
+    "die", "dies", "died", "dying",
+    "send", "sends", "sent", "sending",
+    "stay", "stays", "stayed", "staying",
+    "fall", "falls", "fell", "fallen", "falling",
+    "kill", "kills", "killed", "killing",
+    "man", "men", "woman", "women", "boy", "boys", "girl", "girls",
+    "guy", "guys", "kid", "kids", "child", "children", "baby", "babies",
+    "friend", "friends", "family",
+    "day", "days", "night", "nights", "time", "times",
+    "thing", "things", "way", "ways", "life", "world", "house", "home",
+    "room", "door", "car", "head", "hand", "hands", "eye", "eyes",
+    "right", "wrong", "good", "bad", "great", "fine",
+    "now", "today", "tonight", "tomorrow", "yesterday",
+    "sir", "ma'am", "mr", "mrs", "ms", "miss", "dr", "officer",
+    "god", "lord", "jesus", "christ", "damn", "hell", "shit", "fuck",
+}
+
+def _looks_like_strict_proper_noun(text: str) -> bool:
+    """Strict deterministic check for multi-token proper nouns (2-3 words)."""
+    words = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ'’-]+", text)
+    if not 2 <= len(words) <= 3:
+        return False
+    minor_words = {"of", "the", "de", "la", "von", "van", "los", "las", "el", "del", "di", "da"}
+    for word in words:
+        lower = word.casefold()
+        if lower in minor_words:
+            continue
+        if lower in ENGLISH_COMMON_WORDS:
+            return False
+        if not word[0].isupper():
+            return False
+    return True
+
+def is_deterministically_safe_keep(text: str, reason: str) -> bool:
+    """
+    Fail-closed deterministic check to verify if a line is truly safe to KEEP unchanged.
+    Returns True ONLY if deterministically defensible. Otherwise False.
+    """
+    if not text:
+        return False
+
+    clean_text = text.strip()
+    # Strip HTML/ASS formatting
+    clean_text = re.sub(r'<[^>]+>', '', clean_text)
+    clean_text = re.sub(r'\{[^}]+\}', '', clean_text).strip()
+    if not clean_text or clean_text == "<i></i>":
+        return True
+
+    reason = (reason or "").strip().lower()
+    allowed_reasons = {"proper_noun", "brand", "acronym", "number", "symbol", "non_verbal"}
+    if reason not in allowed_reasons:
+        return False
+
+    has_letters = any(c.isalpha() for c in clean_text)
+    has_digits = any(c.isdigit() for c in clean_text)
+    words = [w for w in re.split(r"[^\w']+", clean_text) if w and any(c.isalnum() for c in w)]
+
+    if reason == "symbol":
+        return not has_letters and not has_digits
+
+    elif reason == "number":
+        if not has_digits:
+            return False
+        for w in words:
+            w_clean = re.sub(r"[^\w]", "", w).lower()
+            if w_clean in ENGLISH_COMMON_WORDS:
+                return False
+        return True
+
+    elif reason == "non_verbal":
+        return not has_letters
+
+    elif reason == "acronym":
+        if not words or not has_letters:
+            return False
+        for w in words:
+            w_clean = re.sub(r"[^\w]", "", w)
+            if not w_clean:
+                continue
+            if not w_clean.isupper():
+                return False
+            if len(w_clean) > 8:
+                return False
+            if w_clean.lower() in ENGLISH_COMMON_WORDS:
+                return False
+        return True
+
+    elif reason == "proper_noun":
+        return _looks_like_strict_proper_noun(clean_text)
+
+    elif reason == "brand":
+        return False
+
+    return False
+
+def normalize_for_compare(text: str) -> str:
+    """Helper to normalize text for comparison by ignoring punctuation/symbols/tags/casing."""
+    if not text:
+        return ""
+    t = re.sub(r'<[^>]+>', '', text)
+    t = re.sub(r'\{[^}]+\}', '', t)
+    t = unicodedata.normalize('NFKC', t)
+    t = re.sub(r'[^\w]', '', t)
+    return t.casefold()
+
 def validate_classifier_output(raw_text: str, items: list) -> list:
-    import logging
-    logger = logging.getLogger(__name__)
     logger.info(f"Classifier validation: received {len(items)} candidates. Raw type: {type(raw_text)}")
 
     valid_results = []
@@ -169,7 +364,6 @@ def validate_classifier_output(raw_text: str, items: list) -> list:
         logger.info(f"Classifier validation: parsed {len(results)} results from JSON")
 
         expected_ids = {item["id"]: item["text"] for item in items}
-        allowed_reasons = {"proper_noun", "brand", "acronym", "number", "symbol", "non_verbal"}
 
         kept = 0
         translated = 0
@@ -189,85 +383,41 @@ def validate_classifier_output(raw_text: str, items: list) -> list:
                 continue
 
             original_text = expected_ids[rid]
+            reason = str(r.get("reason", "")).lower()
 
             if act == "keep":
-                reason = str(r.get("reason", "")).lower()
-
-                # Sanity checks
-                is_valid_keep = True
-                if reason not in allowed_reasons:
-                    logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (invalid reason: {reason})")
-                    is_valid_keep = False
-                elif reason == "number":
-                    if not any(c.isdigit() for c in original_text):
-                        logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason=number but no digits)")
-                        is_valid_keep = False
-                elif reason in ["proper_noun", "brand"]:
-                    # Deterministic plausibility validation (fail-closed)
-                    import re
-                    words = [w for w in re.split(r"[^a-zA-Z0-9]+", original_text) if w]
-
-                    if len(words) > 4:
-                        logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason={reason} but text is {len(words)} words)")
-                        is_valid_keep = False
-                    else:
-                        minor_words = {"and", "of", "the", "in", "de", "la", "von", "van", "a", "an"}
-                        for w in words:
-                            if w.lower() in minor_words:
-                                continue
-                            # If a word is not purely digits and has no uppercase letters, it's not a valid proper noun
-                            if not any(c.isupper() for c in w) and not w.isdigit():
-                                logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason={reason} but word '{w}' is not capitalized)")
-                                is_valid_keep = False
-                                break
-                elif reason == "non_verbal":
-                    import re
-                    has_bracket = bool(re.search(r"^[\[\(].*?[\]\)]$", original_text.strip()))
-                    has_music = bool(re.search(r"[♪♬]", original_text))
-                    words = [w for w in re.split(r"[^a-zA-Z0-9]+", original_text) if w and any(c.isalpha() for c in w)]
-                    is_purely_symbolic = len(words) == 0
-
-                    if not (has_bracket or has_music or is_purely_symbolic):
-                        logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason={reason} but lacks determinable format like brackets)")
-                        is_valid_keep = False
-                elif reason == "acronym":
-                    import re
-                    words = [w for w in re.split(r"[^a-zA-Z0-9]+", original_text) if w and any(c.isalpha() for c in w)]
-                    if not words:
-                        pass
-                    elif any(not any(c.isupper() for c in w) for w in words):
-                        logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (reason={reason} but words are not uppercase)")
-                        is_valid_keep = False
-
-                if not is_valid_keep:
+                if not is_deterministically_safe_keep(original_text, reason):
+                    logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (not deterministically safe: reason={reason}, text='{original_text}')")
                     act = "translate"
+                    r["text"] = ""
 
-            if act == "keep": kept += 1
+            if act == "keep":
+                kept += 1
+                valid_results.append({"id": rid, "action": "keep", "reason": reason, "text": original_text})
+                returned_ids.add(rid)
             elif act == "translate":
                 translated += 1
-                # Enforce that translate text is actually provided and doesn't just echo source
-                # We do this by checking if the text matches original. If so, we clear it so fallback logic triggers.
                 provided_text = str(r.get("text", "")).strip()
-                if provided_text and provided_text == original_text.strip():
-                    logger.info(f"Classifier validation: ID {rid} TRANSLATE echoes source, clearing text to force recovery")
-                    r["text"] = ""
+                # If provided translation is empty, unusable, or echoes source, clear text to force recovery
+                if not is_usable_translation(provided_text) or normalize_for_compare(provided_text) == normalize_for_compare(original_text):
+                    logger.info(f"Classifier validation: ID {rid} TRANSLATE has empty/echo text, clearing to force recovery")
+                    provided_text = ""
+                valid_results.append({"id": rid, "action": "translate", "reason": reason or "translate", "text": provided_text})
+                returned_ids.add(rid)
             else:
                 logger.warning(f"Classifier validation: rejected result for ID {rid} due to invalid action {act}")
                 rejected += 1
                 continue
 
-            valid_results.append({"id": rid, "action": act, "reason": r.get("reason", ""), "text": r.get("text", "")})
-            returned_ids.add(rid)
-
         logger.info(f"Classifier validation: Validated {kept} KEEP, {translated} TRANSLATE, {rejected} REJECTED")
     except Exception as e:
         logger.error(f"Classifier validation: JSON parse failed: {e}")
 
-    # Failsafe: Any missing items must be translated
+    # Failsafe: Any missing items must be translated with empty text to force recovery
     for item in items:
         if item["id"] not in returned_ids:
             logger.info(f"Classifier validation: Failsafe triggered for ID {item['id']}, forcing TRANSLATE")
-            valid_results.append({"id": item["id"], "action": "translate", "reason": "malformed_fallback", "text": item["text"]})
+            valid_results.append({"id": item["id"], "action": "translate", "reason": "malformed_fallback", "text": ""})
 
     return valid_results
 
@@ -418,7 +568,6 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         esc_provider = get_setting("escalation_provider", "none").lower()
 
         configured_esc = esc_provider if escalate_enabled and esc_provider != "none" else primary_provider
-        configured_alt = primary_provider if configured_esc != primary_provider else configured_esc
 
         attempts = [
             {"provider": configured_esc, "type": "contextual"},
@@ -792,8 +941,9 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         ]
 
         import os
+        import app.core.db
         from app.core.languages import get_language
-        data_dir = os.path.dirname(DB_PATH)
+        data_dir = os.path.dirname(app.core.db.DB_PATH)
         lang_obj = get_language(target_language)
         lang_code = lang_obj.code if lang_obj else target_language.lower()[:2]
         partial_file = os.path.join(data_dir, f"job_{job_id}_{lang_code}_partial.json") if job_id else None
@@ -829,11 +979,11 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     global_tm_context.extend(tm_context)
             except Exception:
                 pass
-                
+
         state_lock = asyncio.Lock()
-        concurrency = int(get_setting("batch_concurrency", "3"))
+        concurrency = get_positive_int_setting("batch_concurrency", 3)
         sem = asyncio.Semaphore(concurrency)
-        
+
         async def process_batch(batch_idx, start_idx, chunk, payload):
             nonlocal processed_count
             end_idx = min(start_idx + len(payload), total_lines)
@@ -867,7 +1017,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                                 "original": subs[idx].content,
                                 "translated": partial_dict.get(idx, "")
                             })
-                            
+
                 missing_payload = [p for p in payload if p["id"] not in partial_dict]
                 res_dict = {}
                 if missing_payload:
@@ -882,7 +1032,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 for p in payload:
                     if p["id"] in partial_dict:
                         res_dict[p["id"]] = partial_dict[p["id"]]
-                        
+
                 async with state_lock:
                     for p in payload:
                         idx = p["id"]
@@ -907,12 +1057,23 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     if job_id:
                         update_job(job_id, processed_lines=processed_count)
 
-            except ProviderUnavailableError as e:
+            except (ProviderUnavailableError, ProviderConfigurationError) as e:
                 async with state_lock:
                     if job_id:
                         update_job(job_id, processed_lines=processed_count)
                 raise e
             except Exception as e:
+                err_str = str(e).lower()
+                permanent = any(x in err_str for x in [
+                    "401", "403", "unauthorized", "forbidden", "api key not valid",
+                    "invalid api key", "not configured", "model_not_found", "permission_denied"
+                ])
+                if permanent:
+                    async with state_lock:
+                        if job_id:
+                            update_job(job_id, processed_lines=processed_count)
+                    raise ProviderConfigurationError(f"Permanent provider configuration error: {str(e)}")
+
                 logger.error(f"Batch {start_idx} failed: {e}")
                 async with state_lock:
                     processed_count += len(payload)
@@ -927,7 +1088,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
         tasks = []
         for batch_idx, (start_idx, chunk, payload) in enumerate(batches):
             tasks.append(run_batch_with_sem(batch_idx, start_idx, chunk, payload))
-            
+
         if tasks:
             await asyncio.gather(*tasks)
 

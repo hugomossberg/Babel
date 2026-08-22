@@ -7,12 +7,20 @@ from typing import Optional
 
 def validate_webhook_token(request: Request):
     from app.core.db import get_setting
+    import secrets
     expected = get_setting("webhook_secret", "").strip()
     if not expected:
         return # Auth not configured
     
     token = request.query_params.get("secret", "").strip()
-    if not token or token != expected:
+    if not token:
+        token = request.headers.get("X-Webhook-Secret", "").strip()
+    if not token:
+        auth_header = request.headers.get("Authorization", "").strip()
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:].strip()
+
+    if not token or not secrets.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
 def validate_path(video_path: str) -> str:

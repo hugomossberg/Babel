@@ -6,13 +6,18 @@ import logging
 from typing import Dict, Any, Optional, List, Set
 import srt
 import httpx
+import uuid
 
 from app.core.cleaner import sanitize_srt_content, subs_to_srt_string
 from app.core.extractor import extract_embedded_srt, inspect_mkv_tracks
 from app.core.validator import verify_sync, check_dropped_lines, evaluate_subtitle_health, detect_language_heuristics
-from app.core.db import create_job, update_job, append_job_log, get_setting
+from app.core.db import create_job, update_job, append_job_log, get_setting, get_positive_int_setting, save_translation_memory_bulk
 from app.services.bazarr_checker import check_existing_swedish_subtitle, check_existing_english_subtitle, find_external_subtitle
-from app.services.translator import SubtitleTranslator, is_usable_translation, ProviderUnavailableError, get_provider_capabilities
+from app.services.translator import (
+    SubtitleTranslator, is_usable_translation, ProviderUnavailableError,
+    ProviderConfigurationError, get_provider_capabilities, is_deterministically_safe_keep,
+    normalize_for_compare
+)
 from app.services.jellyfin_notifier import notify_jellyfin_library_refresh
 
 logger = logging.getLogger("babel.pipeline")
@@ -56,8 +61,10 @@ def qa_gate(
         if not orig or orig == "<i></i>":
             continue
 
-        # If translated text is identical to original AND original looks like English
-        if trans == orig:
+        # Check if translated text is identical to original (exact or normalized)
+        norm_orig = normalize_for_compare(orig)
+        norm_trans = normalize_for_compare(trans)
+        if trans == orig or (norm_orig and norm_orig == norm_trans):
             untranslated_ids.append(i)
 
     def is_safe_identical_line(text: str) -> bool:
@@ -67,13 +74,25 @@ def qa_gate(
             return True
         return False
 
-    real_untranslated_ids = [
-        i for i in untranslated_ids
-        if i not in safe_ids and not is_safe_identical_line(source_subs[i].content)
-    ]
+    # Defense-in-depth: safe_ids are only honored if deterministically safe
+    real_untranslated_ids = []
+    for i in untranslated_ids:
+        orig_content = source_subs[i].content
+        if is_safe_identical_line(orig_content):
+            continue
+        if i in safe_ids and (
+            is_deterministically_safe_keep(orig_content, "proper_noun") or
+            is_deterministically_safe_keep(orig_content, "brand") or
+            is_deterministically_safe_keep(orig_content, "acronym") or
+            is_deterministically_safe_keep(orig_content, "number") or
+            is_deterministically_safe_keep(orig_content, "symbol") or
+            is_deterministically_safe_keep(orig_content, "non_verbal")
+        ):
+            continue
+        real_untranslated_ids.append(i)
 
     if real_untranslated_ids:
-        pct = round(len(real_untranslated_ids) / min_len * 100, 1)
+        pct = round(len(real_untranslated_ids) / min_len * 100, 1) if min_len > 0 else 0
         issues.append(f"{len(real_untranslated_ids)} lines ({pct}%) still contain original English text")
         # Small number is warning, large number is failure
         if pct > 5.0:
@@ -86,7 +105,7 @@ def qa_gate(
     # 3. Check for completely empty translations (dropped lines)
     dropped_count, dropped_details = check_dropped_lines(source_subs, translated_subs)
     if dropped_count > 0:
-        pct = round(dropped_count / len(source_subs) * 100, 1)
+        pct = round(dropped_count / len(source_subs) * 100, 1) if len(source_subs) > 0 else 0
         issues.append(f"{dropped_count} lines ({pct}%) were dropped (empty in translation)")
         if pct > 2.0:
             score -= 30
@@ -154,7 +173,330 @@ def qa_gate(
     }
 
 
+def _link_temp_no_clobber(temp_output: str, target_output_path: str) -> bool:
+    """
+    Atomically links temp_output to target_output_path without clobbering existing files.
+    If target_output_path already exists, raises FileExistsError (caught, returns False).
+    If linking succeeds, removes temp_output and returns True.
+    """
+    try:
+        os.link(temp_output, target_output_path)
+    except FileExistsError:
+        return False
+    if os.path.exists(temp_output):
+        try:
+            os.unlink(temp_output)
+        except OSError:
+            pass
+    return True
+
+
+def _publish_subtitle_atomic(
+    *,
+    video_path: str,
+    target_output_path: str,
+    lang_code: str,
+    translated_srt_text: str,
+    expected_cue_count: int,
+    force_retranslate: bool = False,
+    job_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Atomically validates and publishes translated subtitle text to target_output_path.
+
+    Invariants:
+    1. Writes to unique temp file in same directory with fsync.
+    2. Reparses temp file and verifies cue count before touching any target/backup.
+    3. Handles existing targets with atomic backup and race-check:
+       - Evaluates health of moved backup file.
+       - If backup is GREEN, restores it and skips publishing (unless force_retranslate).
+    4. Uses no-clobber atomic link (_link_temp_no_clobber).
+    5. If concurrent target appears after backup:
+       - Evaluates health of new target.
+       - If GREEN, preserves new target and skips publishing.
+       - If unhealthy, backs it up and links temp.
+    6. Unified transaction rollback state:
+       - If any failure occurs after backup, rolls back backup to target (if target absent/unhealthy).
+       - Cleans up temp file fail-closed.
+    """
+    parent_dir = os.path.dirname(target_output_path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+
+    temp_output = os.path.join(
+        parent_dir,
+        f".{os.path.basename(target_output_path)}.tmp.{uuid.uuid4().hex}"
+    )
+
+    backup_path: Optional[str] = None
+    backup_original_path: Optional[str] = None
+
+    try:
+        # 1. Write translated content to unique temp file and fsync
+        with open(temp_output, "w", encoding="utf-8") as f:
+            f.write(translated_srt_text)
+            f.flush()
+            os.fsync(f.fileno())
+
+        try:
+            os.chmod(temp_output, 0o666)
+        except Exception as e:
+            logger.warning(f"Could not set permissions for {temp_output}: {e}")
+
+        # 2. Validate temp file can be parsed back properly BEFORE touching any existing files
+        try:
+            with open(temp_output, "r", encoding="utf-8-sig") as f:
+                parsed_temp_subs = list(srt.parse(f.read()))
+            if len(parsed_temp_subs) != expected_cue_count:
+                raise RuntimeError(
+                    f"Refusing publish: temporary subtitle cue count mismatch "
+                    f"(expected {expected_cue_count}, read {len(parsed_temp_subs)})"
+                )
+        except Exception as val_err:
+            if temp_output and os.path.exists(temp_output):
+                try:
+                    os.unlink(temp_output)
+                except OSError:
+                    pass
+            raise RuntimeError(f"Temporary subtitle validation failed: {val_err}") from val_err
+
+        # 3. Check for existing external subtitle
+        existing = find_external_subtitle(video_path, lang_code)
+        target_to_check = existing or (target_output_path if os.path.exists(target_output_path) else None)
+
+        if target_to_check and os.path.exists(target_to_check):
+            if not force_retranslate:
+                initial_health = evaluate_subtitle_health(target_to_check, target_lang_code=lang_code)
+                if initial_health.get("status") == "GREEN":
+                    if job_id:
+                        append_job_log(job_id, f"External healthy {lang_code} subtitle appeared/exists. Skipping publish.")
+                    if temp_output and os.path.exists(temp_output):
+                        try:
+                            os.unlink(temp_output)
+                        except OSError:
+                            pass
+                    return {"published": False, "skipped": True, "reason": "existing_healthy"}
+
+            # Move unhealthy target to unique backup atomically
+            backup_original_path = target_to_check
+            backup_path = f"{target_to_check}.babel-replaced.{uuid.uuid4().hex}"
+            try:
+                os.replace(target_to_check, backup_path)
+            except OSError as exc:
+                raise RuntimeError(f"Cannot safely back up existing subtitle {target_to_check}: {exc}") from exc
+
+            # TOCTOU race check on the backup file that was actually moved
+            if not force_retranslate:
+                moved_health = evaluate_subtitle_health(backup_path, target_lang_code=lang_code)
+                if moved_health.get("status") == "GREEN":
+                    if not os.path.exists(backup_original_path):
+                        try:
+                            os.replace(backup_path, backup_original_path)
+                            backup_path = None
+                            backup_original_path = None
+                        except OSError as rb_err:
+                            retained_backup = backup_path
+                            backup_path = None
+                            backup_original_path = None
+                            if temp_output and os.path.exists(temp_output):
+                                try:
+                                    os.unlink(temp_output)
+                                except OSError:
+                                    pass
+                            raise RuntimeError(
+                                f"Failed to restore captured healthy subtitle from {retained_backup} to {target_to_check}: {rb_err}"
+                            ) from rb_err
+                    else:
+                        # Another file appeared at backup_original_path while we moved the old one
+                        curr_health = evaluate_subtitle_health(backup_original_path, target_lang_code=lang_code)
+                        if curr_health.get("status") == "GREEN":
+                            # Current target is healthy: keep it, retain backup safely, skip publish
+                            retained_backup = backup_path
+                            backup_path = None
+                            backup_original_path = None
+                            if job_id:
+                                append_job_log(
+                                    job_id,
+                                    f"External healthy {lang_code} subtitle present at target and in backup ({os.path.basename(retained_backup)}). Preserved target and skipped publish."
+                                )
+                            if temp_output and os.path.exists(temp_output):
+                                try:
+                                    os.unlink(temp_output)
+                                except OSError:
+                                    pass
+                            return {"published": False, "skipped": True, "reason": "concurrent_healthy_present"}
+                        else:
+                            # Current target is NOT GREEN -> fail-closed, keep both files/data so nothing is lost
+                            retained_backup = backup_path
+                            backup_path = None
+                            backup_original_path = None
+                            if temp_output and os.path.exists(temp_output):
+                                try:
+                                    os.unlink(temp_output)
+                                except OSError:
+                                    pass
+                            raise RuntimeError(
+                                f"Target conflict: captured healthy backup at {retained_backup} but unhealthy target exists at {target_to_check}. Refusing to publish or overwrite."
+                            )
+
+                    if job_id:
+                        append_job_log(job_id, f"External healthy {lang_code} subtitle captured in race. Preserved existing and skipped publish.")
+                    if temp_output and os.path.exists(temp_output):
+                        try:
+                            os.unlink(temp_output)
+                        except OSError:
+                            pass
+                    return {"published": False, "skipped": True, "reason": "race_captured_healthy"}
+
+            if job_id:
+                append_job_log(job_id, f"Backed up existing subtitle to {os.path.basename(backup_path)}")
+
+        # 4. Atomic publish using no-clobber
+        if _link_temp_no_clobber(temp_output, target_output_path):
+            if job_id:
+                append_job_log(job_id, f"Published {os.path.basename(target_output_path)}")
+            return {"published": True, "skipped": False, "reason": "published"}
+
+        # Race: target_output_path appeared between backup and link
+        health = evaluate_subtitle_health(target_output_path, target_lang_code=lang_code)
+        if health.get("status") == "GREEN":
+            if job_id:
+                append_job_log(job_id, f"External healthy {lang_code} subtitle appeared during publish. Skipping publish.")
+            if temp_output and os.path.exists(temp_output):
+                try:
+                    os.unlink(temp_output)
+                except OSError:
+                    pass
+            return {"published": False, "skipped": True, "reason": "concurrent_healthy_appeared"}
+
+        # Concurrent target is unhealthy -> back it up too
+        concurrent_backup = f"{target_output_path}.babel-replaced.{uuid.uuid4().hex}"
+        try:
+            os.replace(target_output_path, concurrent_backup)
+        except OSError as exc:
+            raise RuntimeError(f"Cannot safely back up concurrent subtitle {target_output_path}: {exc}") from exc
+
+        backup_path = concurrent_backup
+        backup_original_path = target_output_path
+
+        moved_c_health = evaluate_subtitle_health(concurrent_backup, target_lang_code=lang_code)
+        if moved_c_health.get("status") == "GREEN":
+            if not os.path.exists(target_output_path):
+                try:
+                    os.replace(concurrent_backup, target_output_path)
+                    backup_path = None
+                    backup_original_path = None
+                except OSError as rb_err:
+                    retained_c = concurrent_backup
+                    backup_path = None
+                    backup_original_path = None
+                    if temp_output and os.path.exists(temp_output):
+                        try:
+                            os.unlink(temp_output)
+                        except OSError:
+                            pass
+                    raise RuntimeError(
+                        f"Failed to restore captured healthy concurrent subtitle from {retained_c} to {target_output_path}: {rb_err}"
+                    ) from rb_err
+            else:
+                curr_c_health = evaluate_subtitle_health(target_output_path, target_lang_code=lang_code)
+                if curr_c_health.get("status") == "GREEN":
+                    retained_c = concurrent_backup
+                    backup_path = None
+                    backup_original_path = None
+                    if job_id:
+                        append_job_log(
+                            job_id,
+                            f"External healthy {lang_code} subtitle present at target and in backup ({os.path.basename(retained_c)}). Preserved target and skipped publish."
+                        )
+                    if temp_output and os.path.exists(temp_output):
+                        try:
+                            os.unlink(temp_output)
+                        except OSError:
+                            pass
+                    return {"published": False, "skipped": True, "reason": "concurrent_healthy_present"}
+                else:
+                    retained_c = concurrent_backup
+                    backup_path = None
+                    backup_original_path = None
+                    if temp_output and os.path.exists(temp_output):
+                        try:
+                            os.unlink(temp_output)
+                        except OSError:
+                            pass
+                    raise RuntimeError(
+                        f"Target conflict: captured healthy concurrent backup at {retained_c} but unhealthy target exists at {target_output_path}."
+                    )
+            if job_id:
+                append_job_log(job_id, f"External healthy {lang_code} subtitle appeared during publish. Skipping publish.")
+            if temp_output and os.path.exists(temp_output):
+                try:
+                    os.unlink(temp_output)
+                except OSError:
+                    pass
+            return {"published": False, "skipped": True, "reason": "concurrent_healthy_appeared"}
+
+        if _link_temp_no_clobber(temp_output, target_output_path):
+            if job_id:
+                append_job_log(job_id, f"Published {os.path.basename(target_output_path)}")
+            return {"published": True, "skipped": False, "reason": "published"}
+
+        final_health = evaluate_subtitle_health(target_output_path, target_lang_code=lang_code)
+        if final_health.get("status") == "GREEN":
+            if job_id:
+                append_job_log(job_id, f"External healthy {lang_code} subtitle appeared during publish. Skipping publish.")
+            if temp_output and os.path.exists(temp_output):
+                try:
+                    os.unlink(temp_output)
+                except OSError:
+                    pass
+            return {"published": False, "skipped": True, "reason": "concurrent_healthy_appeared"}
+
+        raise RuntimeError(f"Failed to atomically publish subtitle to {target_output_path} due to persistent target conflicts.")
+
+    except Exception as pub_err:
+        logger.error(f"Publish failed for {target_output_path}: {pub_err}")
+        if job_id:
+            append_job_log(job_id, f"PUBLISH ERROR: {pub_err}")
+        if temp_output and os.path.exists(temp_output):
+            try:
+                os.unlink(temp_output)
+            except OSError:
+                pass
+
+        # Unified rollback:
+        if backup_path and os.path.exists(backup_path):
+            restore_target = backup_original_path or target_output_path
+            if not os.path.exists(restore_target):
+                try:
+                    os.replace(backup_path, restore_target)
+                    if job_id:
+                        append_job_log(job_id, f"Rolled back backup to {os.path.basename(restore_target)}")
+                except OSError as rb_err:
+                    logger.error(f"Rollback failed: {rb_err}")
+            else:
+                target_health = evaluate_subtitle_health(restore_target, target_lang_code=lang_code)
+                if target_health.get("status") == "GREEN":
+                    if job_id:
+                        append_job_log(
+                            job_id,
+                            f"External healthy subtitle present; leaving intact and retaining backup {os.path.basename(backup_path)}."
+                        )
+                else:
+                    try:
+                        os.replace(backup_path, restore_target)
+                        if job_id:
+                            append_job_log(job_id, f"Rolled back backup over unhealthy target to {os.path.basename(restore_target)}")
+                    except OSError as rb_err:
+                        logger.error(f"Rollback failed: {rb_err}")
+        raise pub_err
+
+
 class SubtitlePipeline:
+    qa_gate = staticmethod(qa_gate)
+    _publish_subtitle_atomic = staticmethod(_publish_subtitle_atomic)
+    _link_temp_no_clobber = staticmethod(_link_temp_no_clobber)
+
     def __init__(self):
         self.translator = SubtitleTranslator()
         self._video_semaphore = None
@@ -174,8 +516,8 @@ class SubtitlePipeline:
         # Clean up partial progress file
         import os
         import glob
-        from app.core.db import DB_PATH
-        data_dir = os.path.dirname(DB_PATH)
+        import app.core.db
+        data_dir = os.path.dirname(app.core.db.DB_PATH)
         for partial_file in glob.glob(os.path.join(data_dir, f"job_{job_id}_*_partial.json")):
             try:
                 os.remove(partial_file)
@@ -183,7 +525,7 @@ class SubtitlePipeline:
                 pass
 
     def _get_semaphore(self) -> asyncio.Semaphore:
-        max_jobs = int(get_setting("max_concurrent_jobs", "1"))
+        max_jobs = get_positive_int_setting("max_concurrent_jobs", 1)
         if self._video_semaphore is None or self._current_max_jobs != max_jobs:
             self._current_max_jobs = max_jobs
             self._video_semaphore = asyncio.Semaphore(max_jobs)
@@ -236,13 +578,20 @@ class SubtitlePipeline:
                 # 2. Try Series — get all series first, then find episodes for matching series
                 s_res = await client.get(f"{bazarr_url}/api/series", headers=headers)
                 if s_res.status_code == 200:
-                    all_series = s_res.json().get("data", [])
-                    norm_target = os.path.normpath(video_path)
-
+                    from pathlib import Path
+                    target_p = Path(video_path).resolve()
                     for series in all_series:
-                        series_path = os.path.normpath(series.get("path", ""))
-                        # Check if the video path starts with this series' path
-                        if norm_target.startswith(series_path):
+                        raw_series_path = series.get("path", "")
+                        if not raw_series_path:
+                            continue
+                        series_p = Path(raw_series_path).resolve()
+                        is_match = False
+                        try:
+                            is_match = target_p.is_relative_to(series_p)
+                        except Exception:
+                            is_match = False
+
+                        if is_match or series_p.name == target_p.parent.name or series_p.name == target_p.parent.parent.name:
                             s_id = series.get("sonarrSeriesId")
                             if not s_id:
                                 continue
@@ -255,8 +604,11 @@ class SubtitlePipeline:
                             if ep_res.status_code == 200:
                                 episodes = ep_res.json().get("data", [])
                                 for ep in episodes:
-                                    ep_path = os.path.normpath(ep.get("path", ""))
-                                    if ep_path == norm_target or os.path.basename(ep_path) == os.path.basename(norm_target):
+                                    ep_raw_path = ep.get("path", "")
+                                    if not ep_raw_path:
+                                        continue
+                                    ep_p = Path(ep_raw_path).resolve()
+                                    if ep_p == target_p or ep_p.name == target_p.name:
                                         e_id = ep.get("sonarrEpisodeId")
                                         if e_id:
                                             logger.info(f"Triggering Bazarr episode subtitle search for series {s_id}, episode {e_id}, lang={language}")
@@ -597,7 +949,7 @@ class SubtitlePipeline:
                 append_job_log(job_id, f"SDH cleaner disabled. Parsed {len(subs)} blocks directly.")
 
             total_source_lines = len(subs)
-            batch_size = int(get_setting("batch_size", "50"))
+            batch_size = get_positive_int_setting("batch_size", 50)
             ai_provider = get_setting("ai_provider", "gemini").lower()
             if ai_provider == "openai":
                 active_engine_name = f"OpenAI ({get_setting('openai_model', 'gpt-4o-mini')})"
@@ -746,19 +1098,24 @@ class SubtitlePipeline:
                                             if idx is None: continue
                                             action = r.get("action")
                                             if action == "keep":
-                                                safe_ids.append(idx)
                                                 raw_reason = r.get("reason", "none").lower()
-                                                reason_map = {
-                                                    "proper_noun": "Name / Proper Noun",
-                                                    "brand": "Brand Name",
-                                                    "acronym": "Acronym / Abbreviation",
-                                                    "number": "Number",
-                                                    "symbol": "Symbol / Punctuation",
-                                                    "non_verbal": "Non-verbal Sound",
-                                                    "none": "Unspecified Reason"
-                                                }
-                                                reason_str = reason_map.get(raw_reason, raw_reason.replace("_", " ").title())
-                                                append_job_log(job_id, f"QA Recovery: Model kept line {idx} ({reason_str})")
+                                                if is_deterministically_safe_keep(subs[idx].content, raw_reason):
+                                                    if idx not in safe_ids:
+                                                        safe_ids.append(idx)
+                                                    reason_map = {
+                                                        "proper_noun": "Name / Proper Noun",
+                                                        "brand": "Brand Name",
+                                                        "acronym": "Acronym / Abbreviation",
+                                                        "number": "Number",
+                                                        "symbol": "Symbol / Punctuation",
+                                                        "non_verbal": "Non-verbal Sound",
+                                                        "none": "Unspecified Reason"
+                                                    }
+                                                    reason_str = reason_map.get(raw_reason, raw_reason.replace("_", " ").title())
+                                                    append_job_log(job_id, f"QA Recovery: Model kept line {idx} ({reason_str})")
+                                                else:
+                                                    append_job_log(job_id, f"QA Recovery: Rejected unsafe KEEP for line {idx} ('{subs[idx].content}'). Forcing translation.")
+                                                    known_untranslated_ids.add(idx)
                                             elif action == "translate" and "text" in r:
                                                 if not is_usable_translation(r["text"]):
                                                     append_job_log(job_id, f"QA Recovery: Rejected blank/invalid translation for line {idx}")
@@ -889,8 +1246,8 @@ class SubtitlePipeline:
                                     break
                                 else:
                                     # Clear partial state so next loop does a clean re-translate of failed batches
-                                    from app.core.db import DB_PATH
-                                    data_dir = os.path.dirname(DB_PATH)
+                                    import app.core.db
+                                    data_dir = os.path.dirname(app.core.db.DB_PATH)
                                     partial_file = os.path.join(data_dir, f"job_{job_id}_{lang_code}_partial.json") if job_id else None
                                     if partial_file and os.path.exists(partial_file):
                                         try:
@@ -930,92 +1287,26 @@ class SubtitlePipeline:
                     max_sync_diff = this_max_diff
 
                 if qa_result["passed"]:
-                    # Target Race Protection (Before Publish)
-                    existing = find_external_subtitle(video_path, lang_code)
-                    skip_publish = False
-                    if existing and not force_retranslate:
-                        health = evaluate_subtitle_health(existing, target_lang_code=lang_code)
-                        if health.get("status") == "GREEN":
-                            append_job_log(job_id, "External target appeared before publish. Babel output not published.")
-                            successful_langs.append(lang_code)
-                            skip_publish = True
-                        else:
-                            backup_path = existing + ".babel-replaced"
-                            try:
-                                os.rename(existing, backup_path)
-                                append_job_log(job_id, f"Renamed existing subtitle to {os.path.basename(backup_path)}")
-                            except Exception:
-                                pass
+                    translated_srt_text = subs_to_srt_string(translated_subs)
+                    pub_res = _publish_subtitle_atomic(
+                        video_path=video_path,
+                        target_output_path=target_output_path,
+                        lang_code=lang_code,
+                        translated_srt_text=translated_srt_text,
+                        expected_cue_count=len(translated_subs),
+                        force_retranslate=force_retranslate,
+                        job_id=job_id,
+                    )
 
-                    if not skip_publish:
-                        temp_output = target_output_path + ".tmp"
-                        with open(temp_output, "w", encoding="utf-8") as f:
-                            f.write(subs_to_srt_string(translated_subs))
-                        try:
-                            os.chmod(temp_output, 0o666)
-                        except Exception as e:
-                            logger.warning(f"Could not set permissions for {temp_output}: {e}")
-
-                        # Atomic replace to prevent partial reads by media server
-                        publish_success = False
-                        try:
-                            # Use hardlink for atomic no-clobber
-                            os.link(temp_output, target_output_path)
-                            os.remove(temp_output)
-                            publish_success = True
-                        except FileExistsError:
-                            # Someone beat us to it
-                            health = evaluate_subtitle_health(target_output_path, target_lang_code=lang_code)
-                            if health.get("status") == "GREEN":
-                                append_job_log(job_id, f"External healthy {lang_code} subtitle appeared during publish. Skipping publish.")
-                                skip_publish = True
-                                try: os.remove(temp_output)
-                                except: pass
-                            else:
-                                # Overwrite unhealthy
-                                os.replace(temp_output, target_output_path)
-                                append_job_log(job_id, f"Overwrote unhealthy external {lang_code} subtitle during publish.")
-                                publish_success = True
-                        except OSError:
-                            # Fallback if hardlinks are not supported on this filesystem
-                            if os.path.exists(target_output_path):
-                                health = evaluate_subtitle_health(target_output_path, target_lang_code=lang_code)
-                                if health.get("status") == "GREEN":
-                                    append_job_log(job_id, f"External healthy {lang_code} subtitle appeared during publish. Skipping publish.")
-                                    skip_publish = True
-                                    try: os.remove(temp_output)
-                                    except: pass
-                                else:
-                                    os.replace(temp_output, target_output_path)
-                                    append_job_log(job_id, f"Overwrote unhealthy external {lang_code} subtitle during publish.")
-                                    publish_success = True
-                            else:
-                                # To prevent TOCTOU race condition in fallback, use O_CREAT|O_EXCL to claim name
-                                try:
-                                    fd = os.open(target_output_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                                    os.close(fd)
-                                except FileExistsError:
-                                    health = evaluate_subtitle_health(target_output_path, target_lang_code=lang_code)
-                                    if health.get("status") == "GREEN":
-                                        append_job_log(job_id, f"External healthy {lang_code} subtitle appeared during publish (fallback). Skipping.")
-                                        skip_publish = True
-                                        try: os.remove(temp_output)
-                                        except: pass
-                                    else:
-                                        os.replace(temp_output, target_output_path)
-                                        publish_success = True
-                                else:
-                                    os.replace(temp_output, target_output_path)
-                                    publish_success = True
-
-                        if publish_success:
-                            output_files.append(target_output_path)
-                            successful_langs.append(lang_code)
-                            append_job_log(job_id, f"Published {os.path.basename(target_output_path)}")
+                    if pub_res.get("published"):
+                        output_files.append(target_output_path)
+                        successful_langs.append(lang_code)
+                    elif pub_res.get("skipped"):
+                        successful_langs.append(lang_code)
 
                     # Clean up partial progress file since we successfully finished
-                    from app.core.db import DB_PATH
-                    data_dir = os.path.dirname(DB_PATH)
+                    import app.core.db
+                    data_dir = os.path.dirname(app.core.db.DB_PATH)
                     partial_file = os.path.join(data_dir, f"job_{job_id}_{lang_code}_partial.json") if job_id else None
                     if partial_file and os.path.exists(partial_file):
                         try:
@@ -1023,7 +1314,7 @@ class SubtitlePipeline:
                         except Exception:
                             pass
 
-                    if not skip_publish:
+                    if pub_res.get("published"):
                         # Save Translation Memory only after QA PASS and if we actually published
                         if title:
                             try:
@@ -1044,10 +1335,7 @@ class SubtitlePipeline:
                 kept_count = len(safe_ids) if 'safe_ids' in locals() else 0
                 recovered_count = len(recovered_cues) if 'recovered_cues' in locals() else 0
 
-                if qa_result["passed"]:
-                    summary_status = "PASS (Tolerated)" if unresolved_count > 0 else "PASS"
-                else:
-                    summary_status = "FAIL"
+                summary_status = "PASS" if qa_result["passed"] else "FAIL"
                 summary_lines = [
                     "--- QA Summary ---",
                     f"{dropped_count} dropped lines",
@@ -1072,10 +1360,7 @@ class SubtitlePipeline:
 
             total_duration = round(time.time() - start_time, 2)
 
-            # Bug #31: Determine correct final status
-            # If we didn't translate all requested languages because of a QA failure,
-            # this is a recoverable state! We should go to RECOVERING, not FAILED.
-            # Bug #31: Determine correct final status
+            # Determine correct final status
             if len(successful_langs) + len(skipped_langs) == len(langs_needing_translation):
                 if successful_langs:
                     final_status = "TRANSLATED"
@@ -1102,15 +1387,22 @@ class SubtitlePipeline:
                 job_data = get_job_by_id(job_id)
                 current_retries = job_data.get("retry_count", 0) if job_data else 0
 
-                backoff_mins = 1
-                if current_retries == 1: backoff_mins = 5
-                elif current_retries == 2: backoff_mins = 15
-                elif current_retries == 3: backoff_mins = 30
-                elif current_retries >= 4: backoff_mins = 60
+                MAX_RECOVERY_ATTEMPTS = 5
+                if current_retries >= MAX_RECOVERY_ATTEMPTS:
+                    final_status = "FAILED"
+                    update_args["status"] = "FAILED"
+                    update_args["error_message"] = f"Recovery attempts exhausted ({MAX_RECOVERY_ATTEMPTS}/{MAX_RECOVERY_ATTEMPTS}). Subtitle failed QA."
+                    append_job_log(job_id, f"PERMANENT FAILURE: Recovery attempts exhausted ({MAX_RECOVERY_ATTEMPTS}/{MAX_RECOVERY_ATTEMPTS}).")
+                else:
+                    backoff_mins = 1
+                    if current_retries == 1: backoff_mins = 5
+                    elif current_retries == 2: backoff_mins = 15
+                    elif current_retries == 3: backoff_mins = 30
+                    elif current_retries >= 4: backoff_mins = 60
 
-                update_args["next_retry_at"] = (datetime.now(timezone.utc) + timedelta(minutes=backoff_mins)).isoformat()
-                update_args["retry_count"] = current_retries + 1
-                append_job_log(job_id, f"Job needs recovery. Will resume in {backoff_mins} min (Worker attempt {current_retries + 1}).")
+                    update_args["next_retry_at"] = (datetime.now(timezone.utc) + timedelta(minutes=backoff_mins)).isoformat()
+                    update_args["retry_count"] = current_retries + 1
+                    append_job_log(job_id, f"Job needs recovery. Will resume in {backoff_mins} min (Worker attempt {current_retries + 1}/{MAX_RECOVERY_ATTEMPTS}).")
 
             update_job(job_id, **update_args)
 
@@ -1122,6 +1414,21 @@ class SubtitlePipeline:
                 "duration": total_duration,
                 "output_files": output_files
             }
+
+        except ProviderConfigurationError as e:
+            if os.path.exists(temp_extracted_srt):
+                try: os.remove(temp_extracted_srt)
+                except: pass
+            total_duration = round(time.time() - start_time, 2)
+            append_job_log(job_id, f"CRITICAL CONFIGURATION ERROR: {str(e)}")
+            update_job(
+                job_id,
+                status="FAILED",
+                error_message=str(e),
+                duration_seconds=total_duration,
+                last_error=str(e)
+            )
+            return {"status": "failed", "error": str(e), "job_id": job_id}
 
         except ProviderUnavailableError as e:
             if os.path.exists(temp_extracted_srt):

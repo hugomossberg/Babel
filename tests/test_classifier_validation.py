@@ -2,8 +2,8 @@ import pytest
 from app.services.translator import validate_classifier_output
 
 def test_classifier_correct_dict_root():
-    items = [{"id": 1, "text": "Hello"}]
-    raw = '{"results": [{"id": 1, "action": "keep", "reason": "proper_noun", "text": "Hello"}]}'
+    items = [{"id": 1, "text": "John Smith"}]
+    raw = '{"results": [{"id": 1, "action": "keep", "reason": "proper_noun", "text": "John Smith"}]}'
     out = validate_classifier_output(raw, items)
     assert len(out) == 1
     assert out[0]["id"] == 1
@@ -25,7 +25,7 @@ def test_classifier_list_of_strings():
     assert out[0]["reason"] == "malformed_fallback"
 
 def test_classifier_missing_result_id():
-    items = [{"id": 1, "text": "Hello"}, {"id": 2, "text": "World"}]
+    items = [{"id": 1, "text": "John Smith"}, {"id": 2, "text": "World"}]
     raw = '{"results": [{"id": 1, "action": "keep", "reason": "proper_noun"}]}'
     out = validate_classifier_output(raw, items)
     assert len(out) == 2
@@ -50,7 +50,7 @@ def test_classifier_keep_invalid_reason():
     assert out[0]["action"] == "translate"
 
 def test_classifier_markdown_wrapping():
-    items = [{"id": 1, "text": "Hello"}]
+    items = [{"id": 1, "text": "John Smith"}]
     raw = "```json\n{\"results\": [{\"id\": 1, \"action\": \"keep\", \"reason\": \"proper_noun\"}]}\n```"
     out = validate_classifier_output(raw, items)
     assert len(out) == 1

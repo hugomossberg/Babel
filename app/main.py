@@ -50,26 +50,31 @@ class BasicAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if not AUTH_USERNAME or not AUTH_PASSWORD:
             return await call_next(request)
-        
-        # Don't require auth for specific webhooks or health check
-        if request.url.path in ["/webhook/sonarr", "/webhook/radarr"] or request.url.path == "/health":
+
+        if request.url.path == "/health":
             return await call_next(request)
-            
+
+        if request.url.path in ["/webhook/sonarr", "/webhook/radarr"]:
+            from app.core.db import get_setting
+            webhook_secret = get_setting("webhook_secret", "").strip()
+            if webhook_secret:
+                return await call_next(request)
+
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Basic "):
             return Response(status_code=401, headers={"WWW-Authenticate": "Basic"})
-            
+
         try:
             encoded_credentials = auth_header.split(" ")[1]
             decoded_credentials = base64.b64decode(encoded_credentials).decode("utf-8")
             username, password = decoded_credentials.split(":", 1)
-            
-            if not (secrets.compare_digest(username, AUTH_USERNAME) and 
+
+            if not (secrets.compare_digest(username, AUTH_USERNAME) and
                     secrets.compare_digest(password, AUTH_PASSWORD)):
                 return Response(status_code=401, headers={"WWW-Authenticate": "Basic"})
         except Exception:
             return Response(status_code=401, headers={"WWW-Authenticate": "Basic"})
-            
+
         return await call_next(request)
 
 app.add_middleware(BasicAuthMiddleware)
@@ -109,7 +114,7 @@ async def process_one_retry_pass():
                         updated_at = datetime.fromisoformat(job["updated_at"])
                         if (now - updated_at).total_seconds() > 300: # 5 min fallback
                             should_retry = True
-                
+
                 if should_retry:
                     if claim_job_for_retry(job["id"]):
                         logging.info(f"Retrying job {job['id']}")

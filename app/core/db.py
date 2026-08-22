@@ -1,8 +1,11 @@
 import sqlite3
 import os
 import json
+import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = os.getenv("BABEL_DB_PATH", "/app/data/babel.db")
 
@@ -86,6 +89,14 @@ def init_db():
         except Exception:
             pass
 
+        # Check if notify_jellyfin already exists BEFORE defaults are inserted
+        has_notify_jellyfin = cursor.execute("SELECT 1 FROM settings WHERE key = 'notify_jellyfin'").fetchone() is not None
+        if not has_notify_jellyfin:
+            # One-time migration: If legacy jellyfin_enabled exists, carry its value over
+            row_jf = cursor.execute("SELECT value FROM settings WHERE key = 'jellyfin_enabled'").fetchone()
+            if row_jf:
+                cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('notify_jellyfin', ?)", (row_jf[0],))
+
         defaults = {
             "gemini_api_key": "",
             "gemini_model": "gemini-3.5-flash-lite",
@@ -97,6 +108,7 @@ def init_db():
             "bazarr_api_key": "",
             "wait_time_seconds": "15",
             "clean_sdh": "true",
+            "notify_jellyfin": "false",
             "jellyfin_enabled": "false",
             "jellyfin_url": "http://jellyfin:8096",
             "jellyfin_api_key": "",
@@ -123,6 +135,21 @@ def set_setting(key: str, value: str):
         cursor = conn.cursor()
         cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
         conn.commit()
+
+def get_positive_int_setting(key: str, default: int) -> int:
+    """
+    Safely retrieves a strictly positive integer setting (>= 1).
+    Handles empty strings, non-numeric strings, floats, and negative/zero numbers.
+    """
+    raw_value = get_setting(key, str(default))
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        logger.warning(
+            f"Invalid integer setting {key}={raw_value!r}; using default {default}"
+        )
+        return max(1, default)
+    return max(1, value)
 
 def create_job(video_path: str, event_source: str = "MANUAL", title: Optional[str] = None) -> int:
     now = datetime.now(timezone.utc).isoformat()
@@ -284,7 +311,7 @@ def save_translation_memory_bulk(series_title: str, items: list):
     if not series_title or not items: return
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
-    
+
     valid_items = []
     for item in items:
         orig = item.get("original", "").strip()
@@ -292,9 +319,9 @@ def save_translation_memory_bulk(series_title: str, items: list):
         if not orig or not trans: continue
         if len(orig.split()) > 6: continue
         valid_items.append((series_title, orig, trans, now))
-        
+
     if not valid_items: return
-    
+
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         cursor.executemany("INSERT OR REPLACE INTO translation_memory (series_title, original_text, translated_text, created_at) VALUES (?, ?, ?, ?)", valid_items)

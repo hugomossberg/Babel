@@ -5,12 +5,12 @@ import httpx
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from google import genai
 
 from app.core.db import (
     get_jobs, get_job_by_id, get_job_stats, delete_job, clear_all_jobs,
-    get_setting, set_setting
+    get_setting, set_setting, get_positive_int_setting
 )
 from app.services.docker_controller import docker_controller
 from app.services.bazarr_controller import bazarr_controller
@@ -31,8 +31,9 @@ class AISettingsRequest(BaseModel):
     escalation_provider: Optional[str] = "none"
     escalation_model: Optional[str] = ""
     escalate_to_pro: bool = False
-    batch_size: int
-    max_concurrent_jobs: Optional[int] = 1
+    batch_size: int = Field(default=50, ge=1)
+    max_concurrent_jobs: Optional[int] = Field(default=None, ge=1)
+    batch_concurrency: Optional[int] = Field(default=None, ge=1)
     glossary: Optional[str] = ""
 
 class TestAIRequest(BaseModel):
@@ -112,7 +113,7 @@ async def api_delete_subtitles(req: DeleteSubRequest):
     base_no_ext, _ = os.path.splitext(video_path)
     parent_dir = os.path.dirname(video_path)
     base_name = os.path.basename(base_no_ext)
-    
+
     # Bug #37: Only delete target language SRTs, not source subtitles
     # Get configured target languages to know which files Babel created
     target_codes = set()
@@ -121,7 +122,7 @@ async def api_delete_subtitles(req: DeleteSubRequest):
         target_codes = {l["code"] for l in langs if l.get("enabled", True)}
     except Exception:
         target_codes = set()
-    
+
     from app.core.languages import get_language
     delete_suffixes = set()
     for code in target_codes:
@@ -129,7 +130,7 @@ async def api_delete_subtitles(req: DeleteSubRequest):
         variants = lang_obj.aliases if lang_obj else [code]
         for v in variants:
             delete_suffixes.add(f".{v}.srt")
-    
+
     deleted_files = []
     if os.path.exists(parent_dir):
         for f in os.listdir(parent_dir):
@@ -151,7 +152,7 @@ async def api_delete_subtitles(req: DeleteSubRequest):
                     deleted_files.append(f)
                 except Exception:
                     pass
-    
+
     # Clean up job history for this video
     from app.core.db import DB_PATH
     import sqlite3
@@ -184,7 +185,7 @@ async def api_get_all_settings() -> Dict[str, Any]:
         languages = [{"name": "Swedish", "code": "sv", "enabled": True}]
 
     docker_info = await docker_controller.get_container_status(get_setting("bazarr_container_name", "bazarr"))
-    
+
     from app.core.languages import LANGUAGES
     available_languages = [{"name": lang.display_name, "code": lang.code} for lang in LANGUAGES]
 
@@ -203,8 +204,9 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "escalation_provider": get_setting("escalation_provider", "none"),
             "escalation_model": get_setting("escalation_model", ""),
             "escalate_to_pro": get_setting("escalate_to_pro", "false").lower() == "true",
-            "batch_size": int(get_setting("batch_size", "50")),
-            "max_concurrent_jobs": int(get_setting("max_concurrent_jobs", "1")),
+            "batch_size": get_positive_int_setting("batch_size", 50),
+            "max_concurrent_jobs": get_positive_int_setting("max_concurrent_jobs", 1),
+            "batch_concurrency": get_positive_int_setting("batch_concurrency", 3),
             "glossary": get_setting("glossary", "")
         },
         "modules": {
@@ -268,9 +270,14 @@ async def api_save_ai_settings(req: AISettingsRequest):
     if req.escalation_model is not None:
         set_setting("escalation_model", req.escalation_model.strip())
     set_setting("escalate_to_pro", "true" if req.escalate_to_pro else "false")
-    set_setting("batch_size", str(req.batch_size))
+    safe_batch_size = max(1, int(req.batch_size))
+    set_setting("batch_size", str(safe_batch_size))
     if req.max_concurrent_jobs is not None:
-        set_setting("max_concurrent_jobs", str(max(1, req.max_concurrent_jobs)))
+        safe_max_jobs = max(1, int(req.max_concurrent_jobs))
+        set_setting("max_concurrent_jobs", str(safe_max_jobs))
+    if req.batch_concurrency is not None:
+        safe_batch_concurrency = max(1, int(req.batch_concurrency))
+        set_setting("batch_concurrency", str(safe_batch_concurrency))
     if req.glossary is not None:
         set_setting("glossary", req.glossary)
     return {"status": "saved"}
@@ -286,7 +293,7 @@ async def api_test_ai(req: TestAIRequest):
             key = get_setting("openai_api_key", "")
         elif provider == "gemini":
             key = get_setting("gemini_api_key", "")
-            
+
     if provider == "deepl":
         if not key:
             key = get_setting("deepl_api_key", "")
@@ -334,7 +341,7 @@ async def api_test_ai(req: TestAIRequest):
             client = genai.Client(api_key=key)
             test_model = req.model or "gemini-3.5-flash-lite"
             loop = asyncio.get_event_loop()
-            
+
             def do_gemini_test():
                 # models.get validates the API key and model existence in ~0.1s without queuing in generation backend
                 try:
@@ -414,14 +421,14 @@ _scan_lock = asyncio.Lock()
 async def api_get_media_files():
     if _scan_lock.locked():
         raise HTTPException(status_code=429, detail="Scan in progress")
-    
+
     async with _scan_lock:
         series_path = get_setting("media_series_path", "/tv")
         movies_path = get_setting("media_movies_path", "/movies")
-        
+
         series_data = await asyncio.to_thread(scan_library_folders, series_path, "series")
         movies_data = await asyncio.to_thread(scan_library_folders, movies_path, "movies")
-        
+
         return {
             "series": series_data,
             "movies": movies_data

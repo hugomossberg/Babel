@@ -1441,29 +1441,37 @@
 
         async saveAISettings() {
           try {
-            await fetch('/api/settings/ai', {
+            const res = await fetch('/api/settings/ai', {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify(this.settingsData.ai)
             });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.detail || `Server returned ${res.status}`);
+            }
             this.showToast('AI Settings saved!');
             await this.loadAllSettings();
           } catch(e) {
-            this.showToast('Error: ' + e, 'error');
+            this.showToast('Error: ' + e.message, 'error');
           }
         },
 
         async saveModulesSettings() {
           try {
-            await fetch('/api/settings/modules', {
+            const res = await fetch('/api/settings/modules', {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify(this.settingsData.modules)
             });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.detail || `Server returned ${res.status}`);
+            }
             this.showToast('Module Settings saved!');
             await this.loadAllSettings();
           } catch(e) {
-            this.showToast('Error: ' + e, 'error');
+            this.showToast('Error: ' + e.message, 'error');
           }
         },
 
@@ -1496,42 +1504,54 @@
 
         async saveLanguagesSettings() {
           try {
-            await fetch('/api/settings/languages', {
+            const res = await fetch('/api/settings/languages', {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({languages: this.settingsData.languages})
             });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.detail || `Server returned ${res.status}`);
+            }
             this.showToast('Target Languages saved!');
           } catch(e) {
-            this.showToast('Error: ' + e, 'error');
+            this.showToast('Error: ' + e.message, 'error');
           }
         },
 
         async saveFoldersSettings() {
           try {
-            await fetch('/api/settings/folders', {
+            const res = await fetch('/api/settings/folders', {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify(this.settingsData.folders)
             });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.detail || `Server returned ${res.status}`);
+            }
             this.showToast('Folder paths saved!');
             await this.loadMediaFiles();
           } catch(e) {
-            this.showToast('Error: ' + e, 'error');
+            this.showToast('Error: ' + e.message, 'error');
           }
         },
 
         async saveIntegrationsSettings() {
           try {
-            await fetch('/api/settings/integrations', {
+            const res = await fetch('/api/settings/integrations', {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify(this.settingsData.integrations)
             });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.detail || `Server returned ${res.status}`);
+            }
             this.showToast('Settings saved!');
             await this.loadAllSettings();
           } catch(e) {
-            this.showToast('Error: ' + e, 'error');
+            this.showToast('Error: ' + e.message, 'error');
           }
         },
 
