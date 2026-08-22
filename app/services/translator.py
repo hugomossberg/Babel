@@ -66,6 +66,43 @@ import srt
 
 from app.core.db import DB_PATH, get_setting, update_job, append_job_log, save_translation_memory, get_translation_memory, get_positive_int_setting
 
+def is_safe_keep_prefilter(text: str) -> bool:
+    """
+    Fail-closed deterministic pre-filter for cues that are provably safe to KEEP unchanged
+    before sending to AI translation.
+    Matches pure numbers/timestamps, symbols, empty/formatting tags, strict acronyms,
+    and strict proper nouns according to existing policy.
+    Real dialogue is NEVER filtered.
+    """
+    if text is None:
+        return True
+    clean_text = str(text).strip()
+    clean_text = re.sub(r'<[^>]+>', '', clean_text)
+    clean_text = re.sub(r'\{[^}]+\}', '', clean_text).strip()
+    if not clean_text or clean_text == "<i></i>":
+        return True
+
+    has_letters = any(c.isalpha() for c in clean_text)
+    has_digits = any(c.isdigit() for c in clean_text)
+
+    # 1. Pure symbols / non-verbal cues (no letters, no digits)
+    if not has_letters and not has_digits:
+        return True
+
+    # 2. Pure numbers / timestamps / measurements (has digits, but NO letters)
+    if has_digits and not has_letters:
+        return True
+
+    # 3. Strict Acronyms (e.g. "FBI", "NASA", "DNA")
+    if is_deterministically_safe_keep(clean_text, "acronym"):
+        return True
+
+    # 4. Strict multi-token Proper Nouns (e.g. "John Smith")
+    if is_deterministically_safe_keep(clean_text, "proper_noun"):
+        return True
+
+    return False
+
 def get_system_instruction(target_language: str, glossary: str = "", show_title: str = "") -> str:
     glossary_section = ""
     if glossary and glossary.strip():
@@ -79,12 +116,14 @@ def get_system_instruction(target_language: str, glossary: str = "", show_title:
 Translate the numbered subtitle blocks to natural, idiomatic {target_language}.
 {glossary_section}
 STRICT RULES:
-1. Translate accurately and idiomatically into natural {target_language}.
-2. Preserve all subtitle formatting tags exactly as they appear (e.g. <i>, </i>, and ASS tags like {{\\an8}}). Do not encode them into HTML entities.
-3. If a block is empty or contains only '<i></i>', keep it exactly as '<i></i>'.
-4. If a line starts with a speaker name or label in capital letters (e.g. ALICE:, OFFICER:), keep character names intact and only translate descriptive titles if appropriate, maintaining the colon separator.
-5. You MUST return a JSON object with a key "translations" containing the array of objects with integer "id" and string "text".
-6. Keep translations concise. Split lines naturally using "\\n" if a line exceeds 42 characters, but NEVER exceed 2 lines per subtitle block. Combine or condense text if necessary.
+1. Translate accurately and idiomatically into natural {target_language}. Translate every real dialogue line into {target_language}; do not copy English dialogue unchanged.
+2. Do not classify or explain. Return translations only.
+3. Preserve character names and proper nouns where appropriate, but translate all surrounding dialogue naturally.
+4. Preserve all subtitle formatting tags exactly as they appear (e.g. <i>, </i>, and ASS tags like {{\\an8}}). Do not encode them into HTML entities.
+5. If a block is empty or contains only '<i></i>', keep it exactly as '<i></i>'.
+6. If a line starts with a speaker name or label in capital letters (e.g. ALICE:, OFFICER:), keep character names intact and only translate descriptive titles if appropriate, maintaining the colon separator.
+7. You MUST return a JSON object with a key "translations" containing the array of objects with integer "id" and string "text".
+8. Keep translations concise and natural. Split lines naturally using "\\n" if a line exceeds 42 characters, but NEVER exceed 2 lines per subtitle block. Combine or condense text if necessary.
 Example:
 {{"translations": [{{"id": 1, "text": "Translated text"}}, {{"id": 2, "text": "Translated text"}}]}}
 """
@@ -262,6 +301,7 @@ ENGLISH_COMMON_WORDS = {
     "now", "today", "tonight", "tomorrow", "yesterday",
     "sir", "ma'am", "mr", "mrs", "ms", "miss", "dr", "officer",
     "god", "lord", "jesus", "christ", "damn", "hell", "shit", "fuck",
+    "dialogue", "source", "line", "lines", "scene", "episode", "season", "part", "track",
 }
 
 def _looks_like_strict_proper_noun(text: str) -> bool:
@@ -1014,9 +1054,13 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                         update_job(job_id, processed_lines=processed_count, current_batch=f"Skipping cached lines {start_idx + 1}-{end_idx} / {total_lines}")
                 return
 
-            all_empty = all(p["text"].strip() == "<i></i>" for p in payload)
-            if all_empty:
+            all_safe_keep = all(is_safe_keep_prefilter(p["text"]) for p in payload)
+            if all_safe_keep:
                 async with state_lock:
+                    for p in payload:
+                        idx = p["id"]
+                        translated_subs[idx].content = p["text"]
+                        partial_dict[idx] = p["text"]
                     processed_count += len(payload)
                     if job_id:
                         update_job(job_id, processed_lines=processed_count, current_batch=f"Lines {start_idx + 1}-{end_idx} / {total_lines}")
@@ -1037,16 +1081,86 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                                 "translated": partial_dict.get(idx, "")
                             })
 
-                missing_payload = [p for p in payload if p["id"] not in partial_dict]
+                # Safe keep pre-filter: exclude safe KEEP items from missing_payload
+                missing_payload = []
+                orig_map = {}
+                for p in payload:
+                    idx = p["id"]
+                    if idx not in partial_dict:
+                        if is_safe_keep_prefilter(p["text"]):
+                            # Deterministically safe to keep: assign immediately
+                            translated_subs[idx].content = p["text"]
+                            partial_dict[idx] = p["text"]
+                        else:
+                            missing_payload.append(p)
+                            orig_map[idx] = p["text"]
+
                 res_dict = {}
                 if missing_payload:
+                    # 1. Main translation pass
                     results = await self.translate_batch(
                         missing_payload,
                         target_language=target_language,
                         context_lines=batch_context if batch_context else None,
                         show_title=show_title or ""
                     )
-                    res_dict = {r["id"]: r["text"] for r in results if "id" in r and "text" in r and is_usable_translation(r["text"])}
+
+                    # 2. Immediate deterministic validation (Fail-closed against echoes, empty, unmeaningful)
+                    if isinstance(results, list):
+                        for r in results:
+                            if isinstance(r, dict) and "id" in r and "text" in r:
+                                rid = r["id"]
+                                if rid in orig_map:
+                                    cand = r["text"]
+                                    if is_meaningful_translation(orig_map[rid], cand):
+                                        res_dict[rid] = cand
+
+                    # 3. First-Pass Micro Repair (Max 1 batch call for failed real dialogue cues)
+                    failed_cues = [p for p in missing_payload if p["id"] not in res_dict]
+                    if failed_cues:
+                        repair_items = []
+                        for p in failed_cues:
+                            idx = p["id"]
+                            ctx_before_parts = []
+                            for b_idx in range(max(0, idx - 2), idx):
+                                bc = subs[b_idx].content.strip()
+                                if bc and bc != "<i></i>":
+                                    btc = translated_subs[b_idx].content.strip()
+                                    if btc and btc != "<i></i>" and is_meaningful_translation(bc, btc):
+                                        ctx_before_parts.append(f"{bc} ({btc})")
+                                    else:
+                                        ctx_before_parts.append(bc)
+
+                            ctx_after_parts = []
+                            for a_idx in range(idx + 1, min(len(subs), idx + 3)):
+                                ac = subs[a_idx].content.strip()
+                                if ac and ac != "<i></i>":
+                                    ctx_after_parts.append(ac)
+
+                            repair_items.append({
+                                "id": idx,
+                                "target": p["text"],
+                                "context_before": " | ".join(ctx_before_parts) if ctx_before_parts else "(none)",
+                                "context_after": " | ".join(ctx_after_parts) if ctx_after_parts else "(none)"
+                            })
+
+                        try:
+                            repair_results = await self.first_pass_micro_repair_batch(
+                                repair_items,
+                                target_language=target_language,
+                                show_title=show_title or "",
+                                job_id=job_id
+                            )
+                            if isinstance(repair_results, list):
+                                for r in repair_results:
+                                    if isinstance(r, dict) and "id" in r and "text" in r:
+                                        rid = r["id"]
+                                        if rid in orig_map:
+                                            cand = r["text"]
+                                            if is_meaningful_translation(orig_map[rid], cand):
+                                                res_dict[rid] = cand
+                        except Exception as e:
+                            logger.warning(f"First-pass micro repair exception for batch {start_idx}: {e}")
 
                 for p in payload:
                     if p["id"] in partial_dict:
@@ -1055,12 +1169,12 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 async with state_lock:
                     for p in payload:
                         idx = p["id"]
-                        if p["text"].strip() == "<i></i>":
-                            translated_subs[idx].content = "<i></i>"
-                            partial_dict[idx] = "<i></i>"
-                        elif idx in res_dict:
+                        if idx in res_dict:
                             translated_subs[idx].content = res_dict[idx]
                             partial_dict[idx] = translated_subs[idx].content
+                        elif is_safe_keep_prefilter(p["text"]):
+                            translated_subs[idx].content = p["text"]
+                            partial_dict[idx] = p["text"]
 
                     if partial_file:
                         try:
@@ -1112,6 +1226,179 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             await asyncio.gather(*tasks)
 
         return translated_subs
+
+    @with_retry
+    async def first_pass_micro_repair_batch(
+        self,
+        repair_items: List[dict],
+        target_language: str,
+        show_title: str = "",
+        job_id: Optional[int] = None
+    ) -> List[dict]:
+        if not repair_items:
+            return []
+
+        provider = get_setting("ai_provider", "gemini").lower()
+
+        system_prompt = f"""You are a professional subtitle translator translating English dialogue to {target_language}.
+
+The following dialogue TARGET lines failed the initial translation pass because they were copied unchanged or returned with incomplete translation.
+
+Translate every TARGET line into natural, idiomatic {target_language} now.
+
+STRICT RULES:
+- Translate every TARGET into natural {target_language}.
+- Do NOT copy the English TARGET unchanged.
+- Do NOT classify.
+- Do NOT return KEEP.
+- Do NOT explain.
+- Preserve character names/proper nouns where appropriate, but translate all surrounding dialogue.
+- Keep subtitle wording concise and natural.
+- Preserve meaning and tone.
+- Return exactly one result for every requested id.
+- Never invent ids.
+- Output strict structured JSON only with a key "results" containing an array of objects with integer "id" and string "text"."""
+
+        items_formatted = []
+        for it in repair_items:
+            item_str = (
+                f"Item ID {it['id']}:\n"
+                f"CONTEXT BEFORE: {it.get('context_before', '(none)')}\n"
+                f"TARGET: {it['target']}\n"
+                f"CONTEXT AFTER: {it.get('context_after', '(none)')}"
+            )
+            items_formatted.append(item_str)
+
+        prompt = (
+            f"Show Context: {show_title}\n\n"
+            + "\n\n".join(items_formatted)
+            + f"\n\nReturn a JSON object with key 'results' containing an array of objects with integer 'id' and string 'text' for all {len(repair_items)} items."
+        )
+
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "results": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "id": {"type": "INTEGER"},
+                            "text": {"type": "STRING"}
+                        },
+                        "required": ["id", "text"]
+                    }
+                }
+            },
+            "required": ["results"]
+        }
+
+        if provider == "gemini":
+            from google import genai
+            from google.genai import types
+            api_key = get_setting("gemini_api_key", "")
+            model_name = get_setting("gemini_model", "gemini-3.5-flash-lite")
+            client = genai.Client(api_key=api_key)
+
+            config = types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                response_mime_type="application/json",
+                response_schema=schema,
+                temperature=0.1
+            )
+
+            def call_gemini(model_to_use):
+                return client.models.generate_content(
+                    model=model_to_use,
+                    contents=prompt,
+                    config=config
+                )
+
+            loop = asyncio.get_event_loop()
+            try:
+                response = await loop.run_in_executor(None, lambda: call_gemini(model_name))
+            except Exception as e:
+                if "404" in str(e) or "not found" in str(e).lower():
+                    fallback_models = ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest"]
+                    for fb in fallback_models:
+                        if fb != model_name:
+                            try:
+                                logger.warning(f"Model {model_name} failed with 404 in First-Pass Micro Repair, falling back to {fb}")
+                                response = await loop.run_in_executor(None, lambda: call_gemini(fb))
+                                break
+                            except Exception:
+                                continue
+                    else:
+                        raise e
+                else:
+                    raise e
+
+            return extract_json_safely(response.text)
+
+        elif provider == "openai":
+            import openai
+            api_key = get_setting("openai_api_key", "")
+            model_name = get_setting("openai_model", "gpt-4o-mini")
+            client = openai.OpenAI(api_key=api_key)
+
+            def call_openai(model_to_use):
+                return client.chat.completions.create(
+                    model=model_to_use,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.1
+                )
+
+            loop = asyncio.get_event_loop()
+            try:
+                response = await loop.run_in_executor(None, lambda: call_openai(model_name))
+            except Exception as e:
+                if "404" in str(e) or "model_not_found" in str(e).lower():
+                    response = await loop.run_in_executor(None, lambda: call_openai("gpt-4o-mini"))
+                else:
+                    raise e
+
+            return extract_json_safely(response.choices[0].message.content)
+
+        elif provider in ["ollama", "localai"]:
+            import httpx
+            ollama_url = get_setting("ollama_url", "http://localhost:11434").rstrip("/")
+            model_name = get_setting("ollama_model", "llama3")
+            full_prompt = f"{system_prompt}\n\n{prompt}"
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{ollama_url}/api/generate",
+                    json={"model": model_name or "llama3", "prompt": full_prompt, "format": "json", "stream": False}
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return extract_json_safely(data.get("response", "{}"))
+
+        elif provider == "deepl":
+            import httpx
+            api_key = get_setting("deepl_api_key", "")
+            if not api_key:
+                raise ValueError("DeepL API Key is not configured.")
+            from app.core.languages import get_language
+            lang_obj = get_language(target_language)
+            target_lang_code = lang_obj.deepl_code if lang_obj else target_language.upper()[:2]
+            url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
+            texts = [it["target"] for it in repair_items]
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    url,
+                    headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
+                    json={"text": texts, "target_lang": target_lang_code, "source_lang": "EN"}
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                translations = data.get("translations", [])
+                return [{"id": repair_items[i]["id"], "text": translations[i]["text"]} for i in range(min(len(repair_items), len(translations)))]
+
+        return []
 
     @with_retry
     async def fast_final_rescue_batch(

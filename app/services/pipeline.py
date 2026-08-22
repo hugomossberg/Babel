@@ -16,7 +16,7 @@ from app.services.bazarr_checker import check_existing_swedish_subtitle, check_e
 from app.services.translator import (
     SubtitleTranslator, is_usable_translation, is_meaningful_translation, ProviderUnavailableError,
     ProviderConfigurationError, get_provider_capabilities, is_deterministically_safe_keep,
-    normalize_for_compare
+    normalize_for_compare, is_safe_keep_prefilter
 )
 from app.services.jellyfin_notifier import notify_jellyfin_library_refresh
 
@@ -1000,7 +1000,7 @@ class SubtitlePipeline:
                 lang_name = lang_info["name"]
                 lang_code = lang_info["code"]
                 target_output_path = f"{base_path}.{lang_code}.srt"
-                safe_ids = []
+                safe_ids = [idx for idx, sub in enumerate(subs) if is_safe_keep_prefilter(sub.content)]
 
                 # Check Original Language Guard
                 if original_language_guard:

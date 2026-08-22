@@ -114,8 +114,9 @@ async def test_2_normalized_echoes_rejected(mock_db_settings, tmp_path, monkeypa
     en_srt = tmp_path / "Episode.S01E02.en.srt"
 
     subs = [
-        srt.Subtitle(index=1, start=timedelta(seconds=1), end=timedelta(seconds=2), content="Hello?"),
-        srt.Subtitle(index=2, start=timedelta(seconds=3), end=timedelta(seconds=4), content="Come on!")
+        srt.Subtitle(index=1, start=timedelta(seconds=1), end=timedelta(seconds=2), content="Hello, how are you?"),
+        srt.Subtitle(index=2, start=timedelta(seconds=3), end=timedelta(seconds=4), content="Come on, let's go!"),
+        srt.Subtitle(index=3, start=timedelta(seconds=5), end=timedelta(seconds=6), content="What did you say?")
     ]
     with open(en_srt, "w", encoding="utf-8") as f:
         f.write(srt.compose(subs))
@@ -129,8 +130,8 @@ async def test_2_normalized_echoes_rejected(mock_db_settings, tmp_path, monkeypa
 
     async def mock_rescue_batch(items, target_language, show_title="", attempt=1, job_id=None):
         # Always return normalized echoes
-        echoes = {0: "Hello!", 1: "<i>Come on.</i>"}
-        return [{"id": it["id"], "text": echoes[it["id"]]} for it in items]
+        echoes = {0: "Hello, how are you!", 1: "<i>Come on, let's go!</i>", 2: "what did you say?"}
+        return [{"id": it["id"], "text": echoes.get(it["id"], it["text"])} for it in items]
 
     monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
     monkeypatch.setattr(pipeline.translator, "classify_and_recover_identical", mock_classify)
@@ -210,7 +211,10 @@ async def test_4_max_two_rescue_calls(mock_db_settings, tmp_path, monkeypatch):
     video_path.touch()
     en_srt = tmp_path / "Episode.S01E04.en.srt"
 
-    subs = [srt.Subtitle(index=1, start=timedelta(seconds=1), end=timedelta(seconds=2), content="Hello?")]
+    subs = [
+        srt.Subtitle(index=1, start=timedelta(seconds=1), end=timedelta(seconds=2), content="Hello, how are you today?"),
+        srt.Subtitle(index=2, start=timedelta(seconds=3), end=timedelta(seconds=4), content="I am doing quite well, thank you.")
+    ]
     with open(en_srt, "w", encoding="utf-8") as f:
         f.write(srt.compose(subs))
 
@@ -226,7 +230,7 @@ async def test_4_max_two_rescue_calls(mock_db_settings, tmp_path, monkeypatch):
     async def mock_rescue_batch(items, target_language, show_title="", attempt=1, job_id=None):
         rescue_calls_per_loop.append(attempt)
         # Always echo
-        return [{"id": 0, "text": "Hello!"}]
+        return [{"id": it["id"], "text": it["text"]} for it in items]
 
     monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
     monkeypatch.setattr(pipeline.translator, "classify_and_recover_identical", mock_classify)
@@ -250,8 +254,8 @@ async def test_5_final_qa_still_blocks(mock_db_settings, tmp_path, monkeypatch):
     en_srt = tmp_path / "Episode.S01E05.en.srt"
 
     subs = [
-        srt.Subtitle(index=1, start=timedelta(seconds=1), end=timedelta(seconds=2), content="Hello?"),
-        srt.Subtitle(index=2, start=timedelta(seconds=3), end=timedelta(seconds=4), content="Goodbye.")
+        srt.Subtitle(index=1, start=timedelta(seconds=1), end=timedelta(seconds=2), content="Hello, how are you today?"),
+        srt.Subtitle(index=2, start=timedelta(seconds=3), end=timedelta(seconds=4), content="Goodbye, my dear friend.")
     ]
     with open(en_srt, "w", encoding="utf-8") as f:
         f.write(srt.compose(subs))
@@ -264,10 +268,10 @@ async def test_5_final_qa_still_blocks(mock_db_settings, tmp_path, monkeypatch):
         return [{"id": i["id"], "action": "translate", "reason": "none", "text": ""} for i in items]
 
     async def mock_rescue_batch(items, target_language, show_title="", attempt=1, job_id=None):
-        # Rescues id 0 ("Hej?"), but fails id 1 ("Goodbye.")
+        # Rescues id 0 ("Hej, hur mår du idag?"), but fails id 1 ("Goodbye, my dear friend.")
         return [
-            {"id": 0, "text": "Hej?"},
-            {"id": 1, "text": "Goodbye."} # untranslated
+            {"id": 0, "text": "Hej, hur mår du idag?"},
+            {"id": 1, "text": "Goodbye, my dear friend."} # untranslated
         ]
 
     monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
@@ -344,7 +348,10 @@ async def test_7_timestamps_untouched(mock_db_settings, tmp_path, monkeypatch):
 
     orig_start = timedelta(seconds=12, milliseconds=345)
     orig_end = timedelta(seconds=15, milliseconds=678)
-    subs = [srt.Subtitle(index=1, start=orig_start, end=orig_end, content="Hello?")]
+    subs = [
+        srt.Subtitle(index=1, start=orig_start, end=orig_end, content="Hello, are you there with me?"),
+        srt.Subtitle(index=2, start=timedelta(seconds=16), end=timedelta(seconds=18), content="Yes, I am right here with you.")
+    ]
     with open(en_srt, "w", encoding="utf-8") as f:
         f.write(srt.compose(subs))
 
@@ -356,7 +363,10 @@ async def test_7_timestamps_untouched(mock_db_settings, tmp_path, monkeypatch):
         return [{"id": i["id"], "action": "translate", "reason": "none", "text": ""} for i in items]
 
     async def mock_rescue_batch(items, *args, **kwargs):
-        return [{"id": 0, "text": "Hej?"}]
+        return [
+            {"id": 0, "text": "Hej, är du där med mig?"},
+            {"id": 1, "text": "Ja, jag är här med dig."}
+        ]
 
     monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
     monkeypatch.setattr(pipeline.translator, "classify_and_recover_identical", mock_classify)
@@ -370,10 +380,10 @@ async def test_7_timestamps_untouched(mock_db_settings, tmp_path, monkeypatch):
     with open(sv_srt, "r", encoding="utf-8") as f:
         published_subs = list(srt.parse(f.read()))
 
-    assert len(published_subs) == 1
+    assert len(published_subs) == 2
     assert published_subs[0].start == orig_start
     assert published_subs[0].end == orig_end
-    assert published_subs[0].content == "Hej?"
+    assert published_subs[0].content == "Hej, är du där med mig?"
 
 
 @pytest.mark.asyncio
@@ -384,8 +394,8 @@ async def test_8_malformed_missing_results(mock_db_settings, tmp_path, monkeypat
     en_srt = tmp_path / "Episode.S01E08.en.srt"
 
     subs = [
-        srt.Subtitle(index=1, start=timedelta(seconds=1), end=timedelta(seconds=2), content="Hello?"),
-        srt.Subtitle(index=2, start=timedelta(seconds=3), end=timedelta(seconds=4), content="What?")
+        srt.Subtitle(index=1, start=timedelta(seconds=1), end=timedelta(seconds=2), content="Hello, where are you going today?"),
+        srt.Subtitle(index=2, start=timedelta(seconds=3), end=timedelta(seconds=4), content="What are you doing over there?")
     ]
     with open(en_srt, "w", encoding="utf-8") as f:
         f.write(srt.compose(subs))
@@ -403,7 +413,7 @@ async def test_8_malformed_missing_results(mock_db_settings, tmp_path, monkeypat
             {"id": 999, "text": "Hittepå"},
             "corrupt_entry",
             {"id": None, "text": "No id"},
-            {"id": 0, "text": "Hej?"}
+            {"id": 0, "text": "Hej, vart är du på väg idag?"}
         ]
 
     monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
