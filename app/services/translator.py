@@ -70,8 +70,8 @@ def is_safe_keep_prefilter(text: str) -> bool:
     """
     Fail-closed deterministic pre-filter for cues that are provably safe to KEEP unchanged
     before sending to AI translation.
-    Matches pure numbers/timestamps, symbols, empty/formatting tags, strict acronyms,
-    and strict proper nouns according to existing policy.
+    Matches pure numbers/timestamps, symbols, empty/formatting tags, and strict acronyms
+    according to existing policy.
     Real dialogue is NEVER filtered.
     """
     if text is None:
@@ -95,10 +95,6 @@ def is_safe_keep_prefilter(text: str) -> bool:
 
     # 3. Strict Acronyms (e.g. "FBI", "NASA", "DNA")
     if is_deterministically_safe_keep(clean_text, "acronym"):
-        return True
-
-    # 4. Strict multi-token Proper Nouns (e.g. "John Smith")
-    if is_deterministically_safe_keep(clean_text, "proper_noun"):
         return True
 
     return False
@@ -291,17 +287,33 @@ ENGLISH_COMMON_WORDS = {
     "stay", "stays", "stayed", "staying",
     "fall", "falls", "fell", "fallen", "falling",
     "kill", "kills", "killed", "killing",
+    "shoot", "fire", "jump", "hide", "hope",
     "man", "men", "woman", "women", "boy", "boys", "girl", "girls",
     "guy", "guys", "kid", "kids", "child", "children", "baby", "babies",
     "friend", "friends", "family",
+    "dad", "mom", "papa", "mama", "father", "mother", "sister", "brother",
+    "son", "daughter", "uncle", "aunt", "cousin", "grandma", "grandpa",
     "day", "days", "night", "nights", "time", "times",
     "thing", "things", "way", "ways", "life", "world", "house", "home",
     "room", "door", "car", "head", "hand", "hands", "eye", "eyes",
+    "floor", "step", "station", "office", "point", "target", "mission", "operation",
+    "plan", "level", "channel", "route", "section", "unit", "sector", "zone",
+    "alert", "warning", "danger",
     "right", "wrong", "good", "bad", "great", "fine",
     "now", "today", "tonight", "tomorrow", "yesterday",
-    "sir", "ma'am", "mr", "mrs", "ms", "miss", "dr", "officer",
+    "sir", "ma'am", "mr", "mrs", "ms", "miss", "dr", "doctor", "officer",
+    "captain", "lieutenant", "sergeant", "colonel", "general", "major", "chief", "boss",
+    "king", "queen", "prince", "princess", "lady",
     "god", "lord", "jesus", "christ", "damn", "hell", "shit", "fuck",
     "dialogue", "source", "line", "lines", "scene", "episode", "season", "part", "track",
+    # Months & seasons & numbers as words
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+    "spring", "summer", "autumn", "fall", "winter", "rose",
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve", "twenty", "thirty", "fifty", "hundred", "thousand", "million",
+    "first", "second", "third", "last", "next",
+    "red", "green", "blue", "black", "white", "yellow", "gold", "silver",
 }
 
 def _looks_like_strict_proper_noun(text: str) -> bool:

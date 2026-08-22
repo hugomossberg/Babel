@@ -45,9 +45,9 @@ def mock_db_settings(tmp_path, monkeypatch):
     return db_path
 
 
-# Test 1: Safe deterministic KEEP cues not sent to model
+# Requirement 11 & 12: Safe deterministic KEEP cues not sent to model
 def test_1_safe_deterministic_keep_not_sent_to_model():
-    """Pure numbers, symbols, non-verbal, and strict acronyms/proper nouns are prefiltered."""
+    """Pure numbers, symbols, non-verbal, and strict acronyms are prefiltered."""
     safe_samples = [
         "123",
         "12:30:00",
@@ -59,29 +59,60 @@ def test_1_safe_deterministic_keep_not_sent_to_model():
         "   ",
         "FBI",
         "NASA",
-        "John Smith",
+        "CIA",
+        "DNA",
+        "<i>FBI</i>",
     ]
     for s in safe_samples:
         assert is_safe_keep_prefilter(s) is True, f"Expected '{s}' to be safe KEEP"
 
 
-# Test 2: Real dialogue sent to model
-def test_2_real_dialogue_sent_to_model():
-    """Real dialogue lines are never prefiltered and must be sent to AI translation."""
+# Requirement 5, 6, 7, 8, 9, 10: Real dialogue sent to model (Conservative pre-filter)
+def test_2_real_dialogue_never_prefiltered():
+    """Real dialogue, titles, names, formatting-wrapped text, numbers+words must NOT be prefiltered."""
     dialogue_samples = [
         "Hello",
+        "Hello!",
         "Right",
-        "Come on",
         "Okay",
-        "No",
         "Yes",
-        "What?",
+        "No",
         "Hey",
-        "Line 0",
-        "Dialogue line 1",
+        "What?",
+        "Why?",
+        "Come on",
+        "Let's go",
+        "Stop",
+        "Help",
+        "John?",
+        "Michael!",
+        "Jesus!",
+        "God!",
+        "Dad",
+        "Mom",
+        "Sir",
+        "Doctor",
+        "Captain",
         "Room 101",
-        "I saw 2 people.",
-        "See you tomorrow.",
+        "Line 0",
+        "Level 5",
+        "Plan B",
+        "Take 5",
+        "Channel 4",
+        "May",
+        "Will",
+        "Hope",
+        "Rose",
+        "Summer",
+        "April",
+        "March",
+        "John Smith",
+        "<i>Hello</i>",
+        "<i>Hello!</i>",
+        "<i>What?</i>",
+        "<i>Come on.</i>",
+        "HELLO",
+        "WHAT",
     ]
     for d in dialogue_samples:
         assert is_safe_keep_prefilter(d) is False, f"Expected dialogue '{d}' NOT to be filtered"
@@ -202,38 +233,41 @@ async def test_5_micro_repair_payload_contains_only_failed_dialogue_with_context
     assert res[1].content == "Andra raden"
 
 
-# Test 6: Normalized echo from main pass identified immediately
+# Requirement 1, 2, 3: Normalized echo rejection in main translation
 def test_6_normalized_echo_identified_immediately():
     """Normalized echoes are flagged as invalid translations immediately."""
     assert is_meaningful_translation("Hello?", "Hello!") is False
-    assert is_meaningful_translation("Come on", "Come on...") is False
+    assert is_meaningful_translation("Hello", "<i>Hello.</i>") is False
+    assert is_meaningful_translation("HELLO", "hello") is False
+    assert is_meaningful_translation("Come on.", "Come on!") is False
     assert is_meaningful_translation("What?", "<i>What?</i>") is False
     assert is_meaningful_translation("Hello", "Hej") is True
+    assert is_meaningful_translation("Come on", "Kom igen") is True
 
 
-# Test 7: Normalized echo from micro-repair rejected
+# Requirement 4 & 14: Normalized echo from micro-repair rejected
 @pytest.mark.asyncio
 async def test_7_normalized_echo_from_micro_repair_rejected(mock_db_settings, monkeypatch):
-    """Normalized echo from micro-repair is rejected and original remains for downstream recovery."""
+    """Normalized echo from micro-repair (e.g. Come on. -> Come on!) is rejected and original remains."""
     translator = SubtitleTranslator()
     subs = [
-        srt.Subtitle(index=1, start=timedelta(seconds=0), end=timedelta(seconds=1), content="Hello?"),
+        srt.Subtitle(index=1, start=timedelta(seconds=0), end=timedelta(seconds=1), content="Come on."),
     ]
 
     async def mock_translate_batch(items, target_language, show_title="", **kwargs):
-        return [{"id": 0, "text": "Hello?"}]
+        return [{"id": 0, "text": "Come on."}]
 
     async def mock_first_pass_micro_repair_batch(items, target_language, show_title="", **kwargs):
-        # Micro repair returns normalized echo
-        return [{"id": 0, "text": "Hello!"}]
+        # Micro repair returns normalized echo with different punctuation
+        return [{"id": 0, "text": "Come on!"}]
 
     monkeypatch.setattr(translator, "translate_batch", mock_translate_batch)
     monkeypatch.setattr(translator, "first_pass_micro_repair_batch", mock_first_pass_micro_repair_batch)
 
     res = await translator.translate_srt_content(subs, target_language="Swedish", batch_size=50)
 
-    # Remains unresolved (original Hello?) so downstream recovery handles it
-    assert res[0].content == "Hello?"
+    # Remains unresolved (original Come on.) so downstream recovery handles it
+    assert res[0].content == "Come on."
 
 
 # Test 8: Successful micro-repair updates text properly
@@ -303,7 +337,7 @@ async def test_10_cue_order_index_count_unchanged(mock_db_settings, monkeypatch)
     assert res[2].index == 3 and res[2].content == "Tre"
 
 
-# Test 11: Safe KEEP cues unaffected
+# Requirement 11 & 12: Safe KEEP cues unaffected
 @pytest.mark.asyncio
 async def test_11_safe_keep_cues_unaffected(mock_db_settings, monkeypatch):
     """Deterministic safe KEEP cues bypass translation and remain intact."""
@@ -311,7 +345,7 @@ async def test_11_safe_keep_cues_unaffected(mock_db_settings, monkeypatch):
     subs = [
         srt.Subtitle(index=1, start=timedelta(seconds=1), end=timedelta(seconds=2), content="FBI"),
         srt.Subtitle(index=2, start=timedelta(seconds=2), end=timedelta(seconds=3), content="♪"),
-        srt.Subtitle(index=3, start=timedelta(seconds=3), end=timedelta(seconds=4), content="John Smith"),
+        srt.Subtitle(index=3, start=timedelta(seconds=3), end=timedelta(seconds=4), content="123"),
     ]
 
     async def mock_translate_batch(items, target_language, show_title="", **kwargs):
@@ -323,7 +357,7 @@ async def test_11_safe_keep_cues_unaffected(mock_db_settings, monkeypatch):
     res = await translator.translate_srt_content(subs, target_language="Swedish", batch_size=50)
     assert res[0].content == "FBI"
     assert res[1].content == "♪"
-    assert res[2].content == "John Smith"
+    assert res[2].content == "123"
 
 
 # Test 12: Missing or malformed micro-repair output fails closed
@@ -546,3 +580,26 @@ async def test_19_batch_performance_behavior(mock_db_settings, monkeypatch):
         assert res[i].content == f"Lagad rad {i}"
     for i in range(5, 10):
         assert res[i].content == f"Svensk rad {i}"
+
+
+# Requirement 13 & 14: Direct comparison verification for main & micro-repair
+def test_20_meaningful_translation_semantics():
+    """Verify is_meaningful_translation handles all source vs candidate semantics properly."""
+    # Blank/whitespace
+    assert is_meaningful_translation("Hello", "") is False
+    assert is_meaningful_translation("Hello", "   ") is False
+    assert is_meaningful_translation("Hello", "<i></i>") is False
+    assert is_meaningful_translation("Hello", None) is False
+
+    # Normalized equivalents (Punctuation, casing, tags)
+    assert is_meaningful_translation("Hello?", "Hello!") is False
+    assert is_meaningful_translation("Hello", "<i>Hello.</i>") is False
+    assert is_meaningful_translation("HELLO", "hello") is False
+    assert is_meaningful_translation("Come on.", "Come on!") is False
+    assert is_meaningful_translation("What?", "<i>What?</i>") is False
+
+    # Valid translations
+    assert is_meaningful_translation("Hello", "Hej") is True
+    assert is_meaningful_translation("Come on", "Kom igen") is True
+    assert is_meaningful_translation("What?", "Vad?") is True
+    assert is_meaningful_translation("Room 101", "Rum 101") is True
