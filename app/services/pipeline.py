@@ -32,7 +32,8 @@ def qa_gate(
     translated_subs: list,
     target_lang_code: str,
     job_id: Optional[int] = None,
-    safe_ids: Optional[list] = None
+    safe_ids: Optional[list] = None,
+    show_title: str = ""
 ) -> Dict[str, Any]:
     """
     Final Quality Assurance gate. Returns a dict with:
@@ -81,12 +82,12 @@ def qa_gate(
         if is_safe_identical_line(orig_content):
             continue
         if i in safe_ids and (
-            is_deterministically_safe_keep(orig_content, "proper_noun") or
-            is_deterministically_safe_keep(orig_content, "brand") or
-            is_deterministically_safe_keep(orig_content, "acronym") or
-            is_deterministically_safe_keep(orig_content, "number") or
-            is_deterministically_safe_keep(orig_content, "symbol") or
-            is_deterministically_safe_keep(orig_content, "non_verbal")
+            is_deterministically_safe_keep(orig_content, "proper_noun", show_title=show_title) or
+            is_deterministically_safe_keep(orig_content, "brand", show_title=show_title) or
+            is_deterministically_safe_keep(orig_content, "acronym", show_title=show_title) or
+            is_deterministically_safe_keep(orig_content, "number", show_title=show_title) or
+            is_deterministically_safe_keep(orig_content, "symbol", show_title=show_title) or
+            is_deterministically_safe_keep(orig_content, "non_verbal", show_title=show_title)
         ):
             continue
         real_untranslated_ids.append(i)
@@ -1059,7 +1060,7 @@ class SubtitlePipeline:
                     # -------------------------------------------------------
                     # Bug #1, #5: FINAL QA GATE — never publish a broken file
                     # -------------------------------------------------------
-                    qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
+                    qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "")
 
                     if qa_loop_count == 1:
                         initial_candidates_count = len(qa_result.get("untranslated_ids", []))
@@ -1102,7 +1103,7 @@ class SubtitlePipeline:
                                             action = r.get("action")
                                             if action == "keep":
                                                 raw_reason = r.get("reason", "none").lower()
-                                                if is_deterministically_safe_keep(subs[idx].content, raw_reason):
+                                                if is_deterministically_safe_keep(subs[idx].content, raw_reason, show_title=title or ""):
                                                     if idx not in safe_ids:
                                                         safe_ids.append(idx)
                                                     reason_map = {
@@ -1151,7 +1152,7 @@ class SubtitlePipeline:
                                                 recovered_cues.add(idx)
 
                             # Re-run QA after primary recovery with safe_ids context
-                            qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
+                            qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "")
                             if qa_result["passed"]:
                                 break
 
@@ -1186,7 +1187,7 @@ class SubtitlePipeline:
                                     append_job_log(job_id, f"Targeted Recovery failed: {e}")
 
                                 # Re-run QA again to get the remaining stubborn cues
-                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
+                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "")
                                 real_unresolved = qa_result.get("real_untranslated_ids", [])
                                 dropped_unresolved = [d["index"] - 1 for d in qa_result.get("dropped_details", [])]
                                 all_unresolved = list(set(real_unresolved + dropped_unresolved))
@@ -1244,7 +1245,7 @@ class SubtitlePipeline:
                                     append_job_log(job_id, f"Timing: Escalation phase ({len(esc_tasks)} cues) completed in {round(t_esc_end - t_esc_start, 1)}s")
 
                                 # Final QA rerun after escalation
-                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
+                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "")
                                 if qa_result["passed"]:
                                     break
 
@@ -1377,7 +1378,7 @@ class SubtitlePipeline:
                                         append_job_log(job_id, f"Fast Final Rescue completed: {len(final_unresolved_rescue)} cues remain unresolved")
 
                                 # Final QA rerun after Fast Final Rescue
-                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
+                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "")
                                 if qa_result["passed"]:
                                     break
                                 else:

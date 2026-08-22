@@ -209,8 +209,9 @@ ENGLISH_COMMON_WORDS = {
     "it", "its", "itself", "they", "them", "their", "theirs", "themselves",
     "we", "us", "our", "ours", "ourselves", "this", "that", "these", "those",
     "what", "which", "who", "whom", "whose", "where", "when", "why", "how",
-    "all", "any", "both", "each", "few", "more", "most", "other", "some", "such",
-    "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very",
+    "all", "any", "both", "each", "few", "more", "most", "mostly", "other", "some", "such",
+    "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very", "really",
+    "just", "even", "ever", "never", "always", "almost", "still", "already", "well", "also",
     "a", "an", "the",
     # Prepositions & conjunctions
     "and", "but", "if", "or", "because", "as", "until", "while", "of", "at",
@@ -352,7 +353,7 @@ def _looks_like_strict_proper_noun(text: str) -> bool:
             return False
     return True
 
-def is_deterministically_safe_keep(text: str, reason: str) -> bool:
+def is_deterministically_safe_keep(text: str, reason: str, show_title: str = "") -> bool:
     """
     Fail-closed deterministic check to verify if a line is truly safe to KEEP unchanged.
     Returns True ONLY if deterministically defensible. Otherwise False.
@@ -423,7 +424,20 @@ def is_deterministically_safe_keep(text: str, reason: str) -> bool:
         return True
 
     elif reason == "proper_noun":
-        return _looks_like_strict_proper_noun(clean_text)
+        if _looks_like_strict_proper_noun(clean_text):
+            return True
+        if show_title and words:
+            st_lower = show_title.casefold()
+            for w in words:
+                w_lower = w.casefold()
+                if w_lower in ENGLISH_COMMON_WORDS:
+                    return False
+                if not w[0].isupper():
+                    return False
+                if w_lower not in st_lower:
+                    return False
+            return True
+        return False
 
     return False
 
@@ -446,7 +460,7 @@ def is_meaningful_translation(source_text: str, candidate_text: str) -> bool:
         return False
     return normalize_for_compare(candidate_text) != normalize_for_compare(source_text)
 
-def validate_classifier_output(raw_text: str, items: list) -> list:
+def validate_classifier_output(raw_text: str, items: list, show_title: str = "") -> list:
     logger.info(f"Classifier validation: received {len(items)} candidates. Raw type: {type(raw_text)}")
 
     valid_results = []
@@ -496,7 +510,7 @@ def validate_classifier_output(raw_text: str, items: list) -> list:
             reason = str(r.get("reason", "")).lower()
 
             if act == "keep":
-                if not is_deterministically_safe_keep(original_text, reason):
+                if not is_deterministically_safe_keep(original_text, reason, show_title=show_title):
                     logger.info(f"Classifier validation: ID {rid} downgraded KEEP->TRANSLATE (not deterministically safe: reason={reason}, text='{original_text}')")
                     act = "translate"
                     r["text"] = ""
@@ -582,7 +596,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             def do_gemini():
                 return client.models.generate_content(
                     model=model_name,
-                    contents=prompt,
+                    contents=[prompt],
                     config=types.GenerateContentConfig(
                         system_instruction=system_prompt,
                         response_mime_type="application/json",
@@ -592,7 +606,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 )
             loop = asyncio.get_event_loop()
             resp = await loop.run_in_executor(None, do_gemini)
-            return validate_classifier_output(resp.text, items)
+            return validate_classifier_output(resp.text, items, show_title=show_title)
 
         elif provider == "openai":
             import openai
@@ -614,7 +628,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             resp = await loop.run_in_executor(None, do_openai)
             try:
                 content = resp.choices[0].message.content
-                return validate_classifier_output(content, items)
+                return validate_classifier_output(content, items, show_title=show_title)
             except Exception:
                 return []
 
@@ -629,11 +643,12 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     json={"model": model_name, "prompt": full_prompt, "format": "json", "stream": False}
                 )
                 try:
-                    return validate_classifier_output(resp.json()["response"], items)
+                    return validate_classifier_output(resp.json()["response"], items, show_title=show_title)
                 except Exception:
                     return []
 
         return []
+
     def __init__(self):
         self._cached_gemini_key = None
         self._cached_gemini_client = None

@@ -55,6 +55,16 @@ def test_deterministic_safe_keep_rules():
     assert is_deterministically_safe_keep("Hmm...", "non_verbal")
     assert is_deterministically_safe_keep("Ugh!", "non_verbal")
 
+    # Proper nouns in show_title
+    assert is_deterministically_safe_keep("Millennials!", "proper_noun", show_title="Mostly 4 Millennials")
+    assert is_deterministically_safe_keep("Seinfeld", "proper_noun", show_title="Seinfeld")
+    # Common words in show_title are rejected
+    assert not is_deterministically_safe_keep("Mostly", "proper_noun", show_title="Mostly 4 Millennials")
+    assert not is_deterministically_safe_keep("Bad", "proper_noun", show_title="Breaking Bad")
+    # Single words not in show_title are rejected
+    assert not is_deterministically_safe_keep("Millennials!", "proper_noun", show_title="The Office")
+    assert not is_deterministically_safe_keep("Millennials!", "proper_noun")
+
 def test_normalize_for_compare():
     assert normalize_for_compare("Hello, World!") == normalize_for_compare("hello world")
     assert normalize_for_compare("<i>Hello</i>...") == "hello"
