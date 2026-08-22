@@ -31,13 +31,16 @@ def test_deterministic_safe_keep_rules():
     # Brand is fail-closed
     assert not is_deterministically_safe_keep("Microsoft", "brand")
 
-    # Valid acronyms and numbers
+    # Valid acronyms, tech brands and numbers
     assert is_deterministically_safe_keep("NASA", "acronym")
     assert is_deterministically_safe_keep("FBI", "acronym")
+    assert is_deterministically_safe_keep("WiFi!", "brand")
+    assert is_deterministically_safe_keep("WiFi!", "acronym")
+    assert is_deterministically_safe_keep("Wi-Fi", "acronym")
     assert is_deterministically_safe_keep("911", "number")
     assert is_deterministically_safe_keep("2026", "number")
 
-    # Non-verbal with letters must fail-closed to False
+    # Non-verbal with descriptive words must fail-closed to False
     assert not is_deterministically_safe_keep("[sighs]", "non_verbal")
     assert not is_deterministically_safe_keep("(door closes)", "non_verbal")
     assert not is_deterministically_safe_keep("[I love you]", "non_verbal")
@@ -45,6 +48,12 @@ def test_deterministic_safe_keep_rules():
     # Pure symbols/music notes without letters are True
     assert is_deterministically_safe_keep("♪ ♪", "non_verbal")
     assert is_deterministically_safe_keep("♬", "non_verbal")
+    # Valid vocalizations and sounds
+    assert is_deterministically_safe_keep("Mmm.", "non_verbal")
+    assert is_deterministically_safe_keep("Mmm!", "non_verbal")
+    assert is_deterministically_safe_keep("Ha!", "non_verbal")
+    assert is_deterministically_safe_keep("Hmm...", "non_verbal")
+    assert is_deterministically_safe_keep("Ugh!", "non_verbal")
 
 def test_normalize_for_compare():
     assert normalize_for_compare("Hello, World!") == normalize_for_compare("hello world")

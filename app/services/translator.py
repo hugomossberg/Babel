@@ -306,6 +306,12 @@ ENGLISH_COMMON_WORDS = {
     "king", "queen", "prince", "princess", "lady",
     "god", "lord", "jesus", "christ", "damn", "hell", "shit", "fuck",
     "dialogue", "source", "line", "lines", "scene", "episode", "season", "part", "track",
+    # SDH / descriptive audio sound terms
+    "sigh", "sighs", "sighing", "gasp", "gasps", "gasping", "screams", "screaming",
+    "cries", "crying", "music", "playing", "door", "closes", "closing", "opens", "opening",
+    "whispering", "chuckles", "snickers", "applause", "cheering", "groans", "groaning",
+    "grunt", "grunts", "grunting", "laughter", "laughing", "snorts", "snorting",
+    "cough", "coughs", "coughing", "sneeze", "sneezes", "sneezing",
     # Months & seasons & numbers as words
     "january", "february", "march", "april", "may", "june",
     "july", "august", "september", "october", "november", "december",
@@ -314,6 +320,20 @@ ENGLISH_COMMON_WORDS = {
     "eleven", "twelve", "twenty", "thirty", "fifty", "hundred", "thousand", "million",
     "first", "second", "third", "last", "next",
     "red", "green", "blue", "black", "white", "yellow", "gold", "silver",
+}
+
+KNOWN_NON_VERBAL_SOUNDS = {
+    "ah", "aah", "aaah", "eh", "ehh", "er", "ha", "haha", "hahaha", "heh", "hehe", "hoho",
+    "hm", "hmm", "hmmm", "ho", "huh", "mm", "mmm", "mmmm", "oh", "ooh", "oooh", "ouch",
+    "ow", "pfft", "psst", "shh", "shhh", "tsk", "tsk-tsk", "uh", "uh-huh", "uh-oh",
+    "um", "umm", "ummm", "ugh", "ughh", "whew", "whoa", "woah", "yay", "yuck", "grr", "argh"
+}
+
+KNOWN_TECH_TERMS_AND_BRANDS = {
+    "wifi", "wi-fi", "bluetooth", "youtube", "google", "tiktok", "instagram", "twitter",
+    "facebook", "netflix", "spotify", "xbox", "playstation", "iphone", "ipad", "android",
+    "gps", "usb", "vip", "tv", "dj", "pc", "sim", "pin", "led", "lcd", "ai", "vr", "hd",
+    "4k", "uhd", "dvd", "vcr", "cd", "fbi", "cia", "nasa", "dna", "nato", "unicef", "interpol"
 }
 
 def _looks_like_strict_proper_noun(text: str) -> bool:
@@ -369,28 +389,41 @@ def is_deterministically_safe_keep(text: str, reason: str) -> bool:
         return True
 
     elif reason == "non_verbal":
-        return not has_letters
+        if not has_letters:
+            return True
+        for w in words:
+            w_clean = re.sub(r"[^\w]", "", w).lower()
+            if not w_clean:
+                continue
+            if w_clean in ENGLISH_COMMON_WORDS:
+                return False
+            is_known = w_clean in KNOWN_NON_VERBAL_SOUNDS
+            is_onomatopoeia = bool(re.match(r'^(m+|h+a+|a+h+|o+h+|h+e+h+|h+m+|u+g+h+|o+o+h+|s+h+)$', w_clean))
+            if not (is_known or is_onomatopoeia):
+                return False
+        return True
 
-    elif reason == "acronym":
+    elif reason in {"acronym", "brand"}:
         if not words or not has_letters:
             return False
+        full_clean = re.sub(r"[^\w-]", "", clean_text).lower()
+        if full_clean in KNOWN_TECH_TERMS_AND_BRANDS:
+            return True
         for w in words:
             w_clean = re.sub(r"[^\w]", "", w)
             if not w_clean:
                 continue
-            if not w_clean.isupper():
+            lower = w_clean.lower()
+            if lower in ENGLISH_COMMON_WORDS:
                 return False
-            if len(w_clean) > 8:
-                return False
-            if w_clean.lower() in ENGLISH_COMMON_WORDS:
+            is_upper_acronym = w_clean.isupper() and len(w_clean) <= 8
+            is_known_tech = lower in KNOWN_TECH_TERMS_AND_BRANDS
+            if not (is_upper_acronym or is_known_tech):
                 return False
         return True
 
     elif reason == "proper_noun":
         return _looks_like_strict_proper_noun(clean_text)
-
-    elif reason == "brand":
-        return False
 
     return False
 
