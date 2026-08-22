@@ -321,6 +321,13 @@ ENGLISH_COMMON_WORDS = {
     "eleven", "twelve", "twenty", "thirty", "fifty", "hundred", "thousand", "million",
     "first", "second", "third", "last", "next",
     "red", "green", "blue", "black", "white", "yellow", "gold", "silver",
+    # Additional conversational & dialogue vocabulary
+    "party", "parties", "cool", "nice", "wow", "bad", "nah", "congratulations",
+    "here", "there", "everywhere", "nowhere", "somewhere", "everyone", "everybody",
+    "someone", "somebody", "anyone", "anybody", "nobody", "everything", "something",
+    "anything", "nothing", "soon", "later", "morning", "afternoon", "evening",
+    "hurry", "listen", "watch", "quick", "quiet", "silence", "shutup", "ready",
+    "enough", "exactly", "absolutely", "definitely", "probably", "perhaps", "certainly",
 }
 
 KNOWN_NON_VERBAL_SOUNDS = {
