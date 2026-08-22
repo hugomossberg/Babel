@@ -92,11 +92,22 @@ Example:
 def extract_json_safely(raw_text: str) -> List[dict]:
     """Robust JSON parser that extracts translations even if formatting has minor hiccups."""
     raw_text = raw_text.strip()
+    if raw_text.startswith("```"):
+        lines = raw_text.split('\n')
+        if lines[0].startswith("```"): lines = lines[1:]
+        if lines and lines[-1].startswith("```"): lines = lines[:-1]
+        raw_text = "\n".join(lines).strip()
+
     # 1. Direct parse
     try:
         data = json.loads(raw_text)
-        if isinstance(data, dict) and "translations" in data:
-            return data["translations"]
+        if isinstance(data, dict):
+            if "translations" in data and isinstance(data["translations"], list):
+                return data["translations"]
+            if "results" in data and isinstance(data["results"], list):
+                return data["results"]
+            if "items" in data and isinstance(data["items"], list):
+                return data["items"]
         if isinstance(data, list):
             return data
     except Exception:
@@ -107,15 +118,20 @@ def extract_json_safely(raw_text: str) -> List[dict]:
         repaired_text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]+', '', raw_text)
         repaired_text = re.sub(r',\s*([\]}])', r'\1', repaired_text)
         data = json.loads(repaired_text)
-        if isinstance(data, dict) and "translations" in data:
-            return data["translations"]
+        if isinstance(data, dict):
+            if "translations" in data and isinstance(data["translations"], list):
+                return data["translations"]
+            if "results" in data and isinstance(data["results"], list):
+                return data["results"]
+            if "items" in data and isinstance(data["items"], list):
+                return data["items"]
         if isinstance(data, list):
             return data
     except Exception:
         pass
 
-    # 2. Regex match for "translations": [...]
-    match = re.search(r'"translations"\s*:\s*(\[[\s\S]*?\])\s*\}?', raw_text)
+    # 2. Regex match for "translations": [...] or "results": [...] or "items": [...]
+    match = re.search(r'"(?:translations|results|items)"\s*:\s*(\[[\s\S]*?\])\s*\}?', raw_text)
     if match:
         try:
             return json.loads(match.group(1))
@@ -1096,3 +1112,194 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             await asyncio.gather(*tasks)
 
         return translated_subs
+
+    @with_retry
+    async def fast_final_rescue_batch(
+        self,
+        rescue_items: List[dict],
+        target_language: str,
+        show_title: str = "",
+        attempt: int = 1,
+        job_id: Optional[int] = None
+    ) -> List[dict]:
+        if not rescue_items:
+            return []
+
+        provider = get_setting("ai_provider", "gemini").lower()
+
+        if attempt == 2:
+            system_prompt = f"""You are repairing failed subtitle translations.
+
+Your previous response failed validation because some TARGET lines were copied from the English source.
+
+Translate the remaining TARGET lines into natural {target_language} now.
+
+IMPORTANT:
+- Do not copy the English TARGET.
+- Do not classify.
+- Do not return KEEP.
+- Do not explain.
+- Preserve names/proper nouns when appropriate, but translate all surrounding dialogue.
+- Keep subtitle wording concise and natural.
+- Preserve meaning and tone.
+- Return exactly one result for every supplied id.
+- Never invent ids.
+- Output strict structured JSON only."""
+        else:
+            system_prompt = f"""You are repairing failed subtitle translations.
+
+Translate every TARGET from English into natural {target_language}.
+
+IMPORTANT:
+- Every TARGET in this request has already failed QA because it was copied from the English source.
+- Do NOT return the English source unchanged.
+- Do NOT classify.
+- Do NOT return KEEP.
+- Do NOT explain.
+- Preserve names/proper nouns when appropriate, but translate all surrounding dialogue.
+- Keep subtitle wording concise and natural.
+- Preserve meaning and tone.
+- Return exactly one result for every supplied id.
+- Never invent ids.
+- Output strict structured JSON only."""
+
+        items_formatted = []
+        for it in rescue_items:
+            item_str = (
+                f"Item ID {it['id']}:\n"
+                f"CONTEXT BEFORE: {it.get('context_before', '(none)')}\n"
+                f"TARGET: {it['target']}\n"
+                f"CONTEXT AFTER: {it.get('context_after', '(none)')}"
+            )
+            items_formatted.append(item_str)
+
+        prompt = (
+            f"Show Context: {show_title}\n\n"
+            + "\n\n".join(items_formatted)
+            + f"\n\nReturn a JSON object with key 'results' containing an array of objects with integer 'id' and string 'text' for all {len(rescue_items)} items."
+        )
+
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "results": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "id": {"type": "INTEGER"},
+                            "text": {"type": "STRING"}
+                        },
+                        "required": ["id", "text"]
+                    }
+                }
+            },
+            "required": ["results"]
+        }
+
+        if provider == "gemini":
+            from google import genai
+            from google.genai import types
+            api_key = get_setting("gemini_api_key", "")
+            model_name = get_setting("gemini_model", "gemini-3.5-flash-lite")
+            client = genai.Client(api_key=api_key)
+
+            config = types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                response_mime_type="application/json",
+                response_schema=schema,
+                temperature=0.1
+            )
+
+            def call_gemini(model_to_use):
+                return client.models.generate_content(
+                    model=model_to_use,
+                    contents=prompt,
+                    config=config
+                )
+
+            loop = asyncio.get_event_loop()
+            try:
+                response = await loop.run_in_executor(None, lambda: call_gemini(model_name))
+            except Exception as e:
+                if "404" in str(e) or "not found" in str(e).lower():
+                    fallback_models = ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest"]
+                    for fb in fallback_models:
+                        if fb != model_name:
+                            try:
+                                logger.warning(f"Model {model_name} failed with 404 in Fast Final Rescue, falling back to {fb}")
+                                response = await loop.run_in_executor(None, lambda: call_gemini(fb))
+                                break
+                            except Exception:
+                                continue
+                    else:
+                        raise e
+                else:
+                    raise e
+
+            return extract_json_safely(response.text)
+
+        elif provider == "openai":
+            import openai
+            api_key = get_setting("openai_api_key", "")
+            model_name = get_setting("openai_model", "gpt-4o-mini")
+            client = openai.OpenAI(api_key=api_key)
+
+            def call_openai(model_to_use):
+                return client.chat.completions.create(
+                    model=model_to_use,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.1
+                )
+
+            loop = asyncio.get_event_loop()
+            try:
+                response = await loop.run_in_executor(None, lambda: call_openai(model_name))
+            except Exception as e:
+                if "404" in str(e) or "model_not_found" in str(e).lower():
+                    response = await loop.run_in_executor(None, lambda: call_openai("gpt-4o-mini"))
+                else:
+                    raise e
+
+            return extract_json_safely(response.choices[0].message.content)
+
+        elif provider in ["ollama", "localai"]:
+            import httpx
+            ollama_url = get_setting("ollama_url", "http://localhost:11434").rstrip("/")
+            model_name = get_setting("ollama_model", "llama3")
+            full_prompt = f"{system_prompt}\n\n{prompt}"
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{ollama_url}/api/generate",
+                    json={"model": model_name or "llama3", "prompt": full_prompt, "format": "json", "stream": False}
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return extract_json_safely(data.get("response", "{}"))
+
+        elif provider == "deepl":
+            import httpx
+            api_key = get_setting("deepl_api_key", "")
+            if not api_key:
+                raise ValueError("DeepL API Key is not configured.")
+            from app.core.languages import get_language
+            lang_obj = get_language(target_language)
+            target_lang_code = lang_obj.deepl_code if lang_obj else target_language.upper()[:2]
+            url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
+            texts = [it["target"] for it in rescue_items]
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    url,
+                    headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
+                    json={"text": texts, "target_lang": target_lang_code, "source_lang": "EN"}
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                translations = data.get("translations", [])
+                return [{"id": rescue_items[i]["id"], "text": translations[i]["text"]} for i in range(min(len(rescue_items), len(translations)))]
+
+        return []

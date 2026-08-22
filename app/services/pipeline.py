@@ -816,7 +816,10 @@ class SubtitlePipeline:
         # HYBRID MODE: Check Bazarr for human target subtitles
         # -------------------------------------------------------------
         if enable_bazarr and not force_retranslate:
-            bazarr_wait = wait_seconds if wait_seconds is not None else int(get_setting("wait_time_seconds", "15"))
+            if event_source == "RETRY":
+                bazarr_wait = 0
+            else:
+                bazarr_wait = wait_seconds if wait_seconds is not None else int(get_setting("wait_time_seconds", "15"))
             if bazarr_wait > 0:
                 # Trigger Bazarr search for each missing target language
                 for lang_info in langs_needing_translation:
@@ -1244,6 +1247,139 @@ class SubtitlePipeline:
                                 qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
                                 if qa_result["passed"]:
                                     break
+
+                                # 3. FAST FINAL RESCUE (Batch recovery for stubborn unresolved dialogue cues)
+                                real_unresolved = qa_result.get("real_untranslated_ids", [])
+                                dropped_unresolved = [d["index"] - 1 for d in qa_result.get("dropped_details", [])]
+                                rescue_candidate_ids = [
+                                    idx for idx in sorted(set(real_unresolved + dropped_unresolved))
+                                    if idx not in safe_ids and subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>"
+                                ]
+
+                                if rescue_candidate_ids:
+                                    total_to_rescue = len(rescue_candidate_ids)
+                                    append_job_log(job_id, f"Fast Final Rescue: attempting {total_to_rescue} unresolved dialogue cues in one batch")
+                                    t_rescue_total_start = time.time()
+
+                                    def _make_rescue_items(target_ids):
+                                        items = []
+                                        for idx in target_ids:
+                                            ctx_before_parts = []
+                                            for b_idx in range(max(0, idx - 3), idx):
+                                                bc = subs[b_idx].content.strip()
+                                                if bc and bc != "<i></i>":
+                                                    btc = translated_subs[b_idx].content.strip()
+                                                    if btc and btc != "<i></i>" and is_meaningful_translation(bc, btc):
+                                                        ctx_before_parts.append(f"{bc} (SV: {btc})")
+                                                    else:
+                                                        ctx_before_parts.append(bc)
+
+                                            ctx_after_parts = []
+                                            for a_idx in range(idx + 1, min(len(subs), idx + 4)):
+                                                ac = subs[a_idx].content.strip()
+                                                if ac and ac != "<i></i>":
+                                                    ctx_after_parts.append(ac)
+
+                                            items.append({
+                                                "id": idx,
+                                                "target": subs[idx].content,
+                                                "context_before": " | ".join(ctx_before_parts) if ctx_before_parts else "(none)",
+                                                "context_after": " | ".join(ctx_after_parts) if ctx_after_parts else "(none)"
+                                            })
+                                        return items
+
+                                    # Attempt 1
+                                    rescue_items_1 = _make_rescue_items(rescue_candidate_ids)
+                                    t_att1_start = time.time()
+                                    try:
+                                        results_1 = await self.translator.fast_final_rescue_batch(
+                                            rescue_items_1,
+                                            target_language=lang_name,
+                                            show_title=title or "",
+                                            attempt=1,
+                                            job_id=job_id
+                                        )
+                                    except Exception as e:
+                                        append_job_log(job_id, f"Fast Final Rescue attempt 1 failed: {e}")
+                                        results_1 = []
+                                    t_att1_end = time.time()
+
+                                    rec_att1_count = 0
+                                    seen_ids_1 = set()
+                                    for r in results_1:
+                                        if not isinstance(r, dict):
+                                            continue
+                                        rid = r.get("id")
+                                        if rid is None or rid not in rescue_candidate_ids:
+                                            continue
+                                        if rid in seen_ids_1:
+                                            continue
+                                        seen_ids_1.add(rid)
+                                        text = r.get("text", "")
+                                        if is_usable_translation(text) and is_meaningful_translation(subs[rid].content, text):
+                                            translated_subs[rid].content = text
+                                            recovered_cues.add(rid)
+                                            rec_att1_count += 1
+
+                                    append_job_log(job_id, f"Fast Final Rescue attempt 1: recovered {rec_att1_count}/{total_to_rescue} in {round(t_att1_end - t_att1_start, 1)}s")
+
+                                    still_unresolved_ids = [
+                                        idx for idx in rescue_candidate_ids
+                                        if not is_meaningful_translation(subs[idx].content, translated_subs[idx].content)
+                                    ]
+
+                                    # Attempt 2 (MAX ONE second attempt, only for remaining unresolved cues)
+                                    if still_unresolved_ids:
+                                        rescue_items_2 = _make_rescue_items(still_unresolved_ids)
+                                        t_att2_start = time.time()
+                                        try:
+                                            results_2 = await self.translator.fast_final_rescue_batch(
+                                                rescue_items_2,
+                                                target_language=lang_name,
+                                                show_title=title or "",
+                                                attempt=2,
+                                                job_id=job_id
+                                            )
+                                        except Exception as e:
+                                            append_job_log(job_id, f"Fast Final Rescue attempt 2 failed: {e}")
+                                            results_2 = []
+                                        t_att2_end = time.time()
+
+                                        rec_att2_count = 0
+                                        seen_ids_2 = set()
+                                        for r in results_2:
+                                            if not isinstance(r, dict):
+                                                continue
+                                            rid = r.get("id")
+                                            if rid is None or rid not in still_unresolved_ids:
+                                                continue
+                                            if rid in seen_ids_2:
+                                                continue
+                                            seen_ids_2.add(rid)
+                                            text = r.get("text", "")
+                                            if is_usable_translation(text) and is_meaningful_translation(subs[rid].content, text):
+                                                translated_subs[rid].content = text
+                                                recovered_cues.add(rid)
+                                                rec_att2_count += 1
+
+                                        append_job_log(job_id, f"Fast Final Rescue attempt 2: recovered {rec_att2_count}/{len(still_unresolved_ids)} in {round(t_att2_end - t_att2_start, 1)}s")
+
+                                    t_rescue_total_end = time.time()
+                                    final_unresolved_rescue = [
+                                        idx for idx in rescue_candidate_ids
+                                        if not is_meaningful_translation(subs[idx].content, translated_subs[idx].content)
+                                    ]
+                                    total_recovered_in_rescue = total_to_rescue - len(final_unresolved_rescue)
+
+                                    if not final_unresolved_rescue:
+                                        append_job_log(job_id, f"Fast Final Rescue completed: recovered {total_recovered_in_rescue}/{total_to_rescue} in {round(t_rescue_total_end - t_rescue_total_start, 1)}s")
+                                    else:
+                                        append_job_log(job_id, f"Fast Final Rescue completed: {len(final_unresolved_rescue)} cues remain unresolved")
+
+                                # Final QA rerun after Fast Final Rescue
+                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids)
+                                if qa_result["passed"]:
+                                    break
                                 else:
                                     # Clear partial state so next loop does a clean re-translate of failed batches
                                     import app.core.db
@@ -1254,7 +1390,8 @@ class SubtitlePipeline:
                                             with open(partial_file, "r", encoding="utf-8") as f:
                                                 pdata = json.load(f)
                                             plines = pdata.get("lines", {})
-                                            for uid in all_unresolved:
+                                            all_failed = list(set(qa_result.get("real_untranslated_ids", []) + [d["index"] - 1 for d in qa_result.get("dropped_details", [])]))
+                                            for uid in all_failed:
                                                 if str(uid) in plines:
                                                     del plines[str(uid)]
                                             tmp_p = partial_file + ".tmp"
