@@ -1467,10 +1467,10 @@
             const data = await res.json();
             if (res.ok) {
               this.bazarrTestSuccess = true;
-              this.bazarrTestResult = 'Connected';
+              this.bazarrTestResult = 'Connected' + (data.version ? ' (' + data.version + ')' : '');
             } else {
               this.bazarrTestSuccess = false;
-              this.bazarrTestResult = 'Connection failed';
+              this.bazarrTestResult = data.detail || 'Connection failed';
             }
           } catch(e) {
             this.bazarrTestSuccess = false;

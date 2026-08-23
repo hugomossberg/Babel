@@ -12,6 +12,7 @@ from app.core.db import (
     get_jobs, get_job_by_id, get_job_stats, delete_job, clear_all_jobs,
     get_setting, set_setting, get_positive_int_setting
 )
+from app.core.security import mask_secret, is_masked_secret, resolve_secret_key
 from app.services.docker_controller import docker_controller
 from app.services.bazarr_controller import bazarr_controller
 from app.services.scanner import scan_library_folders
@@ -166,12 +167,6 @@ async def api_delete_subtitles(req: DeleteSubRequest):
 
 @router.get("/settings/all")
 async def api_get_all_settings() -> Dict[str, Any]:
-    # Bug #41: Mask API keys so they aren't sent to the browser in plaintext
-    def mask_key(key: str) -> str:
-        if not key or len(key) < 8:
-            return key
-        return "••••••••" + key[-4:]
-
     raw_key = get_setting("gemini_api_key", "")
 
     langs_json = get_setting("languages", "")
@@ -192,13 +187,13 @@ async def api_get_all_settings() -> Dict[str, Any]:
     return {
         "ai": {
             "ai_provider": get_setting("ai_provider", "gemini"),
-            "gemini_api_key": mask_key(raw_key),
+            "gemini_api_key": mask_secret(raw_key),
             "has_api_key": bool(raw_key),
             "gemini_model": get_setting("gemini_model", "gemini-3.5-flash-lite"),
-            "openai_api_key": mask_key(get_setting("openai_api_key", "")),
+            "openai_api_key": mask_secret(get_setting("openai_api_key", "")),
             "has_openai_key": bool(get_setting("openai_api_key", "")),
             "openai_model": get_setting("openai_model", "gpt-4o-mini"),
-            "deepl_api_key": mask_key(get_setting("deepl_api_key", "")),
+            "deepl_api_key": mask_secret(get_setting("deepl_api_key", "")),
             "ollama_url": get_setting("ollama_url", "http://localhost:11434"),
             "ollama_model": get_setting("ollama_model", "llama3"),
             "escalation_provider": get_setting("escalation_provider", "none"),
@@ -228,13 +223,13 @@ async def api_get_all_settings() -> Dict[str, Any]:
         "integrations": {
             "enable_bazarr_check": get_setting("enable_bazarr_check", "true").lower() == "true",
             "bazarr_url": get_setting("bazarr_url", "http://bazarr:6767"),
-            "bazarr_api_key": mask_key(get_setting("bazarr_api_key", "")),
+            "bazarr_api_key": mask_secret(get_setting("bazarr_api_key", "")),
             "bazarr_container_name": get_setting("bazarr_container_name", "bazarr"),
             "bazarr_container_status": docker_info,
             "wait_time_seconds": int(get_setting("wait_time_seconds", "15")),
             "notify_jellyfin": get_setting("notify_jellyfin", "true").lower() == "true",
             "jellyfin_url": get_setting("jellyfin_url", "http://jellyfin:8096"),
-            "jellyfin_api_key": mask_key(get_setting("jellyfin_api_key", ""))
+            "jellyfin_api_key": mask_secret(get_setting("jellyfin_api_key", ""))
         }
     }
 
@@ -251,15 +246,15 @@ async def api_container_action(req: ContainerActionRequest):
 async def api_save_ai_settings(req: AISettingsRequest):
     if req.ai_provider:
         set_setting("ai_provider", req.ai_provider)
-    if req.gemini_api_key is not None and not req.gemini_api_key.startswith("••••••••"):
+    if req.gemini_api_key is not None and not is_masked_secret(req.gemini_api_key):
         set_setting("gemini_api_key", req.gemini_api_key.strip())
     if req.gemini_model:
         set_setting("gemini_model", req.gemini_model)
-    if req.openai_api_key is not None and not req.openai_api_key.startswith("••••••••"):
+    if req.openai_api_key is not None and not is_masked_secret(req.openai_api_key):
         set_setting("openai_api_key", req.openai_api_key.strip())
     if req.openai_model:
         set_setting("openai_model", req.openai_model)
-    if req.deepl_api_key is not None and not req.deepl_api_key.startswith("••••••••"):
+    if req.deepl_api_key is not None and not is_masked_secret(req.deepl_api_key):
         set_setting("deepl_api_key", req.deepl_api_key.strip())
     if req.ollama_url:
         set_setting("ollama_url", req.ollama_url.strip())
@@ -285,18 +280,14 @@ async def api_save_ai_settings(req: AISettingsRequest):
 @router.post("/settings/test-ai")
 async def api_test_ai(req: TestAIRequest):
     provider = (req.provider or "gemini").lower()
-    key = req.api_key.strip() if req.api_key else ""
-    if key.startswith("••••••••"):
-        if provider == "deepl":
-            key = get_setting("deepl_api_key", "")
-        elif provider == "openai":
-            key = get_setting("openai_api_key", "")
-        elif provider == "gemini":
-            key = get_setting("gemini_api_key", "")
+    setting_map = {
+        "deepl": "deepl_api_key",
+        "openai": "openai_api_key",
+        "gemini": "gemini_api_key",
+    }
+    key = resolve_secret_key(req.api_key, setting_map.get(provider, "gemini_api_key")) if provider in setting_map else (req.api_key.strip() if req.api_key else "")
 
     if provider == "deepl":
-        if not key:
-            key = get_setting("deepl_api_key", "")
         if not key:
             raise HTTPException(status_code=400, detail="No DeepL API Key provided or saved")
         url = "https://api-free.deepl.com/v2/usage" if key.endswith(":fx") else "https://api.deepl.com/v2/usage"
@@ -319,8 +310,6 @@ async def api_test_ai(req: TestAIRequest):
     elif provider == "openai":
         import openai
         if not key:
-            key = get_setting("openai_api_key", "")
-        if not key:
             raise HTTPException(status_code=400, detail="No OpenAI API Key provided or saved")
         try:
             client = openai.OpenAI(api_key=key)
@@ -333,8 +322,6 @@ async def api_test_ai(req: TestAIRequest):
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
     else:
-        if not key:
-            key = get_setting("gemini_api_key", "")
         if not key:
             raise HTTPException(status_code=400, detail="No Gemini API Key provided or saved")
         try:
@@ -364,7 +351,11 @@ async def api_test_ai(req: TestAIRequest):
 
 @router.post("/settings/test-bazarr")
 async def api_test_bazarr(req: TestBazarrRequest):
-    res = await bazarr_controller.get_status(req.bazarr_url, req.bazarr_api_key)
+    key = resolve_secret_key(req.bazarr_api_key, "bazarr_api_key")
+    if not key:
+        raise HTTPException(status_code=400, detail="No Bazarr API Key provided or saved")
+
+    res = await bazarr_controller.get_status(req.bazarr_url, key)
     if res.get("connected"):
         return {"status": "ok", "version": res.get("version")}
     else:
@@ -405,14 +396,14 @@ async def api_save_folders(req: MediaFoldersSettingsRequest):
 async def api_save_integrations(req: IntegrationsSettingsRequest):
     set_setting("enable_bazarr_check", "true" if req.enable_bazarr_check else "false")
     set_setting("bazarr_url", req.bazarr_url)
-    if not req.bazarr_api_key.startswith("••••••••"):
-        set_setting("bazarr_api_key", req.bazarr_api_key)
+    if not is_masked_secret(req.bazarr_api_key):
+        set_setting("bazarr_api_key", req.bazarr_api_key.strip() if req.bazarr_api_key else "")
     set_setting("bazarr_container_name", req.bazarr_container_name)
     set_setting("wait_time_seconds", str(req.wait_time_seconds))
     set_setting("notify_jellyfin", "true" if req.notify_jellyfin else "false")
     set_setting("jellyfin_url", req.jellyfin_url)
-    if not req.jellyfin_api_key.startswith("••••••••"):
-        set_setting("jellyfin_api_key", req.jellyfin_api_key)
+    if not is_masked_secret(req.jellyfin_api_key):
+        set_setting("jellyfin_api_key", req.jellyfin_api_key.strip() if req.jellyfin_api_key else "")
     return {"status": "saved"}
 
 _scan_lock = asyncio.Lock()

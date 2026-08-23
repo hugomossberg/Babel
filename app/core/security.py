@@ -56,3 +56,25 @@ def validate_media_path(target_path: str) -> str:
     if not is_safe_path(target_path):
         raise HTTPException(status_code=403, detail="Path traversal detected or path not in allowed media roots")
     return target_path
+
+def mask_secret(key: str) -> str:
+    """Masks a secret key, leaving only the last 4 characters visible."""
+    if not key or len(key) < 8:
+        return key or ""
+    return "••••••••" + key[-4:]
+
+def is_masked_secret(key: str = None) -> bool:
+    """Checks whether a string represents a masked secret."""
+    if not key:
+        return False
+    return key.startswith("••••••••")
+
+def resolve_secret_key(incoming_key: str, setting_key: str) -> str:
+    """
+    Resolves secret key: If incoming_key is masked or empty, falls back to stored DB setting.
+    If unmasked new key is provided, returns that key.
+    """
+    key = (incoming_key or "").strip()
+    if is_masked_secret(key) or not key:
+        return get_setting(setting_key, "")
+    return key

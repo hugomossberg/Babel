@@ -27,10 +27,14 @@ class BazarrController:
                     version = data.get("version")
                     ver_str = f"v{version}" if version and version != "unknown" else ""
                     return {"connected": True, "version": ver_str, "status": "running"}
-                elif res.status_code == 401:
+                elif res.status_code in (401, 403):
                     return {"connected": False, "message": "Invalid API Key"}
                 else:
                     return {"connected": False, "message": f"HTTP {res.status_code}"}
+        except httpx.TimeoutException:
+            return {"connected": False, "message": "Connection timed out"}
+        except httpx.ConnectError:
+            return {"connected": False, "message": "Unable to reach Bazarr"}
         except Exception as e:
             return {"connected": False, "message": "Connection failed"}
 
