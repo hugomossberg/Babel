@@ -1,31 +1,18 @@
-# Bug #9, #10, #46: Distributable docker-compose for Babel
-# Uses environment variables for media paths so anyone can run it.
-#
-# Usage:
-#   TV_PATH=/path/to/tv MOVIES_PATH=/path/to/movies docker compose up -d
-#
-# Or create a .env file with:
-#   TV_PATH=/data/media/tv
-#   MOVIES_PATH=/data/media/movies
-
 services:
   babel:
-    build: .
-    image: babel:latest
+    image: ghcr.io/hugomossberg/babel:beta
     container_name: babel
+    ports:
+      - "${BABEL_PORT:-8765}:8765"
     environment:
       - TZ=${TZ:-UTC}
-      - PORT=8765
-      - BABEL_DB_PATH=/app/data/babel.db
       - BABEL_AUTH_USERNAME=${BABEL_AUTH_USERNAME:-}
       - BABEL_AUTH_PASSWORD=${BABEL_AUTH_PASSWORD:-}
       - BABEL_WEBHOOK_SECRET=${BABEL_WEBHOOK_SECRET:-}
     volumes:
       - ./data:/app/data
-      - ${TV_PATH:-/data/media/tv}:/tv
-      - ${MOVIES_PATH:-/data/media/movies}:/movies
-    ports:
-      - "${BABEL_PORT:-8765}:8765"
+      - ${TV_PATH:-/path/to/tv}:/tv
+      - ${MOVIES_PATH:-/path/to/movies}:/movies
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8765/health || exit 1"]
