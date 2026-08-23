@@ -23,20 +23,27 @@ It automatically finds the best available subtitle source, translates missing la
 
 ## Screenshots
 
+See Babel in action - from automated Sonarr/Radarr jobs to the pipeline that handles subtitle sourcing, translation, QA, and publishing in the background.
+
 ### Activity Dashboard
 
-Real-time overview of automated subtitle jobs triggered by Sonarr and Radarr.
+Track automated subtitle jobs in real time, including source, status, cue count, and end-to-end processing time.
 
-![Babel Activity Dashboard](docs/screenshots/activity-dashboard.png)
+<p align="center">
+  <img src="docs/screenshots/activity-dashboard.png" alt="Babel Activity Dashboard" width="100%">
+</p>
 
 ### Connect-and-Forget Pipeline
 
-Configure Babel's automated pipeline, including Bazarr Hybrid Mode, AI fallback, and media server integration.
+Connect your media stack once and let Babel handle the fallback flow. In Hybrid Mode, Bazarr gets the first chance to find a human-made subtitle while Babel prepares the AI fallback in parallel. If Bazarr succeeds, AI is skipped. If not, Babel continues automatically.
 
-![Babel Pipeline Settings](docs/screenshots/pipeline-settings.png)
+<p align="center">
+  <img src="docs/screenshots/pipeline-settings.png" alt="Babel Connect-and-Forget Pipeline" width="100%">
+</p>
+
+> **Import -> subtitle search -> fallback preparation -> translate if needed -> recovery -> QA -> publish.**
 
 ---
-
 
 ## Why Babel?
 
