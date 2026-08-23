@@ -23,7 +23,7 @@ It automatically finds the best available subtitle source, translates missing la
 
 ## Screenshots
 
-See Babel in action - from automated Sonarr/Radarr jobs to the pipeline that handles subtitle sourcing, translation, QA, and publishing in the background.
+See Babel in action - from automated Sonarr/Radarr jobs to a fully unattended subtitle pipeline for sourcing, translation, recovery, QA, and publishing.
 
 ### Activity Dashboard
 
@@ -41,7 +41,7 @@ Connect your media stack once and let Babel handle the fallback flow. In Hybrid 
   <img src="docs/screenshots/pipeline-settings.png" alt="Babel Connect-and-Forget Pipeline" width="100%">
 </p>
 
-> **Import -> subtitle search -> fallback preparation -> translate if needed -> recovery -> QA -> publish.**
+Import -> search -> prepare fallback -> translate if needed -> recover -> validate -> publish
 
 ---
 
