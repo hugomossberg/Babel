@@ -1604,7 +1604,16 @@ CRITICAL INSTRUCTIONS:
                                                 recovered_micro_count += 1
                             if job_id:
                                 append_job_log(job_id, f"First-Pass Micro Repair: evaluated {len(failed_cues)} missing/identical cues (batch {start_idx + 1}-{end_idx}) -> recovered {recovered_micro_count}/{len(failed_cues)}")
+                        except (ProviderUnavailableError, ProviderConfigurationError):
+                            raise
                         except Exception as e:
+                            err_str = str(e).lower()
+                            permanent = any(x in err_str for x in [
+                                "401", "403", "unauthorized", "forbidden", "api key not valid",
+                                "invalid api key", "not configured", "model_not_found", "permission_denied"
+                            ])
+                            if permanent:
+                                raise ProviderConfigurationError(f"Permanent provider configuration error in micro repair: {str(e)}")
                             logger.warning(f"First-pass micro repair exception for batch {start_idx + 1}-{end_idx}: {e}")
                             if job_id:
                                 append_job_log(job_id, f"First-Pass Micro Repair failed for batch {start_idx + 1}-{end_idx}: {e}")

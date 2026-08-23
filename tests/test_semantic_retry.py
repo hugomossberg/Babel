@@ -3,7 +3,7 @@ import os
 import srt
 import json
 from datetime import timedelta
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 import app.services.translator
 from app.services.translator import (
@@ -209,6 +209,7 @@ async def test_targeted_recovery_rejects_normalized_echo(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
     monkeypatch.setattr(pipeline.translator, "classify_and_recover_identical", mock_classify)
     monkeypatch.setattr(SubtitleTranslator, "escalate_single_line", mock_escalate_single_line)
+    monkeypatch.setattr(SubtitleTranslator, "first_pass_micro_repair_batch", AsyncMock(return_value=[]))
 
     res = await pipeline.process_video_file(str(video_path), event_source="MANUAL")
     assert res["status"] != "failed"
@@ -279,6 +280,7 @@ async def test_pipeline_escalation_defense_in_depth(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
     monkeypatch.setattr(pipeline.translator, "classify_and_recover_identical", mock_classify)
     monkeypatch.setattr(SubtitleTranslator, "escalate_single_line", mock_escalate_single_line)
+    monkeypatch.setattr(SubtitleTranslator, "first_pass_micro_repair_batch", AsyncMock(return_value=[]))
 
     res = await pipeline.process_video_file(str(video_path), event_source="MANUAL")
 

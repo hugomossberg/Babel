@@ -929,31 +929,38 @@ class SubtitlePipeline:
                 # Bug #13: Don't return after first embedded target — continue loop
                 if extract_target_embedded:
                     if not os.path.exists(target_output_path):
-                        temp_target_path = f"{target_output_path}.tmp_embed"
-                        extracted_target = extract_embedded_srt(video_path, temp_target_path, preferred_lang=lang_code)
-                        if extracted_target and os.path.exists(temp_target_path):
-                            # Always validate extracted embedded target, regardless of auto_repair setting
-                            health = evaluate_subtitle_health(temp_target_path, target_lang_code=lang_code)
-                            status = health.get("status", "UNKNOWN")
+                        temp_target_path = f"{target_output_path}.tmp_embed.{uuid.uuid4().hex}"
+                        published = False
+                        try:
+                            extracted = await asyncio.to_thread(extract_embedded_srt, video_path, temp_target_path, preferred_lang=lang_code)
+                            if extracted and os.path.exists(temp_target_path):
+                                # Always validate extracted embedded target, regardless of auto_repair setting
+                                health = evaluate_subtitle_health(temp_target_path, target_lang_code=lang_code)
+                                status = health.get("status", "UNKNOWN")
 
-                            if status == "GREEN":
-                                os.replace(temp_target_path, target_output_path)
-                                append_job_log(job_id, f"Extracted healthy embedded {lang_name} track to {os.path.basename(target_output_path)}.")
-                                continue
-                            elif status == "YELLOW":
-                                append_job_log(job_id, f"Extracted embedded {lang_name} track is YELLOW ({health.get('reason')}). Queuing for deeper QA validation.")
+                                if status == "GREEN":
+                                    # Check if external target appeared while extraction was running
+                                    concurrent_existing = find_external_subtitle(video_path, lang_code)
+                                    target_to_check = concurrent_existing or (target_output_path if os.path.exists(target_output_path) else None)
+                                    if target_to_check and os.path.exists(target_to_check):
+                                        curr_health = evaluate_subtitle_health(target_to_check, target_lang_code=lang_code)
+                                        if curr_health.get("status") == "GREEN":
+                                            append_job_log(job_id, f"External healthy {lang_name} subtitle appeared during embedded extraction. Preserving external subtitle.")
+                                            continue
+                                    os.replace(temp_target_path, target_output_path)
+                                    published = True
+                                    append_job_log(job_id, f"Extracted healthy embedded {lang_name} track to {os.path.basename(target_output_path)}.")
+                                    continue
+                                elif status == "YELLOW":
+                                    append_job_log(job_id, f"Extracted embedded {lang_name} track is YELLOW ({health.get('reason')}). Queuing for deeper QA validation.")
+                                else:
+                                    append_job_log(job_id, f"Extracted embedded {lang_name} track rejected: {status} ({health.get('reason', 'Unknown error')}).")
+                        finally:
+                            if not published and os.path.exists(temp_target_path):
                                 try:
                                     os.remove(temp_target_path)
                                 except Exception:
                                     pass
-                                # Fall through to append to langs_needing_translation
-                            else:
-                                append_job_log(job_id, f"Extracted embedded {lang_name} track rejected: {status} ({health.get('reason', 'Unknown error')}).")
-                                try:
-                                    os.remove(temp_target_path)
-                                except Exception:
-                                    pass
-                                # Fall through to append to langs_needing_translation
 
                 # This language needs translation
                 langs_needing_translation.append(lang_info)
@@ -1021,7 +1028,7 @@ class SubtitlePipeline:
         # PRIORITY 1: Embedded English inside Video (Best sync guarantee)
         if extract_source_embedded:
             append_job_log(job_id, "Checking video container for embedded English track (Priority 1: Best Sync)...")
-            extracted = extract_embedded_srt(video_path, temp_extracted_srt, preferred_lang="eng")
+            extracted = await asyncio.to_thread(extract_embedded_srt, video_path, temp_extracted_srt, preferred_lang="eng")
             if extracted and os.path.exists(temp_extracted_srt):
                 append_job_log(job_id, "Successfully extracted embedded English track from video.")
                 try:
@@ -1134,7 +1141,7 @@ class SubtitlePipeline:
 
             primary_audio_lang = "und"
             if original_language_guard:
-                mkv_info = inspect_mkv_tracks(video_path)
+                mkv_info = await asyncio.to_thread(inspect_mkv_tracks, video_path)
                 # Bug #32: Better audio track detection — prefer default, skip forced/commentary
                 for audio in mkv_info.get("audio", []):
                     audio_title = (audio.get("title") or "").lower()

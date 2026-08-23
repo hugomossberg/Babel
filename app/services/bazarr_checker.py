@@ -27,15 +27,49 @@ def find_external_subtitle(video_path: str, lang_code: str) -> Optional[str]:
             if "forced" not in p.lower() and "signs" not in p.lower() and "songs" not in p.lower():
                 return p
 
-    # 2. Fuzzy glob search
+    # 2. Strict boundary directory search
     if os.path.exists(directory):
-        for f in glob.glob(os.path.join(directory, f"{glob.escape(base_name)}*.srt")):
-            fname = os.path.basename(f).lower()
-            # Do NOT include bare .srt match. It must have the lang suffix.
-            for suffix in suffixes:
-                if f"{suffix}." in fname and os.path.getsize(f) > 100:
-                    if "forced" not in fname.lower() and "signs" not in fname.lower() and "songs" not in fname.lower():
-                        return f
+        base_name_lower = base_name.lower()
+        if lang_obj:
+            target_aliases = [a.lower() for a in lang_obj.aliases]
+        else:
+            target_aliases = [lang_code.lower()]
+
+        try:
+            for fname in os.listdir(directory):
+                fname_lower = fname.lower()
+                if not fname_lower.endswith(".srt"):
+                    continue
+                if ".temp" in fname_lower or ".tmp" in fname_lower or ".babel-replaced" in fname_lower:
+                    continue
+                if not fname_lower.startswith(base_name_lower):
+                    continue
+                remainder = fname_lower[len(base_name_lower):]
+                # Remainder must start with '.' (strict boundary) and end with '.srt'
+                if not remainder.startswith(".") or not remainder.endswith(".srt"):
+                    continue
+                middle = remainder[1:-4]
+                if not middle:
+                    continue
+                parts = middle.split(".")
+                if any(tag in ["forced", "signs", "songs"] for tag in parts):
+                    continue
+
+                matched = False
+                for lang in target_aliases:
+                    if lang in parts:
+                        matched = True
+                        break
+                    if any(p.startswith(f"{lang}-") or p.startswith(f"{lang}_") for p in parts):
+                        matched = True
+                        break
+
+                if matched:
+                    full_p = os.path.join(directory, fname)
+                    if os.path.getsize(full_p) > 100:
+                        return full_p
+        except Exception:
+            pass
 
     return None
 

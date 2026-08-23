@@ -38,6 +38,7 @@ def mock_db_settings(monkeypatch, tmp_path):
     async def mock_escalate_none(*args, **kwargs):
         return None
     monkeypatch.setattr("app.services.translator.SubtitleTranslator.escalate_single_line", mock_escalate_none)
+    monkeypatch.setattr("app.services.translator.SubtitleTranslator.first_pass_micro_repair_batch", AsyncMock(return_value=[]))
 
 
 @pytest.mark.asyncio

@@ -123,7 +123,7 @@ async def test_bazarr_series_lookup_dict_and_list_payloads(monkeypatch):
 # 2. STRATIFIED LANGUAGE QA SAMPLING (Whole subtitle distribution)
 # ===========================================================================
 def test_stratified_language_qa_sampling_half_english():
-    """Verify that subtitles where English dialogue is present in the second half are flagged."""
+    """Verify that subtitles where English dialogue is present in the second half (>90 cues) are flagged."""
     swedish_phrases = [
         "Hej, välkommen hit idag.",
         "Hur mår du egentligen?",
@@ -140,17 +140,19 @@ def test_stratified_language_qa_sampling_half_english():
     ]
 
     subs = []
-    # First 30 cues: Swedish
-    for i in range(30):
+    # First 80 cues: Swedish
+    for i in range(80):
         subs.append(srt.Subtitle(i + 1, timedelta(seconds=i * 2), timedelta(seconds=i * 2 + 1), swedish_phrases[i % len(swedish_phrases)]))
-    # Next 30 cues: English (representing a drop/hallucination in second half)
-    for i in range(30, 60):
-        subs.append(srt.Subtitle(i + 1, timedelta(seconds=i * 2), timedelta(seconds=i * 2 + 1), english_phrases[(i - 30) % len(english_phrases)]))
+    # Next 70 cues: English (representing a drop/hallucination in second half, total 150 cues > 90)
+    for i in range(80, 150):
+        subs.append(srt.Subtitle(i + 1, timedelta(seconds=i * 2), timedelta(seconds=i * 2 + 1), english_phrases[(i - 80) % len(english_phrases)]))
 
     # Stratified language check
     res = check_language_representative(subs, target_lang_code="sv")
     # The end stratum is 100% English, so confident_wrong_language should be True
-    assert res.get("confident_wrong_language") is True or res.get("detected_lang") != "sv"
+    assert res.get("confident_wrong_language") is True
+    assert res.get("detected_lang") == "en"
+    assert res.get("section") in {"end", "overall"}
 
 
 def test_stratified_language_qa_sampling_all_swedish():

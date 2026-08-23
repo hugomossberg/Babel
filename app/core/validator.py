@@ -4,10 +4,11 @@ import srt
 from typing import Dict, Any, List, Tuple, Optional
 
 SWEDISH_COMMON_WORDS = {
-    "och", "att", "det", "som", "på", "är", "en", "av", "för", "med", "till", "den", 
-    "har", "de", "inte", "om", "ett", "men", "var", "jag", "ska", "här", "vi", "du", 
-    "han", "hon", "vad", "kan", "man", "från", "nu", "så", "hur", "när", "mig", "dig",
-    "alla", "bara", "där", "blir", "blev", "vill", "kommer", "efter", "något", "mycket"
+    "och", "att", "det", "som", "på", "är", "av", "för", "med", "till", "den", 
+    "har", "de", "inte", "om", "ett", "var", "jag", "ska", "här", "vi", "du", 
+    "han", "hon", "vad", "kan", "från", "nu", "så", "hur", "när", "mig", "dig",
+    "alla", "bara", "där", "blir", "blev", "vill", "kommer", "efter", "något", "mycket",
+    "också", "skulle", "kunde", "måste", "henne", "honom", "deras", "våra", "inget"
 }
 
 import langdetect
@@ -122,8 +123,8 @@ def check_language_representative(sub_blocks: List[srt.Subtitle], target_lang_co
         det = lang_info["lang"]
         conf = lang_info["confidence"]
 
-        # Check Swedish fallback
-        if target_norm == "sv" and det != "sv":
+        # Check Swedish fallback for ambiguous Scandinavian / unknown detection only
+        if target_norm == "sv" and det in {"no", "da", "unknown"}:
             words = set(re.findall(r"\b\w+\b", full_sample_text.lower()))
             if len(words & SWEDISH_COMMON_WORDS) >= 2:
                 det = "sv"
@@ -147,7 +148,7 @@ def check_language_representative(sub_blocks: List[srt.Subtitle], target_lang_co
             det = lang_info["lang"]
             conf = lang_info["confidence"]
 
-            if target_norm == "sv" and det != "sv":
+            if target_norm == "sv" and det in {"no", "da", "unknown"}:
                 words = set(re.findall(r"\b\w+\b", sec_text.lower()))
                 if len(words & SWEDISH_COMMON_WORDS) >= 2:
                     det = "sv"
@@ -166,7 +167,7 @@ def check_language_representative(sub_blocks: List[srt.Subtitle], target_lang_co
     lang_info = detect_language_heuristics(" ".join(samples["all"]))
     det = lang_info["lang"]
     conf = lang_info["confidence"]
-    if target_norm == "sv" and det != "sv":
+    if target_norm == "sv" and det in {"no", "da", "unknown"}:
         words = set(re.findall(r"\b\w+\b", full_sample_text.lower()))
         if len(words & SWEDISH_COMMON_WORDS) >= 2:
             det = "sv"
