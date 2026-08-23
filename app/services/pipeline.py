@@ -118,67 +118,14 @@ def qa_gate(
         if trans == orig or (norm_orig and norm_orig == norm_trans):
             untranslated_ids.append(i)
 
-    def is_safe_identical_line(text: str) -> bool:
-        stripped = text.strip()
-        # siffror / symboler
-        if not any(c.isalpha() for c in stripped):
-            return True
-        return False
-
-    # Defense-in-depth: safe_ids are only honored if deterministically safe or backed by same-run evidence / context verification
-    real_untranslated_ids = []
-    for i in untranslated_ids:
-        orig_content = source_subs[i].content
-        if is_safe_identical_line(orig_content):
-            continue
-        if i in safe_ids and (
-            is_deterministically_safe_keep(orig_content, "proper_noun", show_title=show_title) or
-            is_deterministically_safe_keep(orig_content, "brand", show_title=show_title) or
-            is_deterministically_safe_keep(orig_content, "acronym", show_title=show_title) or
-            is_deterministically_safe_keep(orig_content, "number", show_title=show_title) or
-            is_deterministically_safe_keep(orig_content, "symbol", show_title=show_title) or
-            is_deterministically_safe_keep(orig_content, "non_verbal", show_title=show_title) or
-            has_entity_evidence(orig_content, source_subs, translated_subs, target_idx=i) or
-            (context_verified_ids is not None and i in context_verified_ids and is_strictly_valid_entity_candidate(orig_content))
-        ):
-            continue
-        real_untranslated_ids.append(i)
-
-    if real_untranslated_ids:
-        pct = round(len(real_untranslated_ids) / min_len * 100, 1) if min_len > 0 else 0
-        issues.append(f"{len(real_untranslated_ids)} lines ({pct}%) still contain original English text")
-        # Small number is warning, large number is failure
-        if pct > 5.0:
-            score -= 40
-        elif pct > 1.0:
-            score -= 20
-        else:
-            score -= 5
-
-    # 3. Check for completely empty translations (dropped lines)
-    dropped_count, dropped_details = check_dropped_lines(source_subs, translated_subs)
-    if dropped_count > 0:
-        pct = round(dropped_count / total_source * 100, 1) if total_source > 0 else 0
-        issues.append(f"{dropped_count} lines ({pct}%) were dropped (empty in translation)")
-        if pct > 2.0:
-            score -= 30
-        else:
-            score -= 10
-
-    # 4. Verify sync (every cue must match)
-    sync_report = verify_sync(source_subs, translated_subs)
-    max_drift = max(sync_report.get("start_diff_ms", 0), sync_report.get("end_diff_ms", 0))
-    if max_drift > 0:
-        issues.append(f"Timestamp drift detected: {max_drift}ms")
-        if max_drift > 500:
-            score -= 30
-        elif max_drift > 50:
-            score -= 10
-
-    # 5. Målspråkskontroll (Semantisk)
+    # 2. Målspråkskontroll (Semantisk)
     confident_wrong_language = False
+    wrong_language_ids = []
+    legit_foreign_ids = set()
     if translated_subs:
-        lang_check = check_language_representative(translated_subs, target_lang_code)
+        lang_check = check_language_representative(translated_subs, target_lang_code, source_sub_blocks=source_subs)
+        wrong_language_ids = lang_check.get("wrong_language_cue_ids", [])
+        legit_foreign_ids = set(lang_check.get("legit_foreign_cue_ids", []))
         if lang_check["confident_wrong_language"]:
             confident_wrong_language = True
             detected = lang_check["detected_lang"]
@@ -193,6 +140,67 @@ def qa_gate(
             if detected != "unknown" and detected != target_norm and conf < 0.8:
                 warnings.append(f"Low confidence language detection: expected {target_lang_code}, detected {detected} ({conf*100:.0f}% confidence)")
                 score -= 10
+
+    # 3. Kontrollera identiska linjer (real_untranslated_ids)
+    def is_safe_identical_line(text: str) -> bool:
+        stripped = text.strip()
+        # siffror / symboler
+        if not any(c.isalpha() for c in stripped):
+            return True
+        return False
+
+    # Defense-in-depth: safe_ids are only honored if deterministically safe or backed by same-run evidence / context verification
+    real_untranslated_ids = []
+    for i in untranslated_ids:
+        orig_content = source_subs[i].content
+        if is_safe_identical_line(orig_content):
+            continue
+        if i in legit_foreign_ids:
+            continue
+        if i in safe_ids and (
+            is_deterministically_safe_keep(orig_content, "proper_noun", show_title=show_title) or
+            is_deterministically_safe_keep(orig_content, "brand", show_title=show_title) or
+            is_deterministically_safe_keep(orig_content, "acronym", show_title=show_title) or
+            is_deterministically_safe_keep(orig_content, "number", show_title=show_title) or
+            is_deterministically_safe_keep(orig_content, "symbol", show_title=show_title) or
+            is_deterministically_safe_keep(orig_content, "non_verbal", show_title=show_title) or
+            has_entity_evidence(orig_content, source_subs, translated_subs, target_idx=i) or
+            (context_verified_ids is not None and i in context_verified_ids and is_strictly_valid_entity_candidate(orig_content))
+        ):
+            continue
+
+        real_untranslated_ids.append(i)
+
+    if real_untranslated_ids:
+        pct = round(len(real_untranslated_ids) / min_len * 100, 1) if min_len > 0 else 0
+        issues.append(f"{len(real_untranslated_ids)} lines ({pct}%) still contain original English text")
+        # Small number is warning, large number is failure
+        if pct > 5.0:
+            score -= 40
+        elif pct > 1.0:
+            score -= 20
+        else:
+            score -= 5
+
+    # 4. Check for completely empty translations (dropped lines)
+    dropped_count, dropped_details = check_dropped_lines(source_subs, translated_subs)
+    if dropped_count > 0:
+        pct = round(dropped_count / total_source * 100, 1) if total_source > 0 else 0
+        issues.append(f"{dropped_count} lines ({pct}%) were dropped (empty in translation)")
+        if pct > 2.0:
+            score -= 30
+        else:
+            score -= 10
+
+    # 5. Verify sync (every cue must match)
+    sync_report = verify_sync(source_subs, translated_subs)
+    max_drift = max(sync_report.get("start_diff_ms", 0), sync_report.get("end_diff_ms", 0))
+    if max_drift > 0:
+        issues.append(f"Timestamp drift detected: {max_drift}ms")
+        if max_drift > 500:
+            score -= 30
+        elif max_drift > 50:
+            score -= 10
 
     # 6. Valid SRT structure
     structure_valid = True
@@ -285,6 +293,7 @@ def qa_gate(
         "warnings": warnings,
         "untranslated_ids": untranslated_ids,  # Keep full list for recovery attempts
         "real_untranslated_ids": real_untranslated_ids,
+        "wrong_language_ids": wrong_language_ids,
         "preserved_untranslated_ids": preserved_untranslated_ids,
         "dropped_count": dropped_count,
         "dropped_details": dropped_details,
@@ -298,6 +307,7 @@ def qa_gate(
             "semantic_passed": (qa_status in {QA_STATUS_PASS, QA_STATUS_PASS_WITH_WARNINGS}),
             "failure_type": failure_type,
             "confident_wrong_language": confident_wrong_language,
+            "wrong_language_ids": wrong_language_ids,
         }
     }
 
@@ -1242,7 +1252,11 @@ class SubtitlePipeline:
                     if qa_result["passed"]:
                         break  # Clean PASS! Exit the recovery loop.
 
-                    current_unresolved_set = set(qa_result.get("real_untranslated_ids", []) + [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])])
+                    current_unresolved_set = set(
+                        qa_result.get("real_untranslated_ids", []) +
+                        qa_result.get("wrong_language_ids", []) +
+                        [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])]
+                    )
 
                     # Stagnation Guard: If unresolved set is unchanged and 0 new cues were recovered, break immediately
                     if previous_unresolved_set is not None and current_unresolved_set == previous_unresolved_set and len(recovered_cues) == recovered_at_loop_start:
@@ -1253,8 +1267,8 @@ class SubtitlePipeline:
                     previous_unresolved_set = set(current_unresolved_set)
                     recovered_at_loop_start = len(recovered_cues)
 
-                    # Attempt recovery for any untranslated or dropped lines
-                    if qa_result["untranslated_ids"] or qa_result.get("dropped_count", 0) > 0:
+                    # Attempt recovery for any untranslated, wrong-language or dropped lines
+                    if qa_result["untranslated_ids"] or qa_result.get("dropped_count", 0) > 0 or qa_result.get("wrong_language_ids"):
                         try:
                             # 1. Primary Recovery for Identical lines (English still present)
                             if qa_result["untranslated_ids"]:
@@ -1361,10 +1375,11 @@ class SubtitlePipeline:
                             if qa_result["passed"]:
                                 break
 
-                            # 2. Escalation Stage: Contextual Single-Line Recovery (Dropped + Unresolved Identical)
+                            # 2. Escalation Stage: Contextual Single-Line Recovery (Dropped + Unresolved Identical + Wrong Language)
                             real_unresolved = qa_result.get("real_untranslated_ids", [])
+                            wrong_lang_unresolved = qa_result.get("wrong_language_ids", [])
                             dropped_unresolved = [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])]
-                            all_unresolved = list(set(real_unresolved + dropped_unresolved))
+                            all_unresolved = list(set(real_unresolved + wrong_lang_unresolved + dropped_unresolved))
                             all_unresolved.sort()
 
                             if all_unresolved:
@@ -1388,6 +1403,8 @@ class SubtitlePipeline:
                                     append_job_log(job_id, f"Targeted Recovery: translated {targeted_success}/{len(all_unresolved)}")
                                     if targeted_success > 0:
                                         recovered_at_loop_start = -1  # Mark progress
+                                    else:
+                                        append_job_log(job_id, f"Targeted Recovery: 0/{len(all_unresolved)} cues translated.")
                                 except (ProviderUnavailableError, ProviderConfigurationError):
                                     raise
                                 except Exception as e:
@@ -1396,8 +1413,9 @@ class SubtitlePipeline:
                                 # Re-run QA again to get the remaining stubborn cues
                                 qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids, allow_warnings=False)
                                 real_unresolved = qa_result.get("real_untranslated_ids", [])
+                                wrong_lang_unresolved = qa_result.get("wrong_language_ids", [])
                                 dropped_unresolved = [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])]
-                                all_unresolved = list(set(real_unresolved + dropped_unresolved))
+                                all_unresolved = list(set(real_unresolved + wrong_lang_unresolved + dropped_unresolved))
                                 all_unresolved.sort()
 
                             if all_unresolved:
@@ -1421,7 +1439,7 @@ class SubtitlePipeline:
                                         try:
                                             esc_text = await self.translator.escalate_single_line(
                                                 idx, target_text, prev_text, next_text, lang_name, effective_tm_key or title or "",
-                                                is_real_untranslated=(idx in real_unresolved),
+                                                is_real_untranslated=(idx in real_unresolved or idx in wrong_lang_unresolved),
                                                 job_id=job_id,
                                                 exhausted_strategies=exhausted_strategies
                                             )
@@ -1460,9 +1478,10 @@ class SubtitlePipeline:
 
                                 # 3. FAST FINAL RESCUE (Batch recovery for stubborn unresolved dialogue cues)
                                 real_unresolved = qa_result.get("real_untranslated_ids", [])
+                                wrong_lang_unresolved = qa_result.get("wrong_language_ids", [])
                                 dropped_unresolved = [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])]
                                 rescue_candidate_ids = [
-                                    idx for idx in sorted(set(real_unresolved + dropped_unresolved))
+                                    idx for idx in sorted(set(real_unresolved + wrong_lang_unresolved + dropped_unresolved))
                                     if idx not in safe_ids and subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>"
                                 ]
 
@@ -1604,7 +1623,7 @@ class SubtitlePipeline:
                                             with open(partial_file, "r", encoding="utf-8") as f:
                                                 pdata = json.load(f)
                                             plines = pdata.get("lines", {})
-                                            all_failed = list(set(qa_result.get("real_untranslated_ids", []) + [d["index"] - 1 for d in qa_result.get("dropped_details", [])]))
+                                            all_failed = list(set(qa_result.get("real_untranslated_ids", []) + qa_result.get("wrong_language_ids", []) + [d["index"] - 1 for d in qa_result.get("dropped_details", [])]))
                                             for uid in all_failed:
                                                 if str(uid) in plines:
                                                     del plines[str(uid)]
@@ -1617,7 +1636,7 @@ class SubtitlePipeline:
 
                                     # Early Stagnation / Deadlock check at end of loop:
                                     # If all unresolved cues were attempted across all recovery stages without progress, stop redundant calls now!
-                                    current_unresolved_after_rescue = set(qa_result.get("real_untranslated_ids", []) + [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])])
+                                    current_unresolved_after_rescue = set(qa_result.get("real_untranslated_ids", []) + qa_result.get("wrong_language_ids", []) + [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])])
                                     if current_unresolved_after_rescue and len(recovered_cues) == recovered_at_loop_start:
                                         append_job_log(job_id, f"QA Recovery: Stagnation detected ({len(current_unresolved_after_rescue)} unresolved cues unchanged with 0 progress). Breaking QA recovery loop.")
                                         is_semantic_deadlock = True

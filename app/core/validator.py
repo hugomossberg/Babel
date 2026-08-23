@@ -11,6 +11,17 @@ SWEDISH_COMMON_WORDS = {
     "också", "skulle", "kunde", "måste", "henne", "honom", "deras", "våra", "inget"
 }
 
+ENGLISH_COMMON_WORDS = {
+    "the", "be", "to", "of", "and", "a", "in", "that", "have", "it", "for", "not", "on", "with", "he",
+    "as", "you", "do", "at", "this", "but", "his", "by", "from", "they", "we", "say", "her", "she", "or",
+    "an", "will", "my", "one", "all", "would", "there", "their", "what", "so", "up", "out", "if", "about",
+    "who", "get", "which", "go", "me", "when", "make", "can", "like", "time", "just", "him", "know",
+    "take", "people", "into", "year", "your", "good", "some", "could", "them", "see", "other", "than",
+    "then", "now", "look", "only", "come", "its", "over", "think", "also", "back", "after", "use", "two",
+    "how", "our", "work", "first", "well", "way", "even", "new", "want", "because", "any", "these", "give",
+    "day", "most", "us", "did", "is", "are", "was", "were", "has", "had", "been", "why", "where"
+}
+
 import langdetect
 from langdetect import DetectorFactory
 from app.core.languages import get_language
@@ -27,7 +38,22 @@ def detect_language_heuristics(text: str) -> dict:
         return {"lang": "unknown", "confidence": 0.0}
     
     try:
-        langs = langdetect.detect_langs(text)
+        # Pre-cleaning for language detection:
+        # Remove HTML/formatting tags, ASS tags, speaker labels (e.g. ">> Jimmy:"), bracketed cues ("[ CHEERS ]")
+        cleaned = re.sub(r'<[^>]+>', ' ', text)
+        cleaned = re.sub(r'\{[^}]+\}', ' ', cleaned)
+        cleaned = re.sub(r'^\s*>>\s*[^:\n]+:\s*', ' ', cleaned, flags=re.MULTILINE)
+        cleaned = re.sub(r'\[[^\]]+\]', ' ', cleaned)
+        cleaned = re.sub(r'\([^)]+\)', ' ', cleaned)
+        cleaned = re.sub(r'[♪♬♩♫#]+', ' ', cleaned)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        
+        if len(cleaned) < 10:
+            return {"lang": "unknown", "confidence": 0.0}
+        
+        # Lowercase is mandatory for langdetect to prevent ALL-CAPS uppercase bias
+        # (langdetect's character n-grams heavily bias uppercase text toward German 'de')
+        langs = langdetect.detect_langs(cleaned.lower())
         if not langs:
             return {"lang": "unknown", "confidence": 0.0}
             
@@ -35,13 +61,26 @@ def detect_language_heuristics(text: str) -> dict:
         detected_code = best_match.lang.lower()
         confidence = best_match.prob
         
-        # Heuristic assistance: If Swedish common words are present in text, resolve to 'sv'
-        # to prevent Scandinavian ambiguity (no/da) or short dialog uncertainty
-        words = set(re.findall(r"\b\w+\b", text.lower()))
+        # Swedish heuristic assistance:
+        words = set(re.findall(r"\b\w+\b", cleaned.lower()))
         swedish_word_matches = words & SWEDISH_COMMON_WORDS
-        if len(swedish_word_matches) >= 2 and detected_code in {"no", "da", "unknown"}:
+        if len(swedish_word_matches) >= 2:
+            if detected_code in {"no", "da", "unknown"}:
+                detected_code = "sv"
+                confidence = max(confidence, 0.95)
+        elif len(swedish_word_matches) >= 1 and detected_code in {"no", "da", "unknown"}:
             detected_code = "sv"
-            confidence = max(confidence, 0.95)
+            confidence = max(confidence, 0.90)
+
+        # English heuristic assistance (prevents langdetect false positive collisions on short phrases, e.g., 'What did you do?' -> cy/so):
+        english_word_matches = words & ENGLISH_COMMON_WORDS
+        if len(english_word_matches) >= 2 and len(swedish_word_matches) == 0:
+            if detected_code not in {"en", "sv", "no", "da", "de", "fr", "es", "it"}:
+                detected_code = "en"
+                confidence = max(confidence, 0.95)
+            elif detected_code == "cy":
+                detected_code = "en"
+                confidence = max(confidence, 0.95)
 
         # Normalize via central language registry
         registry_lang = get_language(detected_code)
@@ -51,58 +90,158 @@ def detect_language_heuristics(text: str) -> dict:
     except Exception:
         return {"lang": "unknown", "confidence": 0.0}
 
-def extract_representative_dialogue_samples(sub_blocks: List[srt.Subtitle], max_blocks: int = 90) -> Dict[str, List[str]]:
+def extract_representative_dialogue_samples(sub_blocks: List[srt.Subtitle], max_blocks: int = 90) -> Dict[str, Any]:
     """
-    Extracts stratified representative dialogue text from subtitle blocks across
+    Extracts stratified representative dialogue text and indices from subtitle blocks across
     beginning, middle, and end of the subtitle file.
-    Returns a dict with 'beginning', 'middle', 'end', and 'all'.
+    Returns a dict with 'beginning', 'middle', 'end', 'all', and corresponding '*_indices'.
     """
-    valid_texts = [
-        s.content.strip() for s in sub_blocks
+    valid_items = [
+        (idx, s.content.strip()) for idx, s in enumerate(sub_blocks)
         if hasattr(s, "content") and s.content and s.content.strip() and s.content.strip() != "<i></i>"
     ]
-    n = len(valid_texts)
+    n = len(valid_items)
     if n == 0:
-        return {"beginning": [], "middle": [], "end": [], "all": []}
+        return {
+            "beginning": [], "middle": [], "end": [], "all": [],
+            "beginning_indices": [], "middle_indices": [], "end_indices": [], "all_indices": []
+        }
 
     if n <= max_blocks:
         chunk_size = max(1, n // 3)
+        beg_items = valid_items[:chunk_size]
+        mid_items = valid_items[chunk_size:chunk_size * 2]
+        end_items = valid_items[chunk_size * 2:]
         return {
-            "beginning": valid_texts[:chunk_size],
-            "middle": valid_texts[chunk_size:chunk_size * 2],
-            "end": valid_texts[chunk_size * 2:],
-            "all": valid_texts
+            "beginning": [t for _, t in beg_items],
+            "middle": [t for _, t in mid_items],
+            "end": [t for _, t in end_items],
+            "all": [t for _, t in valid_items],
+            "beginning_indices": [idx for idx, _ in beg_items],
+            "middle_indices": [idx for idx, _ in mid_items],
+            "end_indices": [idx for idx, _ in end_items],
+            "all_indices": [idx for idx, _ in valid_items]
         }
 
     per_stratum = max_blocks // 3  # 30
 
     # 1. Beginning
-    beg = valid_texts[:per_stratum]
+    beg_items = valid_items[:per_stratum]
 
     # 2. Middle
     mid_start = max(0, (n // 2) - (per_stratum // 2))
-    mid = valid_texts[mid_start:mid_start + per_stratum]
+    mid_items = valid_items[mid_start:mid_start + per_stratum]
 
     # 3. End
-    end = valid_texts[-per_stratum:]
+    end_items = valid_items[-per_stratum:]
+
+    all_items = beg_items + mid_items + end_items
 
     return {
-        "beginning": beg,
-        "middle": mid,
-        "end": end,
-        "all": beg + mid + end
+        "beginning": [t for _, t in beg_items],
+        "middle": [t for _, t in mid_items],
+        "end": [t for _, t in end_items],
+        "all": [t for _, t in all_items],
+        "beginning_indices": [idx for idx, _ in beg_items],
+        "middle_indices": [idx for idx, _ in mid_items],
+        "end_indices": [idx for idx, _ in end_items],
+        "all_indices": [idx for idx, _ in all_items]
     }
 
-def check_language_representative(sub_blocks: List[srt.Subtitle], target_lang_code: str) -> Dict[str, Any]:
+FOREIGN_LANGUAGE_INDICATORS = {
+    "de": {"der", "die", "das", "und", "ist", "in", "den", "von", "zu", "mit", "sich", "des", "auf", "für", "nicht", "eine", "einer", "einem", "einen", "ja", "nein", "herr", "frau", "bitte", "danke", "guten", "tag", "soldaten", "angriff", "befehl", "wir", "sie", "ihr", "mein", "dein"},
+    "fr": {"le", "la", "les", "un", "une", "des", "et", "est", "que", "qui", "dans", "en", "pour", "avec", "sur", "pas", "plus", "oui", "non", "merci", "bonjour", "monsieur", "madame", "nous", "vous", "ils", "elles", "mon", "ton", "son"},
+    "es": {"el", "la", "los", "las", "un", "una", "unos", "unas", "y", "en", "de", "que", "es", "por", "con", "para", "no", "si", "gracias", "hola", "señor", "señora", "amigo", "amigos", "nosotros", "ellos", "mi", "tu", "su"},
+    "it": {"il", "la", "lo", "i", "gli", "le", "un", "una", "uno", "e", "ed", "di", "in", "che", "per", "con", "su", "non", "si", "grazie", "ciao", "signore", "signora", "amico", "amici", "noi", "loro", "mio", "tuo", "suo"}
+}
+
+def is_verified_foreign_text(text: str, detected_lang: str) -> bool:
     """
-    Evaluates language across stratified samples of the file.
+    Verifies if text contains authentic indicators of a non-English foreign language
+    to avoid false positives on short English phrases (e.g. 'Stubborn dialogue').
+    """
+    if not text or not detected_lang:
+        return False
+    if detected_lang in {"ru", "uk", "bg", "ja", "zh", "ko", "ar", "he", "el", "hi", "th"}:
+        return True
+    
+    indicators = FOREIGN_LANGUAGE_INDICATORS.get(detected_lang)
+    if indicators:
+        words = set(re.findall(r"\b\w+\b", text.lower()))
+        return bool(words & indicators)
+    
+    words = set(re.findall(r"\b\w+\b", text.lower()))
+    if len(text.strip()) >= 30 and not (words & ENGLISH_COMMON_WORDS):
+        return True
+    return False
+
+def classify_cue_language_mismatch(
+    target_text: str,
+    source_text: str,
+    target_lang_code: str = "sv",
+    source_lang_code: str = "en"
+) -> Dict[str, Any]:
+    """
+    Classifies cue-level language status with source-awareness.
     Returns: {
-        "confident_wrong_language": bool,
-        "detected_lang": str,
-        "confidence": float,
-        "section": str,
+        "status": "SAFE_INVARIANT" | "CORRECT_TARGET" | "LEGIT_FOREIGN_PRESERVED" | "WRONG_TARGET_LANGUAGE" | "UNCERTAIN",
+        "target_lang": str,
+        "source_lang": str,
         "details": str
     }
+    """
+    t_clean = re.sub(r'<[^>]+>', ' ', target_text or '')
+    t_clean = re.sub(r'\{[^}]+\}', ' ', t_clean)
+    t_clean = re.sub(r'^\s*>>\s*[^:\n]+:\s*', ' ', t_clean, flags=re.MULTILINE)
+    t_clean = re.sub(r'\[[^\]]+\]', ' ', t_clean)
+    t_clean = re.sub(r'\([^)]+\)', ' ', t_clean)
+    t_clean = re.sub(r'[♪♬♩♫#]+', ' ', t_clean).strip()
+    
+    # 1. Safe invariant / empty check
+    if not t_clean or t_clean == "<i></i>" or not any(c.isalpha() for c in t_clean):
+        return {"status": "SAFE_INVARIANT", "target_lang": "unknown", "source_lang": "unknown", "details": "Non-verbal/empty/symbols"}
+
+    target_norm = target_lang_code[:2].lower()
+    source_norm = source_lang_code[:2].lower()
+
+    t_info = detect_language_heuristics(target_text)
+    t_lang = t_info["lang"]
+    t_conf = t_info["confidence"]
+
+    s_info = detect_language_heuristics(source_text) if source_text else {"lang": "unknown", "confidence": 0.0}
+    s_lang = s_info["lang"]
+    s_conf = s_info["confidence"]
+
+    # 2. Correct target language or uncertain/short
+    if t_lang == target_norm or t_lang == "unknown" or t_conf < 0.75:
+        return {"status": "CORRECT_TARGET" if t_lang == target_norm else "UNCERTAIN", "target_lang": t_lang, "source_lang": s_lang, "details": "Target language matched or uncertain"}
+
+    # 3. Target is detected as a foreign language (not target_norm, e.g. 'de', 'fr', 'es', 'it')
+    # Check if source also contains this foreign dialogue:
+    if s_lang == t_lang and s_lang not in {source_norm, "unknown"} and s_conf >= 0.75:
+        if is_verified_foreign_text(source_text, s_lang):
+            return {"status": "LEGIT_FOREIGN_PRESERVED", "target_lang": t_lang, "source_lang": s_lang, "details": f"Preserved foreign dialogue ({t_lang})"}
+
+    norm_t = re.sub(r'[^\w]', '', (target_text or '').lower())
+    norm_s = re.sub(r'[^\w]', '', (source_text or '').lower())
+    if norm_t and norm_t == norm_s and s_lang not in {source_norm, "unknown"} and is_verified_foreign_text(source_text, s_lang):
+        return {"status": "LEGIT_FOREIGN_PRESERVED", "target_lang": t_lang, "source_lang": s_lang, "details": "Identical non-English source dialogue"}
+
+    # Source is English dialogue but target became a foreign non-target language:
+    if s_lang == source_norm or (norm_t != norm_s and t_conf >= 0.8):
+        return {"status": "WRONG_TARGET_LANGUAGE", "target_lang": t_lang, "source_lang": s_lang, "details": f"Target translated to {t_lang} instead of {target_norm}"}
+
+    return {"status": "UNCERTAIN", "target_lang": t_lang, "source_lang": s_lang, "details": "Uncertain mismatch"}
+
+def check_language_representative(
+    sub_blocks: List[srt.Subtitle],
+    target_lang_code: str,
+    source_sub_blocks: Optional[List[srt.Subtitle]] = None
+) -> Dict[str, Any]:
+    """
+    Evaluates language across stratified samples of the file.
+    Source-aware: Distinguishes between legitimate foreign dialogue preserved from source
+    and erroneous AI translations into the wrong language.
     """
     samples = extract_representative_dialogue_samples(sub_blocks)
     target_norm = target_lang_code[:2].lower()
@@ -113,33 +252,37 @@ def check_language_representative(sub_blocks: List[srt.Subtitle], target_lang_co
             "detected_lang": "unknown",
             "confidence": 0.0,
             "section": "overall",
+            "wrong_language_cue_ids": [],
+            "legit_foreign_cue_ids": [],
             "details": "No dialogue text found"
         }
 
-    # 1. Overall check
-    full_sample_text = " ".join(samples["all"])
-    if len(full_sample_text) >= 20:
-        lang_info = detect_language_heuristics(full_sample_text)
-        det = lang_info["lang"]
-        conf = lang_info["confidence"]
+    def evaluate_mismatch_cues(cue_indices: List[int], detected_lang: str) -> Tuple[bool, List[int], List[int]]:
+        if not source_sub_blocks:
+            return True, [], []
+        
+        wrong_ids = []
+        legit_ids = []
+        for idx in cue_indices:
+            if idx >= len(sub_blocks):
+                continue
+            t_content = sub_blocks[idx].content
+            s_content = source_sub_blocks[idx].content if idx < len(source_sub_blocks) else ""
+            classification = classify_cue_language_mismatch(t_content, s_content, target_lang_code=target_lang_code)
+            status = classification["status"]
+            if status == "WRONG_TARGET_LANGUAGE":
+                wrong_ids.append(idx)
+            elif status == "LEGIT_FOREIGN_PRESERVED":
+                legit_ids.append(idx)
 
-        # Check Swedish fallback for ambiguous Scandinavian / unknown detection only
-        if target_norm == "sv" and det in {"no", "da", "unknown"}:
-            words = set(re.findall(r"\b\w+\b", full_sample_text.lower()))
-            if len(words & SWEDISH_COMMON_WORDS) >= 2:
-                det = "sv"
-                conf = 0.95
+        if legit_ids and not wrong_ids:
+            return False, [], legit_ids
 
-        if det != "unknown" and det != target_norm and conf > 0.8:
-            return {
-                "confident_wrong_language": True,
-                "detected_lang": det,
-                "confidence": conf,
-                "section": "overall",
-                "details": f"Overall sample detected as {det} ({conf*100:.0f}% conf)"
-            }
+        return True, (wrong_ids if wrong_ids else cue_indices), legit_ids
 
-    # 2. Stratified section checks (beginning, middle, end)
+    accumulated_legit_ids = []
+
+    # 1. Stratified section checks (beginning, middle, end)
     for sec in ["beginning", "middle", "end"]:
         sec_texts = samples[sec]
         sec_text = " ".join(sec_texts)
@@ -148,36 +291,57 @@ def check_language_representative(sub_blocks: List[srt.Subtitle], target_lang_co
             det = lang_info["lang"]
             conf = lang_info["confidence"]
 
-            if target_norm == "sv" and det in {"no", "da", "unknown"}:
-                words = set(re.findall(r"\b\w+\b", sec_text.lower()))
-                if len(words & SWEDISH_COMMON_WORDS) >= 2:
-                    det = "sv"
-                    conf = 0.95
-
             if det != "unknown" and det != target_norm and conf > 0.85:
+                sec_indices = samples.get(f"{sec}_indices", [])
+                is_wrong, wrong_ids, legit_ids = evaluate_mismatch_cues(sec_indices, det)
+                if is_wrong:
+                    return {
+                        "confident_wrong_language": True,
+                        "detected_lang": det,
+                        "confidence": conf,
+                        "section": sec,
+                        "wrong_language_cue_ids": wrong_ids,
+                        "legit_foreign_cue_ids": legit_ids,
+                        "details": f"{sec.capitalize()} section detected as {det} ({conf*100:.0f}% conf)"
+                    }
+                else:
+                    accumulated_legit_ids.extend(legit_ids)
+
+    # 2. Overall check
+    full_sample_text = " ".join(samples["all"])
+    if len(full_sample_text) >= 20:
+        lang_info = detect_language_heuristics(full_sample_text)
+        det = lang_info["lang"]
+        conf = lang_info["confidence"]
+
+        if det != "unknown" and det != target_norm and conf > 0.8:
+            all_indices = samples.get("all_indices", [])
+            is_wrong, wrong_ids, legit_ids = evaluate_mismatch_cues(all_indices, det)
+            if is_wrong:
                 return {
                     "confident_wrong_language": True,
                     "detected_lang": det,
                     "confidence": conf,
-                    "section": sec,
-                    "details": f"{sec.capitalize()} section detected as {det} ({conf*100:.0f}% conf)"
+                    "section": "overall",
+                    "wrong_language_cue_ids": wrong_ids,
+                    "legit_foreign_cue_ids": legit_ids,
+                    "details": f"Overall sample detected as {det} ({conf*100:.0f}% conf)"
                 }
+            else:
+                accumulated_legit_ids.extend(legit_ids)
 
     # Return overall detected language info
     lang_info = detect_language_heuristics(" ".join(samples["all"]))
     det = lang_info["lang"]
     conf = lang_info["confidence"]
-    if target_norm == "sv" and det in {"no", "da", "unknown"}:
-        words = set(re.findall(r"\b\w+\b", full_sample_text.lower()))
-        if len(words & SWEDISH_COMMON_WORDS) >= 2:
-            det = "sv"
-            conf = 0.95
 
     return {
         "confident_wrong_language": False,
         "detected_lang": det,
         "confidence": conf,
         "section": "overall",
+        "wrong_language_cue_ids": [],
+        "legit_foreign_cue_ids": list(set(accumulated_legit_ids)),
         "details": "Language check passed"
     }
 
@@ -311,7 +475,7 @@ def evaluate_subtitle_health(
         }
 
     # 1. Språkdetektering
-    lang_check = check_language_representative(sub_blocks, target_lang_code)
+    lang_check = check_language_representative(sub_blocks, target_lang_code, source_sub_blocks=reference_sub_blocks)
     detected_lang = lang_check["detected_lang"]
     confidence = lang_check["confidence"]
 
