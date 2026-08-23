@@ -21,6 +21,23 @@ It automatically finds the best available subtitle source, translates missing la
 
 ---
 
+## Screenshots
+
+### Activity Dashboard
+
+Real-time overview of automated subtitle jobs triggered by Sonarr and Radarr.
+
+![Babel Activity Dashboard](docs/screenshots/activity-dashboard.png)
+
+### Connect-and-Forget Pipeline
+
+Configure Babel's automated pipeline, including Bazarr Hybrid Mode, AI fallback, and media server integration.
+
+![Babel Pipeline Settings](docs/screenshots/pipeline-settings.png)
+
+---
+
+
 ## Why Babel?
 
 AI translation models are powerful, but non-deterministic. Without strict validation, language models can:
