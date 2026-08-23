@@ -1252,11 +1252,11 @@
           await this.loadMediaFiles();
 
           this.pollTimer = setInterval(() => {
-            if (this.currentTab === 'dashboard') {
+            if (this.currentTab === 'dashboard' || this.modalOpen) {
               this.loadStats();
               this.loadJobs();
             }
-          }, 3000);
+          }, 2000);
         },
 
         showToast(msg, type = 'success') {
@@ -1276,7 +1276,9 @@
         },
 
         executeConfirm() {
-          if (this.confirmAction) this.confirmAction();
+          if (this.confirmAction) {
+            this.confirmAction();
+          }
           this.confirmModalOpen = false;
         },
 
@@ -1338,8 +1340,11 @@
           try {
             const res = await fetch('/api/jobs');
             this.jobs = await res.json();
-            if (this.modalOpen && this.selectedJob && this.selectedJob.id) {
-              const updatedJob = this.jobs.find(j => j.id === this.selectedJob.id);
+            if (this.modalOpen && this.selectedJob) {
+              const updatedJob = this.jobs.find(j => 
+                (this.selectedJob.id && j.id === this.selectedJob.id) || 
+                (this.selectedJob.video_path && j.video_path === this.selectedJob.video_path)
+              );
               if (updatedJob) {
                 this.selectedJob = { ...this.selectedJob, ...updatedJob };
               }
