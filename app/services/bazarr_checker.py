@@ -1,5 +1,6 @@
 import os
 import glob
+import re
 from typing import Optional
 
 def find_external_subtitle(video_path: str, lang_code: str) -> Optional[str]:
@@ -24,7 +25,8 @@ def find_external_subtitle(video_path: str, lang_code: str) -> Optional[str]:
     for suffix in suffixes:
         p = f"{base_path}{suffix}.srt"
         if os.path.exists(p) and os.path.getsize(p) > 100:
-            if "forced" not in p.lower() and "signs" not in p.lower() and "songs" not in p.lower():
+            suffix_tokens = [t for t in re.split(r'[._-]+', suffix.lower()) if t]
+            if not any(tag in ["forced", "signs", "songs"] for tag in suffix_tokens):
                 return p
 
     # 2. Strict boundary directory search
@@ -51,20 +53,11 @@ def find_external_subtitle(video_path: str, lang_code: str) -> Optional[str]:
                 middle = remainder[1:-4]
                 if not middle:
                     continue
-                parts = middle.split(".")
-                if any(tag in ["forced", "signs", "songs"] for tag in parts):
+                tokens = [t for t in re.split(r'[._-]+', middle) if t]
+                if any(tag in ["forced", "signs", "songs"] for tag in tokens):
                     continue
 
-                matched = False
-                for lang in target_aliases:
-                    if lang in parts:
-                        matched = True
-                        break
-                    if any(p.startswith(f"{lang}-") or p.startswith(f"{lang}_") for p in parts):
-                        matched = True
-                        break
-
-                if matched:
+                if any(lang in tokens for lang in target_aliases):
                     full_p = os.path.join(directory, fname)
                     if os.path.getsize(full_p) > 100:
                         return full_p

@@ -2,21 +2,29 @@ import re
 from typing import List, Tuple
 import srt
 
-# Regex for SDH descriptions: [door closes], (chuckles), [SIGHING], etc.
-SDH_BRACKET_REGEX = re.compile(r'\[.*?\]', re.DOTALL)
-# Only remove parentheticals if they are all caps and stand alone on a line.
-SDH_PAREN_REGEX = re.compile(r'^\([^a-z0-9]*[A-Z\s]+[^a-z0-9]*\)$', re.DOTALL)
-# Also remove inline parentheticals if they contain known SDH words
-SDH_KEYWORDS_REGEX = re.compile(
-    r'\((laughing|laughs|laughter|chuckle|chuckles|sighs|sighing|gasps|gasping|groans|groaning|grunts|grunting|clears throat|music\b|speaking\b|whispers\b|whispering\b|shouts|shouting|crying|cries|sobs|sobbing|panting|pants|cheering|cheers|applauding|applause|screaming|screams|yells|yelling|exhales|inhales|cough|coughs|coughing|snicker|snorts|sniffles|door\s|phone\s|engine\s|birds\s|footsteps|gunshot|gunshots|explosion|thunder|wind\s|rain\s|water\s|bell\s|alarm\s|siren\s|car\s|tires\s|glass\s).*?\)',
-    re.IGNORECASE
-)
+# Strong evidence SDH patterns (sound effects, reactions, music indicators, language/audio directions)
+SDH_PATTERNS = [
+    # Vocalizations & non-verbal reactions
+    re.compile(r"^(?:softly\s+|loudly\s+|both\s+|all\s+|crowd\s+|audience\s+|distant\s+|heavy\s+|people\s+|reporters?\s+|men\s+|women\s+)?(?:laughing|laughs|laughter|chuckle|chuckles|sigh|sighs|sighing|gasp|gasps|gasping|groan|groans|groaning|grunt|grunts|grunting|clears throat|snicker|snickers|snort|snorts|sniffles?|crying|cries|sobs|sobbing|panting|pants|cheering|cheers|applause|applauding|screaming|screams|yells|yelling|shouts|shouting|exhales|inhales|cough|coughs|coughing|sneezes?|sneezing|whispers|whispering|shushing|humming|whistling|breathing|clamoring|clamor|murmuring|murmurs|chattering|commotion)$", re.IGNORECASE),
+    # Music descriptions
+    re.compile(r"^(?:(?:dramatic|soft|upbeat|electronic|orchestral|rock|classical|theme|suspenseful|eerie|instrumental|jazz|pop|techno|ambient|piano|guitar|synthesizer|hip-hop|indie|folk|country|somber|sombre|tense|triumphant|ominous|playful|fast|slow|loud|faint|distant)?\s*music(?:\s+(?:playing|starts|fades|swells|stops|resumes|plays|ends|continues|in background))?|(?:music|song|tune|melody)\s+(?:playing|starts|fades|swells|stops|resumes|plays|ends|continues|in background)|theme song(?: plays| playing)?)$", re.IGNORECASE),
+    # Environmental sounds & Foley
+    re.compile(r"^(?:distant\s+|loud\s+|faint\s+|sudden\s+)?(?:door\s+(?:opens?|closes?|slams?|creaks?|knocks?|knocking|unlocks?|locks?|clicks?|shut|jiggles?)|phone\s+(?:rings?|ringing|buzzes?|buzzing|vibrates?|vibrating|chimes?|beeps?)|engine\s+(?:starts?|revs?|roars?|idles?|hums?|stops?|cuts out)|car\s+(?:starts?|horns?|honking|honks?|accelerates?|drives off|passes?|approaches?|speeds off|skids?|skidding|crashes?|crashing|engine)|tires?\s+(?:screech(?:es|ing)?|squeals?|squealing)|glass\s+(?:shatters?|shattering|breaks?|breaking|clinks?|cracks?)|footsteps(?:\s+(?:approaching|receding|running|walking|echoing|fading|pounding))?|birds?\s+(?:chirping|singing|squawking|twittering)|dogs?\s+(?:barking|barks?|growling|growls?|whining|whines?|yelping|yelps?)|cats?\s+(?:meowing|meows?|purring|purrs?|hissing|hisses?)|clock\s+(?:ticking|ticks?|chimes?)|bell\s+(?:rings?|ringing|chimes?|tolling|tolls?)|alarm\s+(?:beeps?|beeping|blares?|blaring|rings?|ringing|sounds?|sounding)|siren\s+(?:wails?|wailing|blares?|blaring|sounds?|sounding)|thunder(?:\s+(?:rumbles?|rumbling|cracks?|crashes?))?|lightning|wind\s+(?:howls?|howling|blowing|blows?|whooshes?|whooshing|gusts?)|rain\s+(?:pouring|falls?|falling|patters?|pattering)|water\s+(?:dripping|drips?|splashing|splashes?|rushing|running)|explosion|explosions|gunshots?|gunfire)$", re.IGNORECASE),
+    # Language / audio indicators
+    re.compile(r"^(?:(?:speaking|speaks|singing|sings)\s+(?:in\s+)?(?:foreign language|spanish|french|german|russian|japanese|arabic|chinese|italian|mandarin|cantonese|korean|portuguese|hindi|latin|sign language|broken english)|in\s+(?:foreign language|spanish|french|german|russian|japanese|arabic|chinese|italian|mandarin|cantonese|korean|portuguese|latin|sign language)|inaudible|indistinct\s+(?:chatter|talking|voices|speech|whispering|shouting|clamor)|muffled\s+(?:speech|speaking|voices|voice|screams|groans|cries)|overlapping\s+chatter|silence)$", re.IGNORECASE),
+]
 
 # Regex for music notes and signs: ♪, ♫, ♬, ♩
 MUSIC_NOTES_REGEX = re.compile(r'[♪♫♬♩]+')
 
 # Placeholder that preserves the block structure for parsers and locks timestamps
 EMPTY_PLACEHOLDER = "<i></i>"
+
+def is_sdh_description(inner: str) -> bool:
+    clean = inner.strip().strip(".,!?:;\"\'")
+    if not clean:
+        return True
+    return any(p.match(clean) for p in SDH_PATTERNS)
 
 def clean_subtitle_text(text: str) -> str:
     """
@@ -27,35 +35,29 @@ def clean_subtitle_text(text: str) -> str:
     if not text:
         return EMPTY_PLACEHOLDER
 
-    # Remove standard SDH brackets [ ... ]
-    cleaned = SDH_BRACKET_REGEX.sub('', text)
-    # Remove known keywords from inline parentheticals
-    cleaned = SDH_KEYWORDS_REGEX.sub('', cleaned)
-    
-    # Process line by line for full-line parentheticals
-    processed_lines = []
-    for line in cleaned.split('\n'):
-        line_stripped = line.strip()
-        
-        # Check if line is a full parenthetical
-        if line_stripped.startswith('(') and line_stripped.endswith(')'):
-            inner = line_stripped[1:-1].strip()
-            # If empty parenthetical (), strip it
-            if not inner:
-                continue
-            # If it's all caps (and contains letters), it's SDH
-            if inner.isupper() and any(c.isalpha() for c in inner):
-                continue
-                
-        processed_lines.append(line)
-        
-    cleaned = '\n'.join(processed_lines)
+    def replace_bracket(m):
+        inner = m.group(1)
+        return "" if is_sdh_description(inner) else m.group(0)
+
+    # Remove SDH descriptions in brackets [ ... ]
+    cleaned = re.sub(r'\[(.*?)\]', replace_bracket, text)
+    # Remove SDH descriptions in parentheses ( ... )
+    cleaned = re.sub(r'\((.*?)\)', replace_bracket, cleaned)
 
     # Remove music notes
     cleaned = MUSIC_NOTES_REGEX.sub('', cleaned)
 
-    # Clean whitespace and strip empty lines
-    lines = [line.strip() for line in cleaned.split('\n') if line.strip()]
+    # Clean whitespace and strip empty/SDH-only lines
+    lines = []
+    for line in cleaned.split('\n'):
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+        # Check if line without brackets was a pure SDH indicator
+        if is_sdh_description(line_stripped):
+            continue
+        lines.append(line_stripped)
+
     cleaned_text = '\n'.join(lines).strip()
 
     if not cleaned_text or cleaned_text == "":

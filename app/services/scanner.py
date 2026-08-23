@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 import json
 import srt
@@ -71,28 +72,23 @@ def is_subtitle_for_video(video_basename: str, sub_filename: str) -> bool:
         return True
     if remainder.startswith(".") and remainder.endswith(".srt"):
         middle = remainder[1:-4]
-        parts = middle.split(".")
-        if 1 <= len(parts) <= 3:
-            first_part = parts[0]
-            lang_part = first_part.split("-")[0].split("_")[0]
-            if lang_part in ALL_KNOWN_LANG_TOKENS or lang_part in KNOWN_MODIFIERS:
+        tokens = [t for t in re.split(r'[._-]+', middle) if t]
+        if 1 <= len(tokens) <= 6:
+            first_part = tokens[0]
+            if first_part in ALL_KNOWN_LANG_TOKENS or first_part in KNOWN_MODIFIERS:
                 return True
     return False
 
 def is_target_language_subtitle(sub_filename: str, target_aliases: List[str]) -> bool:
     """Check if subtitle file matches any target language alias and is not forced/signs/songs."""
     fname_lower = sub_filename.lower()
-    parts = fname_lower.split(".")
-    if any(tag in ["forced", "signs", "songs"] for tag in parts):
+    if fname_lower.endswith(".srt"):
+        fname_lower = fname_lower[:-4]
+    tokens = [t for t in re.split(r'[._-]+', fname_lower) if t]
+    if any(tag in ["forced", "signs", "songs"] for tag in tokens):
         return False
-    for lang in target_aliases:
-        l = lang.lower()
-        if l in parts:
-            return True
-        for p in parts:
-            if p.startswith(f"{l}-") or p.startswith(f"{l}_"):
-                return True
-    return False
+    target_set = {a.lower() for a in target_aliases}
+    return any(t in target_set for t in tokens)
 
 def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[str, Any]]:
     """

@@ -886,7 +886,16 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                         else:
                             r["reason"] = "unverified_entity"
                             logger.info(f"Context Entity Verification: ID {rid} ('{items_map.get(rid, '')}') REJECTED -> remains TRANSLATE")
+            except (ProviderUnavailableError, ProviderConfigurationError):
+                raise
             except Exception as e:
+                err_str = str(e).lower()
+                permanent = any(x in err_str for x in [
+                    "401", "403", "unauthorized", "forbidden", "api key not valid",
+                    "invalid api key", "not configured", "model_not_found", "permission_denied"
+                ])
+                if permanent:
+                    raise ProviderConfigurationError(f"Permanent provider configuration error in entity verification: {str(e)}")
                 logger.error(f"Context Entity Verification call failed: {e}")
 
         return validated_results

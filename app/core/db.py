@@ -365,18 +365,33 @@ def save_translation_memory_bulk(series_title: str, items: list):
         cursor.executemany("INSERT OR REPLACE INTO translation_memory (series_title, original_text, translated_text, created_at) VALUES (?, ?, ?, ?)", valid_items)
         conn.commit()
 
+def _is_legit_legacy_tm_key(target_title: str, candidate_title: str) -> bool:
+    if candidate_title == target_title:
+        return True
+    import re
+    pattern = re.compile(rf"^{re.escape(target_title)}\s*-\s*[sS]\d{{1,4}}[eE]\d{{1,4}}.*$")
+    return bool(pattern.match(candidate_title))
+
 def get_translation_memory(series_title: str, limit: int = 20) -> list:
     if not series_title: return []
+    import random
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         escaped_title = series_title.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         cursor.execute(
-            "SELECT original_text, translated_text FROM translation_memory WHERE series_title = ? OR series_title LIKE ? ESCAPE '\\' ORDER BY RANDOM() LIMIT ?",
-            (series_title, f"{escaped_title} - %", limit)
+            "SELECT series_title, original_text, translated_text FROM translation_memory WHERE series_title = ? OR series_title LIKE ? ESCAPE '\\' OR series_title LIKE ? ESCAPE '\\'",
+            (series_title, f"{escaped_title} - S%", f"{escaped_title} - s%")
         )
         rows = cursor.fetchall()
-        return [{"original": r["original_text"], "translated": r["translated_text"]} for r in rows]
+        valid = [
+            {"original": r["original_text"], "translated": r["translated_text"]}
+            for r in rows
+            if _is_legit_legacy_tm_key(series_title, r["series_title"])
+        ]
+        if len(valid) > limit:
+            return random.sample(valid, limit)
+        return valid
 
 def recover_stale_queued_jobs():
     import sqlite3
