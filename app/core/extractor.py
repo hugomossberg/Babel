@@ -2,7 +2,7 @@ import subprocess
 import json
 import os
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +92,13 @@ def inspect_mkv_tracks(video_path: str) -> Dict[str, List[Dict]]:
         except Exception as e2:
             return {"subtitles": [], "audio": [], "error": str(e2)}
 
-def extract_embedded_srt(video_path: str, output_srt_path: str, preferred_lang: str = "eng") -> bool:
+def extract_embedded_srt(video_path: str, output_srt_path: str, preferred_lang: str = "eng", tracks_info: Optional[Dict[str, Any]] = None) -> bool:
     """
-    Extracts the best matching embedded subtitle track to an SRT file using mkvextract or ffmpeg.
+    Extracts the best matching embedded subtitle track to an SRT file using fast ffmpeg stream extraction (with mkvextract fallback).
     Prefers non-forced SRT / SubRip / text subtitles.
     """
-    tracks_info = inspect_mkv_tracks(video_path)
+    if tracks_info is None:
+        tracks_info = inspect_mkv_tracks(video_path)
     sub_tracks = tracks_info.get("subtitles", [])
 
     selected_track_id = None
@@ -146,39 +147,39 @@ def extract_embedded_srt(video_path: str, output_srt_path: str, preferred_lang: 
         selected_codec = cand["codec"].lower()
 
         success = False
-        # Try mkvextract first
+        # Try fast ffmpeg stream extraction first
         try:
-            cmd = ["mkvextract", "tracks", video_path, f"{selected_track_id}:{output_srt_path}"]
+            cmd = [
+                "ffmpeg", "-y", "-i", video_path,
+                "-map", f"0:s:{selected_sub_index}",
+                "-c:s", "srt",
+                output_srt_path
+            ]
             subprocess.run(cmd, capture_output=True, check=True, timeout=120)
-
             if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 100:
-                if any(x in selected_codec for x in ["ass", "ssa", "vtt", "webvtt"]):
-                    temp_file = output_srt_path + ".tmp"
-                    os.rename(output_srt_path, temp_file)
-                    ffmpeg_cmd = ["ffmpeg", "-y", "-i", temp_file, "-c:s", "srt", output_srt_path]
-                    subprocess.run(ffmpeg_cmd, capture_output=True, check=True, timeout=60)
-                    try: os.remove(temp_file)
-                    except: pass
+                success = True
+        except Exception as ff_err:
+            logger.debug(f"FFmpeg extraction failed for track {selected_sub_index}: {ff_err}")
 
-                if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 0:
-                    success = True
-        except Exception:
-            pass
-
-        if not success:
-            # Fallback to ffmpeg
+        # Fallback to mkvextract if ffmpeg failed
+        if not success and selected_track_id is not None:
             try:
-                cmd = [
-                    "ffmpeg", "-y", "-i", video_path,
-                    "-map", f"0:s:{selected_sub_index}",
-                    "-c:s", "srt",
-                    output_srt_path
-                ]
+                cmd = ["mkvextract", "tracks", video_path, f"{selected_track_id}:{output_srt_path}"]
                 subprocess.run(cmd, capture_output=True, check=True, timeout=120)
+
                 if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 100:
-                    success = True
-            except Exception:
-                pass
+                    if any(x in selected_codec for x in ["ass", "ssa", "vtt", "webvtt"]):
+                        temp_file = output_srt_path + ".tmp"
+                        os.rename(output_srt_path, temp_file)
+                        ffmpeg_cmd = ["ffmpeg", "-y", "-i", temp_file, "-c:s", "srt", output_srt_path]
+                        subprocess.run(ffmpeg_cmd, capture_output=True, check=True, timeout=60)
+                        try: os.remove(temp_file)
+                        except: pass
+
+                    if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 0:
+                        success = True
+            except Exception as mkv_err:
+                logger.debug(f"mkvextract fallback failed for track {selected_track_id}: {mkv_err}")
 
         if success:
             # Sanity check for partial sources

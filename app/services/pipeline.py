@@ -27,6 +27,13 @@ from app.services.jellyfin_notifier import notify_jellyfin_library_refresh
 
 logger = logging.getLogger("babel.pipeline")
 
+def _safe_extract_embedded_srt(video_path: str, output_srt_path: str, preferred_lang: str = "eng", tracks_info: Optional[Dict[str, Any]] = None) -> bool:
+    """Invokes extract_embedded_srt safely supporting both cached tracks_info and legacy mock signatures."""
+    try:
+        return extract_embedded_srt(video_path, output_srt_path, preferred_lang=preferred_lang, tracks_info=tracks_info)
+    except TypeError:
+        return extract_embedded_srt(video_path, output_srt_path, preferred_lang=preferred_lang)
+
 # QA Policy Status and Default Thresholds
 QA_STATUS_PASS = "PASS"
 QA_STATUS_PASS_WITH_WARNINGS = "PASS_WITH_WARNINGS"
@@ -883,6 +890,7 @@ class SubtitlePipeline:
         enable_bazarr = get_setting("enable_bazarr_check", "true").lower() == "true"
         extract_target_embedded = get_setting("extract_target_embedded", "true").lower() == "true"
         extract_source_embedded = get_setting("extract_source_embedded", "true").lower() == "true"
+        original_language_guard = get_setting("original_language_guard", "true").lower() == "true"
         auto_repair_unhealthy = get_setting("auto_repair_unhealthy", "true").lower() == "true"
         strict_sync_lock = get_setting("strict_sync_lock", "true").lower() == "true"
         effective_tm_key = series_title or (title.split(" - S")[0] if title and " - S" in title else title)
@@ -918,6 +926,18 @@ class SubtitlePipeline:
         # Track which languages still need translation
         langs_needing_translation = []
 
+        # Single efficient container probe per job (cached for target, source, and audio inspection)
+        container_tracks: Optional[Dict[str, Any]] = None
+        t_probe_ms = 0.0
+        if extract_target_embedded or extract_source_embedded or original_language_guard:
+            t_probe_start = time.perf_counter()
+            try:
+                container_tracks = await asyncio.to_thread(inspect_mkv_tracks, video_path)
+            except Exception as e:
+                logger.warning(f"Failed to probe container tracks for {video_path}: {e}")
+                container_tracks = {"subtitles": [], "audio": []}
+            t_probe_ms = round((time.perf_counter() - t_probe_start) * 1000, 1)
+
         if not force_retranslate:
             for lang_info in target_languages:
                 lang_code = lang_info["code"]
@@ -942,7 +962,13 @@ class SubtitlePipeline:
                         temp_target_path = f"{target_output_path}.tmp_embed.{uuid.uuid4().hex}"
                         published = False
                         try:
-                            extracted = await asyncio.to_thread(extract_embedded_srt, video_path, temp_target_path, preferred_lang=lang_code)
+                            extracted = await asyncio.to_thread(
+                                _safe_extract_embedded_srt,
+                                video_path,
+                                temp_target_path,
+                                preferred_lang=lang_code,
+                                tracks_info=container_tracks
+                            )
                             if extracted and os.path.exists(temp_target_path):
                                 # Always validate extracted embedded target, regardless of auto_repair setting
                                 health = evaluate_subtitle_health(temp_target_path, target_lang_code=lang_code)
@@ -1010,9 +1036,18 @@ class SubtitlePipeline:
         temp_extracted_srt = f"{base_path}.temp_extracted.en.srt"
 
         # PRIORITY 1: Embedded English inside Video (Best sync guarantee)
+        t_extract_ms = 0.0
         if extract_source_embedded:
             append_job_log(job_id, "Checking video container for embedded English track (Priority 1: Best Sync)...")
-            extracted = await asyncio.to_thread(extract_embedded_srt, video_path, temp_extracted_srt, preferred_lang="eng")
+            t_ext_start = time.perf_counter()
+            extracted = await asyncio.to_thread(
+                _safe_extract_embedded_srt,
+                video_path,
+                temp_extracted_srt,
+                preferred_lang="eng",
+                tracks_info=container_tracks
+            )
+            t_extract_ms = round((time.perf_counter() - t_ext_start) * 1000, 1)
             if extracted and os.path.exists(temp_extracted_srt):
                 append_job_log(job_id, "Successfully extracted embedded English track from video.")
                 try:
@@ -1096,6 +1131,7 @@ class SubtitlePipeline:
             # -------------------------------------------------------------
             # PRE-PROCESSING & SDH CLEANER
             # -------------------------------------------------------------
+            t_clean_start = time.perf_counter()
             clean_sdh_enabled = get_setting("clean_sdh", "true").lower() == "true"
             if clean_sdh_enabled:
                 subs, cleaned_count = sanitize_srt_content(raw_srt_text)
@@ -1104,8 +1140,15 @@ class SubtitlePipeline:
                 subs = list(srt.parse(raw_srt_text))
                 cleaned_count = 0
                 append_job_log(job_id, f"SDH cleaner disabled. Parsed {len(subs)} blocks directly.")
+            t_clean_ms = round((time.perf_counter() - t_clean_start) * 1000, 1)
 
             prep_duration_ms = round((time.time() - prep_start_time) * 1000, 1)
+            perf_breakdown = (
+                f"(probe={round(t_probe_ms / 1000, 2)}s, "
+                f"extract={round(t_extract_ms / 1000, 2)}s, "
+                f"clean={round(t_clean_ms / 1000, 2)}s, "
+                f"audio=0.00s)"
+            )
 
             # Ensure all background Bazarr trigger tasks are cleanly resolved/cancelled before final check
             for t in bazarr_tasks:
@@ -1141,7 +1184,9 @@ class SubtitlePipeline:
                     await self._maybe_notify_jellyfin()
                     return {"status": "skipped", "reason": "bazarr_downloaded", "job_id": job_id}
                 else:
-                    append_job_log(job_id, f"Hybrid preparation completed in {prep_duration_ms}ms. Bazarr result: miss. Starting AI immediately (fixed grace delay avoided).")
+                    append_job_log(job_id, f"Hybrid preparation completed in {prep_duration_ms}ms {perf_breakdown}. Bazarr result: miss. Starting AI immediately (fixed grace delay avoided).")
+            else:
+                append_job_log(job_id, f"Source preparation completed in {round(prep_duration_ms / 1000, 2)}s {perf_breakdown}.")
 
             total_source_lines = len(subs)
             batch_size = get_positive_int_setting("batch_size", 50)
@@ -1172,18 +1217,25 @@ class SubtitlePipeline:
 
             primary_audio_lang = "und"
             if original_language_guard:
-                mkv_info = await asyncio.to_thread(inspect_mkv_tracks, video_path)
+                audio_tracks = container_tracks.get("audio", []) if container_tracks else []
+                if not audio_tracks:
+                    try:
+                        mkv_info = await asyncio.to_thread(inspect_mkv_tracks, video_path)
+                        audio_tracks = mkv_info.get("audio", [])
+                    except Exception:
+                        audio_tracks = []
+
                 # Bug #32: Better audio track detection — prefer default, skip forced/commentary
-                for audio in mkv_info.get("audio", []):
+                for audio in audio_tracks:
                     audio_title = (audio.get("title") or "").lower()
                     if any(bad in audio_title for bad in ["commentary", "director", "description"]):
                         continue
                     if audio.get("default") and not audio.get("forced"):
                         primary_audio_lang = audio.get("language", "und").lower()
                         break
-                if primary_audio_lang == "und" and mkv_info.get("audio"):
+                if primary_audio_lang == "und" and audio_tracks:
                     # Fallback: first non-forced, non-commentary audio
-                    for audio in mkv_info.get("audio", []):
+                    for audio in audio_tracks:
                         audio_title = (audio.get("title") or "").lower()
                         if not audio.get("forced") and not any(bad in audio_title for bad in ["commentary", "director"]):
                             primary_audio_lang = audio.get("language", "und").lower()
