@@ -41,6 +41,17 @@ Connect your media stack once and let Babel handle the fallback flow. In Hybrid 
   <img src="docs/screenshots/pipeline-settings.png" alt="Babel Connect-and-Forget Pipeline" width="100%">
 </p>
 
+### Verified Output
+
+Babel does not publish a subtitle simply because an AI provider returned a result. Every completed translation must pass the QA gate first.
+
+This real-world job processed **1,498 / 1,498 cues** with **0 dropped cues**, **0 ms sync drift**, **0 unresolved dialogue**, and a final **PASS score of 100/100**.
+
+<p align="center">
+  <img src="docs/screenshots/qa-job-result.png" alt="Babel QA Verified Output" width="100%">
+</p>
+
+
 Import -> search -> prepare fallback -> translate if needed -> recover -> validate -> publish
 
 ---
