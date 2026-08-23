@@ -425,3 +425,20 @@ async def api_get_media_files():
             "series": series_data,
             "movies": movies_data
         }
+
+from app.services.updates_controller import updates_controller
+from pydantic import BaseModel
+
+class TriggerUpdateReq(BaseModel):
+    target_version: str
+
+@router.get("/updates")
+async def api_get_updates(force: bool = False):
+    return await updates_controller.get_update_info(force_refresh=force)
+
+@router.post("/updates/trigger")
+async def api_trigger_update(req: TriggerUpdateReq):
+    res = await updates_controller.trigger_update(req.target_version)
+    if not res["success"]:
+        raise HTTPException(status_code=400, detail=res["message"])
+    return res
