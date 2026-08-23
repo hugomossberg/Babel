@@ -146,7 +146,7 @@ async def test_13_audio_guard_uses_cached_tracks(base_settings, tmp_path, monkey
     """13. Audio language guard skips translation to English when primary audio is English."""
     video = tmp_path / "english_audio.mkv"
     video.touch()
-    
+
     # Configure target language to English
     def mock_get_setting(key, default=""):
         if key == "languages":
@@ -155,11 +155,11 @@ async def test_13_audio_guard_uses_cached_tracks(base_settings, tmp_path, monkey
             return "true"
         return default
     monkeypatch.setattr("app.services.pipeline.get_setting", mock_get_setting)
-    
+
     pipeline = SubtitlePipeline()
     translate_mock = AsyncMock(return_value=[])
     monkeypatch.setattr(pipeline.translator, "translate_srt_content", translate_mock)
-    
+
     def mock_inspect(vp):
         return {
             "subtitles": [{"id": 2, "language": "eng", "codec": "SubRip/SRT", "forced": False}],
@@ -167,14 +167,45 @@ async def test_13_audio_guard_uses_cached_tracks(base_settings, tmp_path, monkey
             "duration": 120.0
         }
     monkeypatch.setattr("app.services.pipeline.inspect_mkv_tracks", mock_inspect)
-    
+
     def mock_extract(vp, out, preferred_lang, tracks_info=None):
         with open(out, "w", encoding="utf-8") as f:
             f.write(make_srt_string([(1, 3, "Dialogue")]))
         return True
     monkeypatch.setattr("app.services.pipeline.extract_embedded_srt", mock_extract)
-    
+
     res = await pipeline._run_pipeline_logic(1, str(video), wait_seconds=0)
-    
+
     # Guard should skip translation because primary audio is English
     assert translate_mock.call_count == 0
+
+def test_14_ffmpeg_corrupt_output_triggers_mkvextract_fallback(tmp_path):
+    """5. Verify ffmpeg invalid/empty output triggers fallback to mkvextract."""
+    out_srt = str(tmp_path / "fallback.srt")
+    tracks_info = {
+        "subtitles": [{"id": 7, "language": "eng", "codec": "SubRip/SRT", "forced": False, "title": "English"}]
+    }
+
+    call_history = []
+    def mock_subprocess(cmd, *args, **kwargs):
+        call_history.append(cmd[0])
+        if cmd[0] == "ffmpeg":
+            # Simulate ffmpeg creating a corrupted/unparseable file
+            with open(out_srt, "w", encoding="utf-8") as f:
+                f.write("THIS IS NOT VALID SRT CONTENT AT ALL AND CANNOT BE PARSED")
+            return MagicMock(returncode=0)
+        elif cmd[0] == "mkvextract":
+            # Simulate mkvextract successfully creating valid SRT
+            with open(out_srt, "w", encoding="utf-8") as f:
+                f.write(make_srt_string([(1, 4, "Clean extracted subtitle from fallback")]))
+            return MagicMock(returncode=0)
+        return MagicMock(returncode=0)
+
+    with patch("app.core.extractor.subprocess.run", side_effect=mock_subprocess):
+        res = extract_embedded_srt("corrupt_stream.mkv", out_srt, preferred_lang="eng", tracks_info=tracks_info)
+        assert res is True
+        assert call_history == ["ffmpeg", "mkvextract"]
+        with open(out_srt, "r", encoding="utf-8") as f:
+            subs = list(srt.parse(f.read()))
+        assert len(subs) == 1
+        assert subs[0].content == "Clean extracted subtitle from fallback"

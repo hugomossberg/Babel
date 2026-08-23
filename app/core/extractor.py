@@ -156,18 +156,33 @@ def extract_embedded_srt(video_path: str, output_srt_path: str, preferred_lang: 
                 output_srt_path
             ]
             subprocess.run(cmd, capture_output=True, check=True, timeout=120)
-            if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 100:
-                success = True
+            if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 0:
+                try:
+                    with open(output_srt_path, "r", encoding="utf-8-sig") as f:
+                        test_subs = list(srt.parse(f.read()))
+                    if test_subs:
+                        success = True
+                    else:
+                        if os.path.exists(output_srt_path):
+                            try: os.remove(output_srt_path)
+                            except: pass
+                except Exception:
+                    if os.path.exists(output_srt_path):
+                        try: os.remove(output_srt_path)
+                        except: pass
         except Exception as ff_err:
             logger.debug(f"FFmpeg extraction failed for track {selected_sub_index}: {ff_err}")
+            if os.path.exists(output_srt_path):
+                try: os.remove(output_srt_path)
+                except: pass
 
-        # Fallback to mkvextract if ffmpeg failed
+        # Fallback to mkvextract if ffmpeg failed or produced invalid/empty output
         if not success and selected_track_id is not None:
             try:
                 cmd = ["mkvextract", "tracks", video_path, f"{selected_track_id}:{output_srt_path}"]
                 subprocess.run(cmd, capture_output=True, check=True, timeout=120)
 
-                if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 100:
+                if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 0:
                     if any(x in selected_codec for x in ["ass", "ssa", "vtt", "webvtt"]):
                         temp_file = output_srt_path + ".tmp"
                         os.rename(output_srt_path, temp_file)
