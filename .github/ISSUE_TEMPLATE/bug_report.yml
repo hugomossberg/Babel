@@ -1,0 +1,55 @@
+name: Bug Report
+description: Create a report to help us improve Babel
+title: "[BUG] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please fill out this form to the best of your ability.
+        **DO NOT POST API KEYS OR SECRETS.**
+  - type: input
+    id: version
+    attributes:
+      label: Babel Version
+      description: e.g. v2.3.23-beta or "latest"
+      placeholder: v2.3.23-beta
+    validations:
+      required: true
+  - type: input
+    id: install
+    attributes:
+      label: Installation Type
+      description: e.g. Docker, LXC, bare metal
+      placeholder: Docker
+    validations:
+      required: true
+  - type: input
+    id: llm
+    attributes:
+      label: AI Provider & Model
+      description: e.g. Gemini (gemini-3.5-flash-lite), OpenAI (gpt-4o-mini)
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: Paste anonymized job logs or container logs here. Remove API keys!
+      render: shell
+    validations:
+      required: false

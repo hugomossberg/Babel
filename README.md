@@ -11,6 +11,14 @@ It automatically finds the best available subtitle source, translates missing la
 
 > **Install it. Connect your media stack. Forget about subtitles.**
 
+### At a Glance
+- **Docker-first:** Single container, instant deployment
+- **Automated:** Sonarr & Radarr webhooks
+- **Smart Sourcing:** Hybrid Bazarr search + Embedded AI extraction
+- **AI Freedom:** Google Gemini, OpenAI, DeepL, or local Ollama models
+- **Zero Drift:** 0 ms translation-induced timestamp drift
+- **Safe:** Strict QA gate, 0 dropped cues policy, automatic recovery
+
 ---
 
 ## Why Babel?
@@ -103,12 +111,25 @@ services:
       start_period: 10s
 ```
 
-> **Note:** Replace `/path/to/tv` and `/path/to/movies` with the actual paths to your media folders on your host.
+> **IMPORTANT: Volume Paths**
+>
+> You must map your host paths to Babel's container paths.
+> - For TV Shows: Change `/path/to/tv` to your actual host path. Babel will see this as `/tv` internally.
+> - For Movies: Change `/path/to/movies` to your actual host path. Babel will see this as `/movies` internally.
 
-### 2. Start Babel
+### 2. Start and Verify
+
+Start the container in the background:
 
 ```bash
 docker compose up -d
+```
+
+Verify that the container is healthy:
+
+```bash
+docker compose ps
+curl -f http://localhost:8765/health
 ```
 
 ### 3. Open the Web UI
@@ -191,7 +212,7 @@ Babel validates every subtitle before writing to disk using a three-tier decisio
 | Result | Criteria | Action |
 |---|---|---|
 | **`PASS`** | 100% of cues translated or verified safe invariants. 0 dropped lines, 0 ms timestamp drift, verified language match. | Published immediately with full confidence. |
-| **`PASS_WITH_WARNINGS`** | All timing and structural checks pass. A minimal bounded number of stubborn cues ($\le 1\%$) were preserved as source text after recovery exhaustion to avoid deadlock. | Published cleanly. |
+| **`PASS_WITH_WARNINGS`** | All timing and structural checks pass. By default, allows at most 3 unresolved dialogue cues AND at most 1% of total cues (configurable). Remaining stubborn cues are preserved as source text to avoid deadlock. | Published cleanly. |
 | **`FAIL`** | Structural defect, dropped cue blocks, timestamp corruption, excessive untranslated dialogue, or detected wrong language. | **Blocked.** File is not published. |
 
 > **Timestamp Precision Note:** Babel guarantees **source-to-target timestamp preservation** (zero translation-induced timing drift). It preserves the timing relative to the selected source track. If the source subtitle track itself has pre-existing broadcast timing offsets, Babel preserves those timestamps faithful to the source.
