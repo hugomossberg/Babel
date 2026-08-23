@@ -200,7 +200,7 @@ Atomic publication (.target.srt) & Media Server Refresh
 ### Hybrid Mode (Recommended for mixed libraries)
 Babel checks Bazarr for an existing human subtitle while preparing its AI fallback. This avoids a fixed waiting delay. If no target subtitle is available when preparation is complete, AI translation begins immediately.
 
-### Pure AI Mode (Fastest)
+### Pure AI Mode
 Babel immediately extracts the embedded source track and translates it with AI, bypassing Bazarr searches entirely.
 
 ---
