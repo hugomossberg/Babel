@@ -106,15 +106,19 @@ async def sonarr_webhook(request: Request, background_tasks: BackgroundTasks):
             except HTTPException as e:
                 logger.error(f"Webhook path validation failed: {e.detail}")
                 return {"status": "error", "reason": e.detail}
-            logger.info(f"Queueing Babel processing for Sonarr episode: {video_path}")
+            
+            from app.core.db import create_job
+            job_id = create_job(video_path=video_path, event_source="SONARR", title=title)
+            logger.info(f"Queueing Babel processing for Sonarr episode: {video_path} (Job ID: {job_id})")
             background_tasks.add_task(
                 pipeline.process_video_file,
                 video_path=video_path,
                 event_source="SONARR",
                 title=title,
-                series_title=series_title
+                series_title=series_title,
+                job_id=job_id
             )
-            return {"status": "queued", "event": event_type, "video_path": video_path, "title": title}
+            return {"status": "queued", "event": event_type, "video_path": video_path, "title": title, "job_id": job_id}
 
     return {"status": "ignored", "event": event_type}
 
@@ -155,15 +159,19 @@ async def radarr_webhook(request: Request, background_tasks: BackgroundTasks):
             except HTTPException as e:
                 logger.error(f"Webhook path validation failed: {e.detail}")
                 return {"status": "error", "reason": e.detail}
-            logger.info(f"Queueing Babel processing for Radarr movie: {video_path}")
+            
+            from app.core.db import create_job
+            job_id = create_job(video_path=video_path, event_source="RADARR", title=title)
+            logger.info(f"Queueing Babel processing for Radarr movie: {video_path} (Job ID: {job_id})")
             background_tasks.add_task(
                 pipeline.process_video_file,
                 video_path=video_path,
                 event_source="RADARR",
                 title=title,
-                series_title=title
+                series_title=title,
+                job_id=job_id
             )
-            return {"status": "queued", "event": event_type, "video_path": video_path, "title": title}
+            return {"status": "queued", "event": event_type, "video_path": video_path, "title": title, "job_id": job_id}
 
     return {"status": "ignored", "event": event_type}
 
@@ -183,12 +191,17 @@ async def manual_process(req: ManualProcessRequest, background_tasks: Background
         base = os.path.splitext(base)[0]
         title = re.sub(r'(?i)(WEBDL|WEB-DL|WEB|HDTV|Bluray|720p|1080p|2160p|4K|x264|x265|HDR|AMZN).*', '', base).strip(' -._')
 
+    from app.core.db import create_job
+    job_id = create_job(video_path=req.video_path, event_source="MANUAL", title=title)
+    logger.info(f"Queueing manual Babel processing: {req.video_path} (Job ID: {job_id})")
+
     background_tasks.add_task(
         pipeline.process_video_file,
         video_path=req.video_path,
         wait_seconds=req.wait_seconds,
         event_source="MANUAL",
         title=title,
-        force_retranslate=req.force_retranslate
+        force_retranslate=req.force_retranslate,
+        job_id=job_id
     )
-    return {"status": "queued", "video_path": req.video_path, "wait_seconds": req.wait_seconds}
+    return {"status": "queued", "job_id": job_id, "video_path": req.video_path, "wait_seconds": req.wait_seconds}

@@ -281,7 +281,7 @@
           </template>
 
           <template x-for="show in mediaData.series" :key="show.title">
-            <div class="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden shadow-xl" x-data="{ open: false }">
+            <div class="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden shadow-xl" x-data="{ open: false, selectedSeason: 'All' }">
               <div @click="open = !open" class="p-5 bg-slate-800/40 border-b border-slate-800 flex items-center justify-between cursor-pointer hover:bg-slate-800/60 transition">
                 <div class="flex items-center space-x-3">
                   <div class="w-9 h-9 rounded-xl bg-purple-900/40 border border-purple-700/50 text-purple-400 flex items-center justify-center">
@@ -289,7 +289,11 @@
                   </div>
                   <div>
                     <h3 class="font-bold text-white text-base" x-text="show.title"></h3>
-                    <p class="text-xs text-slate-500" x-text="show.episodes.length + ' episode(s)'"></p>
+                    <p class="text-xs text-slate-500">
+                      <span x-text="show.episodes.length + ' episode(s)'"></span>
+                      <span class="mx-1.5">•</span>
+                      <span x-text="(getShowSeasons(show).length - 1) + ' season(s)'"></span>
+                    </p>
                   </div>
                 </div>
                 <div class="flex items-center space-x-3" @click.stop>
@@ -305,45 +309,76 @@
                 </div>
               </div>
 
-              <div x-show="open" class="divide-y divide-slate-800/50 p-3 space-y-2">
-                <template x-for="ep in show.episodes" :key="ep.path">
-                  <div class="p-3.5 bg-slate-950/60 border border-slate-800/60 rounded-xl flex items-center justify-between hover:border-slate-700 transition">
-                    <div class="flex items-center space-x-3">
-                      <i class="fa-solid fa-video text-purple-400 text-lg"></i>
-                      <div>
-                        <div class="flex items-center gap-2">
-                          <span class="font-medium text-slate-100 text-sm" x-text="ep.filename"></span>
-                          <span class="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700" x-text="ep.season"></span>
-                          <span x-show="!ep.has_target_sub" class="text-[10px] px-2 py-0.5 rounded bg-amber-950/50 text-amber-400 border border-amber-900/50 font-mono font-semibold">
-                            NO SUBTITLE
-                          </span>
-                        </div>
-                        <div class="text-xs text-slate-500" x-text="ep.path + ' (' + ep.size_mb + ' MB)'"></div>
+              <div x-show="open" class="p-4 space-y-4">
+                <!-- Season Tabs Header (shown if show has multiple seasons or non-root season) -->
+                <div class="p-2.5 bg-slate-950/80 border border-slate-800 rounded-xl flex items-center gap-2 overflow-x-auto flex-wrap" x-show="getShowSeasons(show).length > 2">
+                  <div class="text-xs text-slate-500 font-semibold px-2 flex items-center gap-1.5">
+                    <i class="fa-solid fa-layer-group text-purple-400 text-[11px]"></i> Seasons:
+                  </div>
+                  <template x-for="season in getShowSeasons(show)" :key="season">
+                    <button @click="selectedSeason = season" 
+                            :class="selectedSeason === season ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30' : 'bg-slate-800/80 text-slate-400 hover:text-slate-200 hover:bg-slate-800'" 
+                            class="px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 whitespace-nowrap">
+                      <span x-text="season === 'All' ? 'All Seasons' : season"></span>
+                      <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono" 
+                            :class="selectedSeason === season ? 'bg-purple-800 text-purple-100' : 'bg-slate-700 text-slate-300'"
+                            x-text="getSeasonEpisodeCount(show, season)"></span>
+                      <span x-show="getSeasonMissingCount(show, season) > 0" 
+                            class="text-[10px] px-1.5 py-0.2 rounded-full font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 font-mono"
+                            x-text="getSeasonMissingCount(show, season) + ' missing'"></span>
+                    </button>
+                  </template>
 
-                        <div class="flex items-center gap-1.5 mt-2 flex-wrap" x-show="ep.subtitles && ep.subtitles.length > 0">
-                          <template x-for="s in ep.subtitles" :key="s.filename">
-                            <div class="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md border font-mono bg-purple-950/60 border-purple-800/50 text-purple-300">
-                              <i class="fa-solid fa-closed-captioning text-[10px] text-purple-400"></i>
-                              <span x-text="s.filename"></span>
-                              <span class="text-[10px] opacity-75" x-text="'(' + s.lines + ' lines)'"></span>
-                            </div>
-                          </template>
+                  <!-- Quick Action: Translate Selected Season Missing -->
+                  <div class="ml-auto flex items-center gap-2 pl-2" x-show="selectedSeason !== 'All' && getSeasonMissingCount(show, selectedSeason) > 0">
+                    <button @click="translateSeasonMissing(show, selectedSeason)" class="px-3 py-1 bg-purple-600/80 hover:bg-purple-600 text-white rounded-lg text-xs font-semibold transition flex items-center gap-1.5 shadow-md shadow-purple-900/30 whitespace-nowrap">
+                      <i class="fa-solid fa-wand-magic-sparkles text-[11px]"></i>
+                      <span>Translate <span x-text="selectedSeason"></span> Missing (<span x-text="getSeasonMissingCount(show, selectedSeason)"></span>)</span>
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Episodes List -->
+                <div class="divide-y divide-slate-800/50 space-y-2">
+                  <template x-for="ep in getFilteredEpisodes(show, selectedSeason)" :key="ep.path">
+                    <div class="p-3.5 bg-slate-950/60 border border-slate-800/60 rounded-xl flex items-center justify-between hover:border-slate-700 transition">
+                      <div class="flex items-center space-x-3">
+                        <i class="fa-solid fa-video text-purple-400 text-lg"></i>
+                        <div>
+                          <div class="flex items-center gap-2">
+                            <span class="font-medium text-slate-100 text-sm" x-text="ep.filename"></span>
+                            <span class="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700" x-text="ep.season"></span>
+                            <span x-show="!ep.has_target_sub" class="text-[10px] px-2 py-0.5 rounded bg-amber-950/50 text-amber-400 border border-amber-900/50 font-mono font-semibold">
+                              NO SUBTITLE
+                            </span>
+                          </div>
+                          <div class="text-xs text-slate-500" x-text="ep.path + ' (' + ep.size_mb + ' MB)'"></div>
+
+                          <div class="flex items-center gap-1.5 mt-2 flex-wrap" x-show="ep.subtitles && ep.subtitles.length > 0">
+                            <template x-for="s in ep.subtitles" :key="s.filename">
+                              <div class="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md border font-mono bg-purple-950/60 border-purple-800/50 text-purple-300">
+                                <i class="fa-solid fa-closed-captioning text-[10px] text-purple-400"></i>
+                                <span x-text="s.filename"></span>
+                                <span class="text-[10px] opacity-75" x-text="'(' + s.lines + ' lines)'"></span>
+                              </div>
+                            </template>
+                          </div>
                         </div>
                       </div>
-                    </div>
 
-                    <div class="flex items-center space-x-2">
-                      <button x-show="ep.has_target_sub" @click="deleteSubtitles(ep)" class="px-3 py-1.5 bg-slate-800 hover:bg-rose-950/50 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-900/50 rounded-xl text-xs font-semibold transition flex items-center gap-1.5">
-                        <i class="fa-solid fa-trash-can"></i> Delete Subs
-                      </button>
+                      <div class="flex items-center space-x-2">
+                        <button x-show="ep.has_target_sub" @click="deleteSubtitles(ep)" class="px-3 py-1.5 bg-slate-800 hover:bg-rose-950/50 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-900/50 rounded-xl text-xs font-semibold transition flex items-center gap-1.5">
+                          <i class="fa-solid fa-trash-can"></i> Delete Subs
+                        </button>
 
-                      <button @click="triggerProcess(ep.path, ep.has_target_sub)" class="px-4 py-1.5 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5" :class="ep.has_target_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
-                        <i class="fa-solid" :class="ep.has_target_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles'"></i>
-                        <span x-text="ep.has_target_sub ? 'Re-translate (Force)' : 'Translate Now'"></span>
-                      </button>
+                        <button @click="triggerProcess(ep.path, ep.has_target_sub, ep.filename)" :disabled="processingItems[ep.path]" class="px-4 py-1.5 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-not-allowed" :class="ep.has_target_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
+                          <i class="fa-solid" :class="processingItems[ep.path] ? 'fa-spinner fa-spin' : (ep.has_target_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles')"></i>
+                          <span x-text="processingItems[ep.path] ? 'Queuing...' : (ep.has_target_sub ? 'Re-translate (Force)' : 'Translate Now')"></span>
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                </template>
+                  </template>
+                </div>
               </div>
             </div>
           </template>
@@ -387,9 +422,9 @@
                   <i class="fa-solid fa-trash-can"></i> Delete Subs
                 </button>
 
-                <button @click="triggerProcess(movie.path, movie.has_target_sub)" class="px-4 py-2 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5" :class="movie.has_target_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
-                  <i class="fa-solid" :class="movie.has_target_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles'"></i>
-                  <span x-text="movie.has_target_sub ? 'Re-translate (Force)' : 'Translate Now'"></span>
+                <button @click="triggerProcess(movie.path, movie.has_target_sub, movie.filename)" :disabled="processingItems[movie.path]" class="px-4 py-2 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-not-allowed" :class="movie.has_target_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
+                  <i class="fa-solid" :class="processingItems[movie.path] ? 'fa-spinner fa-spin' : (movie.has_target_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles')"></i>
+                  <span x-text="processingItems[movie.path] ? 'Queuing...' : (movie.has_target_sub ? 'Re-translate (Force)' : 'Translate Now')"></span>
                 </button>
               </div>
             </div>
@@ -1163,6 +1198,7 @@
         bazarrTestSuccess: false,
         copiedWebhook: null,
         newLangSelection: '',
+        processingItems: {},
         toastMessage: '',
         toastType: 'success',
         toastTimeout: null,
@@ -1568,21 +1604,70 @@
           }
         },
 
-        async triggerProcess(path, force = false) {
-          this.currentTab = 'dashboard';
+        async triggerProcess(path, force = false, title = '') {
+          this.processingItems[path] = true;
+          const displayTitle = title || path.split('/').pop();
+          this.showToast((force ? 'Forcing re-translation for ' : 'Queuing translation for ') + displayTitle, 'info');
+          
           try {
-            fetch('/webhook/process', {
+            await fetch('/webhook/process', {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify({video_path: path, force_retranslate: force})
-            }).then(() => {
-              this.loadJobs();
-              this.loadStats();
             });
-            setTimeout(() => { this.loadJobs(); }, 300);
+            this.currentTab = 'dashboard';
+            await this.loadJobs();
+            await this.loadStats();
           } catch(e) {
             this.showToast('Error triggering process: ' + e, 'error');
+          } finally {
+            delete this.processingItems[path];
           }
+        },
+
+        getShowSeasons(show) {
+          if (!show || !show.episodes || show.episodes.length === 0) return ['All'];
+          const seasons = Array.from(new Set(show.episodes.map(ep => ep.season || 'Root')));
+          seasons.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+          return ['All', ...seasons];
+        },
+
+        getSeasonEpisodeCount(show, season) {
+          if (!show || !show.episodes) return 0;
+          if (season === 'All') return show.episodes.length;
+          return show.episodes.filter(ep => (ep.season || 'Root') === season).length;
+        },
+
+        getSeasonMissingCount(show, season) {
+          if (!show || !show.episodes) return 0;
+          if (season === 'All') return show.episodes.filter(ep => !ep.has_target_sub).length;
+          return show.episodes.filter(ep => (ep.season || 'Root') === season && !ep.has_target_sub).length;
+        },
+
+        getFilteredEpisodes(show, season) {
+          if (!show || !show.episodes) return [];
+          if (!season || season === 'All') return show.episodes;
+          return show.episodes.filter(ep => (ep.season || 'Root') === season);
+        },
+
+        async translateSeasonMissing(show, season) {
+          if (!show || !show.episodes) return;
+          const missing = show.episodes.filter(ep => (ep.season || 'Root') === season && !ep.has_target_sub).map(ep => ep.path);
+          if (missing.length === 0) return;
+          
+          const countText = missing.length === 1 ? 'the missing episode' : `all ${missing.length} missing episodes`;
+          this.showConfirm('Translate Season Missing', `Are you sure you want to translate ${countText} of "${show.title} - ${season}"?`, async () => {
+            this.currentTab = 'dashboard';
+            for (const path of missing) {
+              await fetch('/webhook/process', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({video_path: path, force_retranslate: false})
+              });
+            }
+            await this.loadJobs();
+            await this.loadStats();
+          });
         },
 
         getMissingCount() {
