@@ -52,7 +52,7 @@ This real-world job processed **1,498 / 1,498 cues** with **0 dropped cues**, **
 </p>
 
 
-Import -> search -> prepare fallback -> translate if needed -> recover -> validate -> publish
+Import -> search -> fallback -> translate -> recover -> QA -> publish
 
 ---
 
