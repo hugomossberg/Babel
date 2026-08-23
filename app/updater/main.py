@@ -1,14 +1,44 @@
 import os
+import re
 import asyncio
+import secrets
+import logging
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Header, Depends
 from pydantic import BaseModel
+from typing import Optional
 
-app = FastAPI()
+app = FastAPI(title="Babel Updater")
+logger = logging.getLogger("babel.updater")
 
 DOCKER_SOCKET = "/var/run/docker.sock"
 BABEL_CONTAINER_NAME = os.getenv("BABEL_CONTAINER_NAME", "babel")
 ALLOWED_IMAGE = os.getenv("ALLOWED_IMAGE", "ghcr.io/hugomossberg/babel")
+AUTH_FILE_PATH = "/app/auth/updater_secret"
+
+def bootstrap_updater_secret() -> str:
+    env_sec = os.getenv("BABEL_UPDATER_SECRET", os.getenv("UPDATER_SECRET", "")).strip()
+    if env_sec:
+        return env_sec
+    try:
+        os.makedirs(os.path.dirname(AUTH_FILE_PATH), exist_ok=True)
+        if not os.path.exists(AUTH_FILE_PATH):
+            new_sec = secrets.token_hex(32)
+            import tempfile
+            fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(AUTH_FILE_PATH))
+            with os.fdopen(fd, 'w') as f:
+                f.write(new_sec)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, AUTH_FILE_PATH)
+        with open(AUTH_FILE_PATH, "r") as f:
+            return f.read().strip()
+    except Exception as e:
+        logger.error(f"Failed to bootstrap updater secret: {e}")
+        return ""
+
+UPDATER_SECRET = bootstrap_updater_secret()
+
+UPDATER_STATE = "idle"
 
 async def call_docker(method: str, path: str, json_data=None, timeout=30.0):
     transport = httpx.AsyncHTTPTransport(uds=DOCKER_SOCKET)
@@ -21,45 +51,107 @@ async def call_docker(method: str, path: str, json_data=None, timeout=30.0):
             return await client.delete(path)
 
 class UpdateRequest(BaseModel):
-    image: str
+    target_version: str
+
+def verify_updater_token(request: Request, x_updater_token: Optional[str] = Header(None)):
+    token = x_updater_token or ""
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        if auth.lower().startswith("bearer "):
+            token = auth[7:].strip()
+
+    if not UPDATER_SECRET:
+        logger.error("UPDATER_SECRET is not configured on updater service")
+        raise HTTPException(status_code=401, detail="Updater authentication not configured")
+
+    if not token or not secrets.compare_digest(token, UPDATER_SECRET):
+        raise HTTPException(status_code=401, detail="Invalid or missing updater token")
 
 async def rollback(old_container_name: str, new_container_name: str):
-    await call_docker("DELETE", f"/containers/{new_container_name}?force=true")
-    await call_docker("POST", f"/containers/{old_container_name}/rename?name={new_container_name}")
-    await call_docker("POST", f"/containers/{new_container_name}/start")
+    global UPDATER_STATE
+    UPDATER_STATE = "rolling_back"
+    logger.warning(f"Initiating rollback: removing {new_container_name}, restoring {old_container_name}")
+    try:
+        await call_docker("DELETE", f"/containers/{new_container_name}?force=true")
+        await call_docker("POST", f"/containers/{old_container_name}/rename?name={new_container_name}")
+        await call_docker("POST", f"/containers/{new_container_name}/start")
+        UPDATER_STATE = "rolled_back"
+        logger.info(f"Rollback to {new_container_name} completed successfully")
+    except Exception as e:
+        UPDATER_STATE = "failed"
+        logger.critical(f"CRITICAL: Rollback failed for {old_container_name} -> {new_container_name}: {e}")
+
+@app.get("/health")
+def health():
+    return {"status": "updater_healthy"}
+
+@app.get("/status")
+def get_status(token_auth: None = Depends(verify_updater_token)):
+    return {"status": UPDATER_STATE}
 
 @app.post("/update")
-async def perform_update(req: UpdateRequest):
-    if not req.image.startswith(ALLOWED_IMAGE):
-        raise HTTPException(status_code=403, detail="Image not allowed")
+async def perform_update(req: UpdateRequest, token_auth: None = Depends(verify_updater_token)):
+    global UPDATER_STATE
+    if UPDATER_STATE not in ["idle", "success", "failed", "rolled_back"]:
+        raise HTTPException(status_code=409, detail=f"Update already in progress ({UPDATER_STATE})")
+
+    tag = req.target_version.strip()
+    if not re.match(r'^v?\d+\.\d+\.\d+(?:-beta)?$', tag):
+        raise HTTPException(status_code=400, detail="Invalid target_version format")
+
+    full_image = f"{ALLOWED_IMAGE}:{tag}"
+    UPDATER_STATE = "inspecting"
     
     # 1. Inspect old container
     res = await call_docker("GET", f"/containers/{BABEL_CONTAINER_NAME}/json")
     if res.status_code != 200:
+        UPDATER_STATE = "failed"
         raise HTTPException(status_code=500, detail=f"Failed to find container '{BABEL_CONTAINER_NAME}'")
     
     old_config = res.json()
     
     # 2. Pull new image
-    parts = req.image.split(":")
-    tag = parts[1] if len(parts) > 1 else "latest"
-    # Provide a long timeout for the image pull. 
-    pull_res = await call_docker("POST", f"/images/create?fromImage={parts[0]}&tag={tag}", timeout=120.0)
+    UPDATER_STATE = "pulling"
+    pull_res = await call_docker("POST", f"/images/create?fromImage={ALLOWED_IMAGE}&tag={tag}", timeout=120.0)
     if pull_res.status_code != 200:
+        UPDATER_STATE = "failed"
         raise HTTPException(status_code=500, detail="Failed to pull image")
         
     config = old_config.get("Config", {})
     host_config = old_config.get("HostConfig", {})
     network_settings = old_config.get("NetworkSettings", {})
     
-    # Keep identical mounts, envs, ports.
-    config["Image"] = req.image
+    # 3. Retag new image to match the old container's image name
+    # This ensures docker-compose continues to work seamlessly without seeing a modified image name.
+    old_image_name = config.get("Image", "")
+    if old_image_name:
+        if ":" in old_image_name:
+            repo, original_tag = old_image_name.rsplit(":", 1)
+        else:
+            repo, original_tag = old_image_name, "latest"
+
+        retag_res = await call_docker("POST", f"/images/{full_image}/tag?repo={repo}&tag={original_tag}")
+        if retag_res.status_code != 201:
+            logger.warning(f"Failed to retag {full_image} to {old_image_name}, HTTP {retag_res.status_code}")
+    else:
+        config["Image"] = full_image
+
     config["HostConfig"] = host_config
     if "EndpointsConfig" in network_settings:
         config["NetworkingConfig"] = {"EndpointsConfig": network_settings["EndpointsConfig"]}
         
     old_name = f"{BABEL_CONTAINER_NAME}_rollback"
 
+    # Defensive check: if leftover rollback container exists from previous interrupted run, remove it safely
+    try:
+        inspect_rb = await call_docker("GET", f"/containers/{old_name}/json")
+        if inspect_rb.status_code == 200:
+            logger.info(f"Removing leftover rollback container {old_name}")
+            await call_docker("DELETE", f"/containers/{old_name}?force=true")
+    except Exception as e:
+        logger.warning(f"Check for leftover rollback container: {e}")
+
+    UPDATER_STATE = "replacing"
     # Stop old
     await call_docker("POST", f"/containers/{BABEL_CONTAINER_NAME}/stop")
     await call_docker("POST", f"/containers/{BABEL_CONTAINER_NAME}/rename?name={old_name}")
@@ -76,34 +168,43 @@ async def perform_update(req: UpdateRequest):
         await rollback(old_name, BABEL_CONTAINER_NAME)
         raise HTTPException(status_code=500, detail="Failed to start new container")
         
-    # Because making the HTTP request block on Docker healthchecks can cause timeouts on the client,
-    # we can start a background task or just wait here up to 20 seconds.
-    # The healthcheck usually takes 10s based on the compose settings.
-    async def verify_health():
-        for _ in range(8):
-            await asyncio.sleep(5)
-            health_res = await call_docker("GET", f"/containers/{BABEL_CONTAINER_NAME}/json")
-            if health_res.status_code != 200:
-                continue
-            
-            c_info = health_res.json()
-            health_status = c_info.get("State", {}).get("Health", {}).get("Status", "")
-            
-            if health_status == "healthy":
-                await call_docker("DELETE", f"/containers/{old_name}?v=false&force=true")
-                return
-            elif health_status == "unhealthy" or c_info.get("State", {}).get("Status") == "exited":
-                await rollback(old_name, BABEL_CONTAINER_NAME)
-                return
+    UPDATER_STATE = "verifying"
 
-    # Fire and forget health watchdog
+    # Health watchdog
+    async def verify_health():
+        global UPDATER_STATE
+        try:
+            for _ in range(12):
+                await asyncio.sleep(5)
+                health_res = await call_docker("GET", f"/containers/{BABEL_CONTAINER_NAME}/json")
+                if health_res.status_code != 200:
+                    continue
+
+                c_info = health_res.json()
+                state_info = c_info.get("State", {})
+                health_status = state_info.get("Health", {}).get("Status", "unknown")
+                container_status = state_info.get("Status", "")
+
+                if health_status == "healthy":
+                    logger.info("New container verified healthy. Removing rollback container.")
+                    await call_docker("DELETE", f"/containers/{old_name}?v=false&force=true")
+                    UPDATER_STATE = "success"
+                    return
+                elif health_status == "unhealthy" or container_status in ["exited", "dead"]:
+                    logger.error(f"New container unhealthy (health: {health_status}, status: {container_status}). Rolling back.")
+                    await rollback(old_name, BABEL_CONTAINER_NAME)
+                    return
+            
+            # If timeout waiting for healthy
+            logger.error("Health verification timed out waiting for healthy status. Rolling back.")
+            await rollback(old_name, BABEL_CONTAINER_NAME)
+        except Exception as e:
+            logger.critical(f"Watchdog exception during health verification: {e}")
+            await rollback(old_name, BABEL_CONTAINER_NAME)
+
     asyncio.create_task(verify_health())
 
     return {"status": "started", "message": "Update triggered. Awaiting health verification."}
-
-@app.get("/health")
-def health():
-    return {"status": "updater_healthy"}
 
 if __name__ == "__main__":
     import uvicorn

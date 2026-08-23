@@ -9,8 +9,10 @@ services:
       - BABEL_AUTH_USERNAME=${BABEL_AUTH_USERNAME:-}
       - BABEL_AUTH_PASSWORD=${BABEL_AUTH_PASSWORD:-}
       - BABEL_WEBHOOK_SECRET=${BABEL_WEBHOOK_SECRET:-}
+      - "BABEL_UPDATER_SECRET=${BABEL_UPDATER_SECRET:-}"
     volumes:
       - ./data:/app/data
+      - babel_updater_auth:/app/auth:ro
       - ${TV_PATH:-/path/to/tv}:/tv
       - ${MOVIES_PATH:-/path/to/movies}:/movies
     restart: unless-stopped
@@ -20,3 +22,19 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  babel-updater:
+    image: ghcr.io/hugomossberg/babel:beta
+    container_name: babel-updater
+    command: python /app/app/updater/main.py
+    environment:
+      - BABEL_CONTAINER_NAME=babel
+      - ALLOWED_IMAGE=ghcr.io/hugomossberg/babel
+      - "BABEL_UPDATER_SECRET=${BABEL_UPDATER_SECRET:-}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - babel_updater_auth:/app/auth
+    restart: unless-stopped
+
+volumes:
+  babel_updater_auth:

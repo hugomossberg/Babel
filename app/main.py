@@ -98,6 +98,10 @@ async def serve_ui():
 
 
 async def process_one_retry_pass():
+    from app.services.updates_controller import updates_controller
+    if updates_controller.is_locked_for_update():
+        return
+
     from app.core.db import claim_job_for_retry
     try:
         jobs = get_jobs_by_status(["WAITING_PROVIDER", "RETRY_PENDING", "RECOVERING", "PARTIAL", "WAITING_SOURCE"])

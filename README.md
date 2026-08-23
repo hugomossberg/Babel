@@ -116,16 +116,25 @@ Babel is currently in **Public Beta** (`v2.3.23-beta`). The core pipeline, AI tr
 
 ## Quick Start
 
-Running Babel with Docker Compose requires only a single `docker-compose.yml` file.
+Running Babel with Docker Compose requires only a `docker-compose.yml` file. Babel automatically handles inner-container security generation out of the box.
 
-### 1. Create directory and compose file
+### 1. Create directory and download configuration
+
+The recommended installation uses the comprehensive `docker-compose.yml` from this repository, which includes the One-Click In-App updater.
 
 ```bash
 mkdir babel && cd babel
+curl -O https://raw.githubusercontent.com/hugomossberg/Babel/main/docker-compose.yml
 ```
 
-Create `docker-compose.yml`:
+2. Edit the file to map your volume paths:
+> **IMPORTANT: Volume Paths**
+>
+> You must map your host paths to Babel's container paths.
+> - For TV Shows: Change `/path/to/tv` (with your actual host path). Babel will see this as `/tv` internally.
+> - For Movies: Change `/path/to/movies` (with your actual host path). Babel will see this as `/movies` internally.
 
+*(Optional)* **Minimal Installation without Updater:** If you prefer not to use the in-app updater, instead create this minimal `docker-compose.yml` manually:
 ```yaml
 services:
   babel:
@@ -145,12 +154,6 @@ services:
       retries: 3
       start_period: 10s
 ```
-
-> **IMPORTANT: Volume Paths**
->
-> You must map your host paths to Babel's container paths.
-> - For TV Shows: Change `/path/to/tv` to your actual host path. Babel will see this as `/tv` internally.
-> - For Movies: Change `/path/to/movies` to your actual host path. Babel will see this as `/movies` internally.
 
 ### 2. Start and Verify
 
@@ -287,9 +290,9 @@ Babel coordinates with Bazarr's REST API:
 
 Most configuration is handled in the web interface and stored in `/app/data/babel.db`.
 
-### Optional Environment Variables
+### Environment Variables
 
-For advanced deployments, create an optional `.env` file alongside `docker-compose.yml`:
+Configuration is mostly handled in the web interface and stored in `/app/data/babel.db`. For advanced deployments, you can specify these environment variables in your `.env` file:
 
 | Variable | Default | Description |
 |---|---|---|
@@ -298,8 +301,19 @@ For advanced deployments, create an optional `.env` file alongside `docker-compo
 | `BABEL_AUTH_USERNAME` | *(empty)* | Optional Basic Auth username for web dashboard |
 | `BABEL_AUTH_PASSWORD` | *(empty)* | Optional Basic Auth password for web dashboard |
 | `BABEL_WEBHOOK_SECRET` | *(empty)* | Optional secret required on webhook requests (`?secret=...`) |
+| `BABEL_UPDATER_SECRET` | *(auto-generated)* | (Optional override) Secret for inner-container auth for updates |
 | `TV_PATH` | `/path/to/tv` | Host path mounted to `/tv` inside Babel |
 | `MOVIES_PATH` | `/path/to/movies` | Host path mounted to `/movies` inside Babel |
+
+### One-Click In-App Updates Details
+
+Babel supports updating itself directly from the web dashboard. The repository's `docker-compose.yml` includes the `babel-updater` sidecar container by default.
+
+**Zero-Configuration Security:** The `babel` and `babel-updater` containers automatically generate and share a secure inner-container token on their first start. No host ports are published by the updater, and the token is never exposed to the browser.
+
+When an update is detected, the dashboard simply displays an "Update now" button.
+
+*(Optional)* If you prefer to update strictly via `docker compose pull && docker compose up -d`, you can use the minimal `docker-compose.yml` provided in the Quick Start or manually remove the `babel-updater` service from your configuration.
 
 ---
 

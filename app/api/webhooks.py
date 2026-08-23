@@ -1,13 +1,20 @@
 import logging
 import os
-
-from fastapi import APIRouter, BackgroundTasks, Request, HTTPException
+import secrets
 from pathlib import Path
 from typing import Optional
+from fastapi import APIRouter, BackgroundTasks, Request, HTTPException
+from pydantic import BaseModel
+
+from app.core import db
+from app.services.pipeline import pipeline
+from app.services.updates_controller import updates_controller
+
+logger = logging.getLogger("babel.webhooks")
+router = APIRouter(prefix="/webhook", tags=["webhooks"])
 
 def validate_webhook_token(request: Request):
     from app.core.db import get_setting
-    import secrets
     expected = get_setting("webhook_secret", "").strip()
     if not expected:
         return # Auth not configured
@@ -27,28 +34,18 @@ def validate_path(video_path: str) -> str:
     from app.core.security import validate_media_path
     return validate_media_path(video_path)
 
-from pydantic import BaseModel
-
-from app.services.pipeline import pipeline
-
-logger = logging.getLogger("babel.webhooks")
-router = APIRouter(prefix="/webhook", tags=["webhooks"])
-
 class ManualProcessRequest(BaseModel):
     video_path: str
     wait_seconds: Optional[int] = None
     title: Optional[str] = None
     force_retranslate: Optional[bool] = False
 
-from app.core.db import get_setting
-
 def translate_path(remote_path: str) -> str:
     if not remote_path:
         return remote_path
 
-    from app.core.db import get_setting
-    remote_prefix = get_setting("remote_path_prefix", "").strip()
-    local_prefix = get_setting("local_path_prefix", "").strip()
+    remote_prefix = db.get_setting("remote_path_prefix", "").strip()
+    local_prefix = db.get_setting("local_path_prefix", "").strip()
     
     if remote_prefix:
         r_prefs = [p.strip() for p in remote_prefix.split(',')]
@@ -64,6 +61,8 @@ def translate_path(remote_path: str) -> str:
 @router.post("/sonarr")
 async def sonarr_webhook(request: Request, background_tasks: BackgroundTasks):
     validate_webhook_token(request)
+    if updates_controller.is_locked_for_update():
+        raise HTTPException(status_code=503, detail="System is in update maintenance mode, jobs are locked.")
     try:
         payload = await request.json()
     except Exception:
@@ -102,13 +101,13 @@ async def sonarr_webhook(request: Request, background_tasks: BackgroundTasks):
 
         if video_path:
             video_path = translate_path(video_path)
-            try: video_path = validate_path(video_path)
+            try:
+                video_path = validate_path(video_path)
             except HTTPException as e:
                 logger.error(f"Webhook path validation failed: {e.detail}")
                 return {"status": "error", "reason": e.detail}
             
-            from app.core.db import create_job
-            job_id = create_job(video_path=video_path, event_source="SONARR", title=title)
+            job_id = db.create_job(video_path=video_path, event_source="SONARR", title=title)
             logger.info(f"Queueing Babel processing for Sonarr episode: {video_path} (Job ID: {job_id})")
             background_tasks.add_task(
                 pipeline.process_video_file,
@@ -125,6 +124,8 @@ async def sonarr_webhook(request: Request, background_tasks: BackgroundTasks):
 @router.post("/radarr")
 async def radarr_webhook(request: Request, background_tasks: BackgroundTasks):
     validate_webhook_token(request)
+    if updates_controller.is_locked_for_update():
+        raise HTTPException(status_code=503, detail="System is in update maintenance mode, jobs are locked.")
     try:
         payload = await request.json()
     except Exception:
@@ -155,13 +156,13 @@ async def radarr_webhook(request: Request, background_tasks: BackgroundTasks):
 
         if video_path:
             video_path = translate_path(video_path)
-            try: video_path = validate_path(video_path)
+            try:
+                video_path = validate_path(video_path)
             except HTTPException as e:
                 logger.error(f"Webhook path validation failed: {e.detail}")
                 return {"status": "error", "reason": e.detail}
             
-            from app.core.db import create_job
-            job_id = create_job(video_path=video_path, event_source="RADARR", title=title)
+            job_id = db.create_job(video_path=video_path, event_source="RADARR", title=title)
             logger.info(f"Queueing Babel processing for Radarr movie: {video_path} (Job ID: {job_id})")
             background_tasks.add_task(
                 pipeline.process_video_file,
@@ -177,12 +178,10 @@ async def radarr_webhook(request: Request, background_tasks: BackgroundTasks):
 
 @router.post("/process")
 async def manual_process(req: ManualProcessRequest, background_tasks: BackgroundTasks):
-    # Bug #43: Validate that video_path is under configured media directories
-    import os, re
-    series_path = get_setting("media_series_path", "/tv")
-    movies_path = get_setting("media_movies_path", "/movies")
-    norm_path = os.path.normpath(req.video_path)
+    if updates_controller.is_locked_for_update():
+        raise HTTPException(status_code=503, detail="System is in update maintenance mode, jobs are locked.")
     
+    import re
     req.video_path = validate_path(req.video_path)
 
     title = req.title
@@ -191,8 +190,7 @@ async def manual_process(req: ManualProcessRequest, background_tasks: Background
         base = os.path.splitext(base)[0]
         title = re.sub(r'(?i)(WEBDL|WEB-DL|WEB|HDTV|Bluray|720p|1080p|2160p|4K|x264|x265|HDR|AMZN).*', '', base).strip(' -._')
 
-    from app.core.db import create_job
-    job_id = create_job(video_path=req.video_path, event_source="MANUAL", title=title)
+    job_id = db.create_job(video_path=req.video_path, event_source="MANUAL", title=title)
     logger.info(f"Queueing manual Babel processing: {req.video_path} (Job ID: {job_id})")
 
     background_tasks.add_task(
