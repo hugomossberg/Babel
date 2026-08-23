@@ -68,7 +68,7 @@ def test_header_update_pill_and_single_popover():
 
     # 6. Active jobs waiting state
     assert "Waiting for active jobs to finish" in html
-    assert "stats.active_jobs === 0" in html
+    assert "(stats.active_jobs || 0) === 0" in html
 
     # 7. Updating state inside popover
     assert "Updating Babel..." in html

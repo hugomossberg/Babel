@@ -312,6 +312,7 @@ def get_job_stats() -> Dict[str, Any]:
         healthy = cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'HEALTHY'").fetchone()[0]
         repaired = cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'REPAIRED'").fetchone()[0]
         failed = cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'FAILED'").fetchone()[0]
+        active = cursor.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('EXTRACTING', 'TRANSLATING', 'QUEUED', 'WAITING_PROVIDER', 'RECOVERING', 'PARTIAL', 'WAITING_SOURCE')").fetchone()[0]
         avg_dur = cursor.execute("SELECT AVG(duration_seconds) FROM jobs WHERE status IN ('TRANSLATED', 'REPAIRED', 'SUCCESS')").fetchone()[0] or 0.0
         return {
             "total": total,
@@ -319,6 +320,7 @@ def get_job_stats() -> Dict[str, Any]:
             "healthy": healthy,
             "repaired": repaired,
             "failed": failed,
+            "active_jobs": active,
             "avg_duration_seconds": round(avg_dur, 1)
         }
 

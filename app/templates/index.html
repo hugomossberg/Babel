@@ -102,12 +102,12 @@
                   <button @click="popoverOpen = false; currentTab = 'settings'; settingsTab = 'system'" class="text-[11px] text-purple-400 hover:text-purple-300 transition underline underline-offset-2">
                     View details
                   </button>
-                  <template x-if="updateData.one_click_update_available && stats.active_jobs === 0">
+                  <template x-if="updateData.one_click_update_available && (stats.active_jobs || 0) === 0">
                     <button @click="startUpdate()" id="btn-popover-update" class="px-3 py-1.5 bg-green-600 hover:bg-green-500 rounded-lg text-xs font-medium text-white shadow-lg shadow-green-900/20 transition flex items-center gap-1.5">
                       <i class="fa-solid fa-cloud-arrow-down text-[11px]"></i> Update now
                     </button>
                   </template>
-                  <template x-if="updateData.one_click_update_available && stats.active_jobs > 0">
+                  <template x-if="updateData.one_click_update_available && (stats.active_jobs || 0) > 0">
                     <span class="text-[11px] text-amber-400/90 font-medium flex items-center gap-1">
                       <i class="fa-solid fa-hourglass-half text-[10px]"></i> Waiting for active jobs to finish
                     </span>
@@ -1212,13 +1212,13 @@
                   </div>
 
                   <div class="mt-6 pt-4 border-t border-slate-800" x-show="updateData.update_available && ['idle', 'success', 'failed', 'rolled_back'].includes(updateData.updater_status)">
-                      <template x-if="updateData.one_click_update_available && stats.active_jobs === 0">
+                      <template x-if="updateData.one_click_update_available && (stats.active_jobs || 0) === 0">
                           <div>
                               <button @click="startUpdate()" class="w-full sm:w-auto px-6 py-2.5 bg-green-600 hover:bg-green-500 text-white rounded-xl text-sm font-medium transition shadow-lg shadow-green-900/20 flex items-center gap-2"><i class="fa-solid fa-cloud-arrow-down"></i> Update to <span x-text="updateData.latest_version"></span></button>
                               <p class="text-xs text-slate-500 mt-3">Babel will briefly restart. Your database and settings are preserved.</p>
                           </div>
                       </template>
-                      <template x-if="updateData.one_click_update_available && stats.active_jobs > 0">
+                      <template x-if="updateData.one_click_update_available && (stats.active_jobs || 0) > 0">
                           <div>
                               <button disabled class="w-full sm:w-auto px-6 py-2.5 bg-slate-800 text-slate-500 rounded-xl text-sm font-medium border border-slate-700 cursor-not-allowed"><i class="fa-solid fa-hourglass-half mr-2"></i> Update paused (Jobs running)</button>
                               <p class="text-xs text-yellow-500/70 mt-3"><i class="fa-solid fa-triangle-exclamation mr-1"></i> Cannot update while subtitle jobs are active. Please wait for them to finish.</p>
@@ -1407,7 +1407,7 @@ docker compose up -d babel</pre>
           <button @click="showUpdateNotes = false" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-medium text-white transition">
             Close
           </button>
-          <template x-if="updateData.update_available && updateData.one_click_update_available && stats.active_jobs === 0">
+          <template x-if="updateData.update_available && updateData.one_click_update_available && (stats.active_jobs || 0) === 0">
             <button @click="showUpdateNotes = false; startUpdate()" class="px-4 py-2 bg-green-600 hover:bg-green-500 rounded-xl text-xs font-medium text-white shadow-lg shadow-green-900/20 transition flex items-center gap-2">
               <i class="fa-solid fa-cloud-arrow-down"></i> Update now
             </button>
@@ -2110,7 +2110,7 @@ docker compose up -d babel</pre>
         },
         
         startUpdate() {
-            if (this.stats && this.stats.active_jobs > 0) {
+            if (this.stats && (this.stats.active_jobs || 0) > 0) {
                 this.showToast('Waiting for active jobs to finish before updating', 'info');
                 return;
             }
