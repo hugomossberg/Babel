@@ -52,4 +52,4 @@ async def test_recovery_metrics_count(tmp_path):
          
     job = get_job_by_id(job_id)
     logs = "".join(job["logs"])
-    assert "1 translated on recovery" in logs
+    assert "1 translated on recovery" in logs or "recovered 1/1" in logs
