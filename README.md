@@ -40,7 +40,7 @@ Babel is currently in **Public Beta** (`v2.3.23-beta`). The core pipeline, AI tr
 ### Subtitle Resolution & Extraction
 - **Embedded Track Extraction:** Extracts embedded text subtitle tracks directly from MKV/MP4 containers with `ffmpeg`/`mkvextract`.
 - **Existing Subtitle Protection:** Detects existing target language subtitles and skips redundant translation.
-- **Bazarr Coordination:** In Hybrid Mode, gives Bazarr a configurable grace window to acquire human subtitles before engaging AI.
+- **Bazarr Coordination:** In Hybrid Mode, checks Bazarr for human subtitles while preparing AI fallback, eliminating fixed delay windows.
 - **Source Fallback:** Automatically falls back to external source files (`.en.srt`) or Bazarr-downloaded source tracks if embedded tracks are absent.
 
 ### AI Translation Engine
@@ -145,17 +145,16 @@ Target subtitle already present?
        ├── Yes ──► Validate / Keep existing
        │
        ▼
-[Hybrid Mode] Bazarr grace period check
+[Hybrid Mode] Trigger Bazarr search & prepare AI fallback in parallel
        │
-       ├── Found ──► Adopt human subtitle
-       │
-       ▼
-Resolve best source subtitle (Embedded MKV Track > External .srt)
+       ├─► Fallback Prep (Extract embedded source / SDH sanitize / Validate)
        │
        ▼
-SDH & Noise Sanitizer (Preserves timing blocks)
+Final Target / Bazarr Check (after preparation)
        │
-       ▼
+       ├── Found ──► Adopt human subtitle (AI provider calls = 0)
+       │
+       ▼ (Miss)
 AI Translation in batched chunks
        │
        ▼
@@ -178,10 +177,10 @@ Atomic publication (.target.srt) & Media Server Refresh
 ## Pipeline Modes
 
 ### Hybrid Mode (Recommended for mixed libraries)
-Babel gives Bazarr a configurable grace window (e.g., 15 seconds) to locate a human-made subtitle. If Bazarr succeeds, Babel adopts it. If Bazarr finds nothing, Babel extracts the embedded source track and translates it with AI.
+Babel checks Bazarr for an existing human subtitle while preparing its AI fallback. This avoids a fixed waiting delay. If no target subtitle is available when preparation is complete, AI translation begins immediately.
 
 ### Pure AI Mode (Fastest)
-Babel immediately extracts the embedded source track and translates it with AI (0 seconds wait time), bypassing Bazarr searches entirely.
+Babel immediately extracts the embedded source track and translates it with AI, bypassing Bazarr searches entirely.
 
 ---
 
@@ -225,7 +224,6 @@ If Sonarr/Radarr runs in a container with different mount paths than Babel (e.g.
 Babel coordinates with Bazarr's REST API:
 - In Settings, enter your **Bazarr Host URL** (e.g. `http://bazarr:6767`) and **API Key**.
 - Use **Test Connection** to verify connectivity.
-- Configure the **Wait Time (seconds)** for Hybrid Mode.
 
 ---
 

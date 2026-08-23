@@ -67,7 +67,7 @@ class IntegrationsSettingsRequest(BaseModel):
     bazarr_url: str
     bazarr_api_key: str
     bazarr_container_name: str
-    wait_time_seconds: int
+    wait_time_seconds: Optional[int] = None  # Deprecated legacy parameter, ignored by runtime
     notify_jellyfin: bool
     jellyfin_url: str
     jellyfin_api_key: str
@@ -399,7 +399,8 @@ async def api_save_integrations(req: IntegrationsSettingsRequest):
     if not is_masked_secret(req.bazarr_api_key):
         set_setting("bazarr_api_key", req.bazarr_api_key.strip() if req.bazarr_api_key else "")
     set_setting("bazarr_container_name", req.bazarr_container_name)
-    set_setting("wait_time_seconds", str(req.wait_time_seconds))
+    if req.wait_time_seconds is not None:
+        set_setting("wait_time_seconds", str(req.wait_time_seconds))
     set_setting("notify_jellyfin", "true" if req.notify_jellyfin else "false")
     set_setting("jellyfin_url", req.jellyfin_url)
     if not is_masked_secret(req.jellyfin_api_key):

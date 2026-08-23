@@ -984,52 +984,19 @@ class SubtitlePipeline:
             return {"status": "skipped", "reason": "already_exists", "job_id": job_id}
 
         # -------------------------------------------------------------
-        # HYBRID MODE: Check Bazarr for human target subtitles
+        # HYBRID MODE: Trigger Bazarr search in background (if enabled)
         # -------------------------------------------------------------
+        prep_start_time = time.time()
         if enable_bazarr and not force_retranslate:
-            if event_source == "RETRY":
-                bazarr_wait = 0
-            else:
-                bazarr_wait = wait_seconds if wait_seconds is not None else int(get_setting("wait_time_seconds", "15"))
-            if bazarr_wait > 0:
-                # Trigger Bazarr search for each missing target language
-                for lang_info in langs_needing_translation:
-                    append_job_log(job_id, f"Hybrid Mode: Triggering Bazarr search for {lang_info['name']} ({lang_info['code']})...")
+            for lang_info in langs_needing_translation:
+                append_job_log(job_id, f"Hybrid Mode: Triggering Bazarr search for {lang_info['name']} ({lang_info['code']})...")
+                try:
                     await self.trigger_bazarr_search(video_path, language=lang_info["code"])
-
-                # Wait and poll for results
-                elapsed = 0
-                while elapsed < bazarr_wait:
-                    await asyncio.sleep(2)
-                    elapsed += 2
-
-                    still_missing = []
-                    for lang_info in langs_needing_translation:
-                        existing = find_external_subtitle(video_path, lang_info["code"])
-                        if existing:
-                            if auto_repair_unhealthy:
-                                health = evaluate_subtitle_health(existing, target_lang_code=lang_info["code"])
-                                if health.get("status") == "RED":
-                                    still_missing.append(lang_info)
-                                    continue
-                            append_job_log(job_id, f"Bazarr found {lang_info['name']} subtitle: {os.path.basename(existing)}")
-                        else:
-                            still_missing.append(lang_info)
-
-                    langs_needing_translation = still_missing
-                    if not langs_needing_translation:
-                        break
-
-                if not langs_needing_translation:
-                    duration = round(time.time() - start_time, 2)
-                    update_job(job_id, status="BAZARR MATCH", reason="Bazarr found all target subtitles", duration_seconds=duration)
-                    await self._maybe_notify_jellyfin()
-                    return {"status": "skipped", "reason": "bazarr_downloaded", "job_id": job_id}
-
-                append_job_log(job_id, f"Bazarr grace period ended ({bazarr_wait}s). {len(langs_needing_translation)} language(s) still need AI translation.")
+                except Exception as e:
+                    logger.warning(f"Failed to trigger Bazarr search: {e}")
 
         # -------------------------------------------------------------
-        # LOCATE SOURCE SUBTITLE for AI translation
+        # LOCATE SOURCE SUBTITLE for AI translation (Fallback Prep)
         # Priority: 1. Embedded English, 2. External English, 3. Bazarr English fallback
         # -------------------------------------------------------------
         raw_srt_text = ""
@@ -1121,6 +1088,37 @@ class SubtitlePipeline:
                 subs = list(srt.parse(raw_srt_text))
                 cleaned_count = 0
                 append_job_log(job_id, f"SDH cleaner disabled. Parsed {len(subs)} blocks directly.")
+
+            prep_duration_ms = round((time.time() - prep_start_time) * 1000, 1)
+
+            # -------------------------------------------------------------
+            # FINAL BAZARR CHECK (Target check before initiating AI translation)
+            # -------------------------------------------------------------
+            if enable_bazarr and not force_retranslate:
+                still_missing = []
+                for lang_info in langs_needing_translation:
+                    existing = find_external_subtitle(video_path, lang_info["code"])
+                    if existing:
+                        if auto_repair_unhealthy:
+                            health = evaluate_subtitle_health(existing, target_lang_code=lang_info["code"])
+                            if health.get("status") == "RED":
+                                still_missing.append(lang_info)
+                                continue
+                        append_job_log(job_id, f"Bazarr found {lang_info['name']} subtitle: {os.path.basename(existing)}")
+                    else:
+                        still_missing.append(lang_info)
+
+                langs_needing_translation = still_missing
+                if not langs_needing_translation:
+                    duration = round(time.time() - start_time, 2)
+                    update_job(job_id, status="BAZARR MATCH", reason="Bazarr found all target subtitles", duration_seconds=duration)
+                    if os.path.exists(temp_extracted_srt):
+                        try: os.remove(temp_extracted_srt)
+                        except Exception: pass
+                    await self._maybe_notify_jellyfin()
+                    return {"status": "skipped", "reason": "bazarr_downloaded", "job_id": job_id}
+                else:
+                    append_job_log(job_id, f"Hybrid preparation completed in {prep_duration_ms}ms. Bazarr result: miss. Starting AI immediately (fixed grace delay avoided).")
 
             total_source_lines = len(subs)
             batch_size = get_positive_int_setting("batch_size", 50)

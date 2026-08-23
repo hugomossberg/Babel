@@ -874,7 +874,7 @@
                       </div>
                       <div>
                         <h4 class="font-bold text-sm text-white">Hybrid Mode</h4>
-                        <span class="text-[10px] text-purple-300 font-mono">Bazarr Search Delay + AI Fallback</span>
+                        <span class="text-[10px] text-purple-300 font-mono">Parallel Prep + Bazarr Coordination</span>
                       </div>
                     </div>
                     <div class="w-5 h-5 rounded-full border flex items-center justify-center" :class="settingsData.integrations.enable_bazarr_check ? 'border-purple-500 bg-purple-600' : 'border-slate-700 bg-slate-900'">
@@ -882,7 +882,7 @@
                     </div>
                   </div>
                   <p class="text-xs text-slate-400 leading-relaxed">
-                    Waits for Bazarr to search human subtitles first. If no subtitle is found within the grace period, Babel AI translates.
+                    Babel checks for human subtitles through Bazarr while preparing the AI fallback. If no target subtitle is available when preparation completes, translation starts immediately.
                   </p>
                 </div>
 
@@ -903,7 +903,7 @@
                     </div>
                   </div>
                   <p class="text-xs text-slate-400 leading-relaxed">
-                    Babel extracts embedded tracks and translates immediately. Runs completely standalone (no external dependencies).
+                    Babel extracts embedded tracks and translates immediately, bypassing Bazarr searches entirely. Runs completely standalone (no external dependencies).
                   </p>
                 </div>
               </div>
@@ -931,14 +931,9 @@
                   </div>
                 </div>
 
-                <!-- Grace Delay Slider -->
-                <div>
-                  <div class="flex items-center justify-between mb-1">
-                    <label class="text-[11px] font-medium text-slate-400">Bazarr Search Grace Delay</label>
-                    <span class="font-mono text-purple-400 font-bold text-xs" x-text="settingsData.integrations.wait_time_seconds + ' seconds'"></span>
-                  </div>
-                  <input type="range" x-model.number="settingsData.integrations.wait_time_seconds" min="5" max="60" step="5" class="w-full accent-purple-500 bg-slate-800 rounded-lg h-2 cursor-pointer">
-                  <span class="text-[10px] text-slate-500 block mt-1">Seconds Babel gives Bazarr to fetch human subtitles before AI translates.</span>
+                <div class="p-3 bg-purple-950/20 border border-purple-800/30 rounded-xl text-slate-400 text-xs flex items-start gap-2">
+                  <i class="fa-solid fa-bolt text-purple-400 mt-0.5 text-xs"></i>
+                  <span><strong>Zero-Wait Hybrid:</strong> Bazarr searches for human subtitles concurrently while Babel prepares the AI fallback. No fixed delay window.</span>
                 </div>
 
                 <div class="flex justify-end pt-1">
@@ -1237,7 +1232,6 @@
             bazarr_api_key: '',
             bazarr_container_name: 'bazarr',
             bazarr_container_status: { running: true },
-            wait_time_seconds: 15,
             notify_jellyfin: false,
             jellyfin_url: '',
             jellyfin_api_key: ''
@@ -1308,14 +1302,10 @@
 
         selectHybridMode() {
           this.settingsData.integrations.enable_bazarr_check = true;
-          if (!this.settingsData.integrations.wait_time_seconds || this.settingsData.integrations.wait_time_seconds <= 0) {
-            this.settingsData.integrations.wait_time_seconds = 15;
-          }
         },
 
         selectPureAIMode() {
           this.settingsData.integrations.enable_bazarr_check = false;
-          this.settingsData.integrations.wait_time_seconds = 0;
         },
 
         refreshingActivity: false,
@@ -1396,9 +1386,6 @@
           try {
             const res = await fetch('/api/settings/all');
             this.settingsData = await res.json();
-            if (this.settingsData.integrations.enable_bazarr_check && (!this.settingsData.integrations.wait_time_seconds || this.settingsData.integrations.wait_time_seconds <= 0)) {
-              this.settingsData.integrations.wait_time_seconds = 15;
-            }
             this.availableLanguages = this.settingsData.available_languages || [];
           } catch(e) {}
         },

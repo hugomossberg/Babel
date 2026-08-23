@@ -39,13 +39,11 @@ class BazarrController:
             return {"connected": False, "message": "Connection failed"}
 
     @staticmethod
-    async def trigger_search_and_wait(bazarr_url: str, api_key: str, video_path: str, wait_seconds: int = 15) -> bool:
+    async def trigger_search_and_wait(bazarr_url: str, api_key: str, video_path: str, wait_seconds: int = 0) -> bool:
+        """Deprecated legacy method retained for backwards compatibility."""
         if not bazarr_url:
-            await asyncio.sleep(wait_seconds)
             return True
-
-        logger.info(f"Triggering Bazarr search for {video_path} (Grace delay: {wait_seconds}s)")
-        await asyncio.sleep(wait_seconds)
+        logger.info(f"Triggering Bazarr search for {video_path}")
         return True
 
 bazarr_controller = BazarrController()
