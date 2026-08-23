@@ -371,9 +371,9 @@
                           <i class="fa-solid fa-trash-can"></i> Delete Subs
                         </button>
 
-                        <button @click="triggerProcess(ep.path, ep.has_target_sub, ep.filename)" :disabled="processingItems[ep.path]" class="px-4 py-1.5 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-not-allowed" :class="ep.has_target_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
-                          <i class="fa-solid" :class="processingItems[ep.path] ? 'fa-spinner fa-spin' : (ep.has_target_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles')"></i>
-                          <span x-text="processingItems[ep.path] ? 'Queuing...' : (ep.has_target_sub ? 'Re-translate (Force)' : 'Translate Now')"></span>
+                        <button @click="triggerProcess(ep.path, ep.has_target_sub, ep.filename)" class="px-4 py-1.5 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5 cursor-pointer active:scale-95" :class="ep.has_target_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
+                          <i class="fa-solid" :class="ep.has_target_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles'"></i>
+                          <span x-text="ep.has_target_sub ? 'Re-translate (Force)' : 'Translate Now'"></span>
                         </button>
                       </div>
                     </div>
@@ -422,9 +422,9 @@
                   <i class="fa-solid fa-trash-can"></i> Delete Subs
                 </button>
 
-                <button @click="triggerProcess(movie.path, movie.has_target_sub, movie.filename)" :disabled="processingItems[movie.path]" class="px-4 py-2 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-not-allowed" :class="movie.has_target_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
-                  <i class="fa-solid" :class="processingItems[movie.path] ? 'fa-spinner fa-spin' : (movie.has_target_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles')"></i>
-                  <span x-text="processingItems[movie.path] ? 'Queuing...' : (movie.has_target_sub ? 'Re-translate (Force)' : 'Translate Now')"></span>
+                <button @click="triggerProcess(movie.path, movie.has_target_sub, movie.filename)" class="px-4 py-2 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5 cursor-pointer active:scale-95" :class="movie.has_target_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
+                  <i class="fa-solid" :class="movie.has_target_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles'"></i>
+                  <span x-text="movie.has_target_sub ? 'Re-translate (Force)' : 'Translate Now'"></span>
                 </button>
               </div>
             </div>
@@ -1604,25 +1604,41 @@
           }
         },
 
-        async triggerProcess(path, force = false, title = '') {
-          this.processingItems[path] = true;
-          const displayTitle = title || path.split('/').pop();
-          this.showToast((force ? 'Forcing re-translation for ' : 'Queuing translation for ') + displayTitle, 'info');
+        triggerProcess(path, force = false, title = '') {
+          const displayTitle = title || path.split('/').pop().replace(/\.[^/.]+$/, "");
           
-          try {
-            await fetch('/webhook/process', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({video_path: path, force_retranslate: force})
-            });
-            this.currentTab = 'dashboard';
+          // 1. Switch to dashboard immediately (0ms delay)
+          this.currentTab = 'dashboard';
+          this.showToast((force ? 'Forcing re-translation: ' : 'Queuing translation: ') + displayTitle, 'info');
+
+          // 2. Optimistically add to top of activity feed so user sees instant reaction
+          const optimisticJob = {
+            id: 'temp-' + Date.now(),
+            title: displayTitle,
+            video_path: path,
+            status: 'QUEUED',
+            event_source: 'MANUAL',
+            created_at: new Date().toISOString(),
+            logs: ['Queued for translation...']
+          };
+          this.jobs.unshift(optimisticJob);
+
+          // 3. Dispatch API request in background
+          fetch('/webhook/process', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({video_path: path, force_retranslate: force})
+          }).then(async (res) => {
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              this.showToast('Error: ' + (err.detail || res.statusText), 'error');
+            }
             await this.loadJobs();
             await this.loadStats();
-          } catch(e) {
+          }).catch(e => {
             this.showToast('Error triggering process: ' + e, 'error');
-          } finally {
-            delete this.processingItems[path];
-          }
+            this.loadJobs();
+          });
         },
 
         getShowSeasons(show) {
@@ -1656,17 +1672,21 @@
           if (missing.length === 0) return;
           
           const countText = missing.length === 1 ? 'the missing episode' : `all ${missing.length} missing episodes`;
-          this.showConfirm('Translate Season Missing', `Are you sure you want to translate ${countText} of "${show.title} - ${season}"?`, async () => {
+          this.showConfirm('Translate Season Missing', `Are you sure you want to translate ${countText} of "${show.title} - ${season}"?`, () => {
             this.currentTab = 'dashboard';
+            this.showToast(`Queued ${missing.length} episode(s) for translation`, 'info');
+            
             for (const path of missing) {
-              await fetch('/webhook/process', {
+              fetch('/webhook/process', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({video_path: path, force_retranslate: false})
               });
             }
-            await this.loadJobs();
-            await this.loadStats();
+            setTimeout(() => {
+              this.loadJobs();
+              this.loadStats();
+            }, 300);
           });
         },
 
@@ -1707,8 +1727,10 @@
 
           if (missing.length === 0) return;
           const countText = missing.length === 1 ? 'the missing file' : `all ${missing.length} missing files`;
-          this.showConfirm('Translate All Missing', `Are you sure you want to translate ${countText}?`, async () => {
+          this.showConfirm('Translate All Missing', `Are you sure you want to translate ${countText}?`, () => {
             this.currentTab = 'dashboard';
+            this.showToast(`Queued ${missing.length} missing item(s)`, 'info');
+            
             for (const path of missing) {
               fetch('/webhook/process', {
                 method: 'POST',
@@ -1719,7 +1741,7 @@
             setTimeout(() => {
               this.loadJobs();
               this.loadStats();
-            }, 400);
+            }, 300);
           });
         },
 
@@ -1729,8 +1751,10 @@
           if (missing.length === 0) return;
           
           const countText = missing.length === 1 ? 'the missing episode' : `all ${missing.length} missing episodes`;
-          this.showConfirm('Translate Missing', `Are you sure you want to translate ${countText} of "${show.title}"?`, async () => {
+          this.showConfirm('Translate Missing', `Are you sure you want to translate ${countText} of "${show.title}"?`, () => {
             this.currentTab = 'dashboard';
+            this.showToast(`Queued ${missing.length} episode(s) for "${show.title}"`, 'info');
+            
             for (const path of missing) {
               fetch('/webhook/process', {
                 method: 'POST',
@@ -1741,7 +1765,7 @@
             setTimeout(() => {
               this.loadJobs();
               this.loadStats();
-            }, 400);
+            }, 300);
           });
         },
 
@@ -1751,8 +1775,10 @@
           if (all_eps.length === 0) return;
           
           const countText = all_eps.length === 1 ? 'the only episode' : `all ${all_eps.length} episodes`;
-          this.showConfirm('Retranslate All', `Are you sure you want to retranslate ${countText} of "${show.title}"?\n\nThis will overwrite the current target subtitles for this show and start a fresh translation (using your active Glossary rules).`, async () => {
+          this.showConfirm('Retranslate All', `Are you sure you want to retranslate ${countText} of "${show.title}"?\n\nThis will overwrite the current target subtitles for this show and start a fresh translation (using your active Glossary rules).`, () => {
             this.currentTab = 'dashboard';
+            this.showToast(`Forcing re-translation of ${all_eps.length} episode(s) for "${show.title}"`, 'info');
+            
             for (const path of all_eps) {
               fetch('/webhook/process', {
                 method: 'POST',
@@ -1763,7 +1789,7 @@
             setTimeout(() => {
               this.loadJobs();
               this.loadStats();
-            }, 400);
+            }, 300);
           });
         },
 
