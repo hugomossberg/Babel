@@ -263,8 +263,8 @@ For advanced deployments, create an optional `.env` file alongside `docker-compo
 | `BABEL_AUTH_USERNAME` | *(empty)* | Optional Basic Auth username for web dashboard |
 | `BABEL_AUTH_PASSWORD` | *(empty)* | Optional Basic Auth password for web dashboard |
 | `BABEL_WEBHOOK_SECRET` | *(empty)* | Optional secret required on webhook requests (`?secret=...`) |
-| `TV_PATH` | `/tv` | Host path for TV series directory mount |
-| `MOVIES_PATH` | `/movies` | Host path for Movies directory mount |
+| `TV_PATH` | `/path/to/tv` | Host path mounted to `/tv` inside Babel |
+| `MOVIES_PATH` | `/path/to/movies` | Host path mounted to `/movies` inside Babel |
 
 ---
 
