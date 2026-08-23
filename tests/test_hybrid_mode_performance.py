@@ -484,3 +484,129 @@ async def test_11_performance_benchmark_time_to_first_ai_request(hybrid_db_setti
     assert time_to_first_ai is not None
     # In new architecture, time to first AI request is sub-second (no 15s grace wait!)
     assert time_to_first_ai < 1.0
+
+
+@pytest.mark.asyncio
+async def test_12_slow_bazarr_trigger_does_not_delay_source_prep_start(hybrid_db_settings, tmp_path, monkeypatch):
+    """1. Slow Bazarr trigger (e.g. 2.0s HTTP response) does NOT delay source preparation start."""
+    video_path = tmp_path / "slow_bazarr.mkv"
+    video_path.touch()
+    en_srt = tmp_path / "slow_bazarr.en.srt"
+    with open(en_srt, "w", encoding="utf-8") as f:
+        f.write(make_valid_srt(lang="en", count=10))
+
+    pipeline = SubtitlePipeline()
+    prep_start_timestamp = None
+    job_start_timestamp = None
+    ai_call_timestamp = None
+
+    async def slow_bazarr_search(vpath, language="sv"):
+        # Simulate 2.0s slow Bazarr network response
+        await asyncio.sleep(2.0)
+
+    monkeypatch.setattr(pipeline, "trigger_bazarr_search", slow_bazarr_search)
+
+    # Instrument extract_embedded_srt to record exact start time
+    original_sanitize = pipeline.translator.translate_srt_content
+
+    async def tracking_translate(subs, target_language, batch_size, job_id, show_title=None):
+        nonlocal ai_call_timestamp
+        ai_call_timestamp = time.monotonic()
+        return [
+            srt.Subtitle(index=i+1, start=sub.start, end=sub.end, content=f"Hej {i+1} svensk text")
+            for i, sub in enumerate(subs)
+        ]
+
+    monkeypatch.setattr(pipeline.translator, "translate_srt_content", tracking_translate)
+
+    job_start_timestamp = time.monotonic()
+    res = await pipeline.process_video_file(str(video_path), event_source="SONARR")
+    total_elapsed = time.monotonic() - job_start_timestamp
+
+    assert res["status"] == "translated"
+    # The whole job completed in sub-second time without waiting for the 2.0s Bazarr request
+    assert total_elapsed < 0.8
+    assert ai_call_timestamp is not None
+    assert (ai_call_timestamp - job_start_timestamp) < 0.8
+
+
+@pytest.mark.asyncio
+async def test_13_explicit_concurrency_ordering(hybrid_db_settings, tmp_path, monkeypatch):
+    """6. Explicit concurrency ordering: verify source prep starts WHILE Bazarr search is actively in-flight."""
+    video_path = tmp_path / "ordering.mkv"
+    video_path.touch()
+    en_srt = tmp_path / "ordering.en.srt"
+    with open(en_srt, "w", encoding="utf-8") as f:
+        f.write(make_valid_srt(lang="en", count=10))
+
+    pipeline = SubtitlePipeline()
+    bazarr_search_started = asyncio.Event()
+    bazarr_search_finished = asyncio.Event()
+    source_prep_ran_while_bazarr_inflight = False
+
+    async def controlled_bazarr_search(vpath, language="sv"):
+        bazarr_search_started.set()
+        await asyncio.sleep(0.5)
+        bazarr_search_finished.set()
+
+    monkeypatch.setattr(pipeline, "trigger_bazarr_search", controlled_bazarr_search)
+
+    # Intercept sanitize_srt_content to assert Bazarr search is in-flight
+    from app.core import cleaner
+    real_sanitize = cleaner.sanitize_srt_content
+
+    def tracking_sanitize(raw_text):
+        nonlocal source_prep_ran_while_bazarr_inflight
+        if bazarr_search_started.is_set() and not bazarr_search_finished.is_set():
+            source_prep_ran_while_bazarr_inflight = True
+        return real_sanitize(raw_text)
+
+    monkeypatch.setattr("app.services.pipeline.sanitize_srt_content", tracking_sanitize)
+
+    async def mock_translate(subs, target_language, batch_size, job_id, show_title=None):
+        return [
+            srt.Subtitle(index=i+1, start=sub.start, end=sub.end, content=f"Hej {i+1} svensk text")
+            for i, sub in enumerate(subs)
+        ]
+
+    monkeypatch.setattr(pipeline.translator, "translate_srt_content", mock_translate)
+
+    res = await pipeline.process_video_file(str(video_path), event_source="SONARR")
+
+    assert res["status"] == "translated"
+    assert source_prep_ran_while_bazarr_inflight is True
+
+
+@pytest.mark.asyncio
+async def test_14_hung_or_slow_bazarr_trigger_cancelled_without_orphan_tasks(hybrid_db_settings, tmp_path, monkeypatch):
+    """4. Hung Bazarr trigger cancelled safely upon prep completion -> no orphan tasks, no unhandled exceptions."""
+    video_path = tmp_path / "hung_bazarr.mkv"
+    video_path.touch()
+    en_srt = tmp_path / "hung_bazarr.en.srt"
+    with open(en_srt, "w", encoding="utf-8") as f:
+        f.write(make_valid_srt(lang="en", count=10))
+
+    pipeline = SubtitlePipeline()
+    hung_event = asyncio.Event()
+
+    async def hung_bazarr_search(vpath, language="sv"):
+        # Hung HTTP request waiting forever until cancelled
+        await hung_event.wait()
+
+    monkeypatch.setattr(pipeline, "trigger_bazarr_search", hung_bazarr_search)
+
+    async def mock_translate(subs, target_language, batch_size, job_id, show_title=None):
+        return [
+            srt.Subtitle(index=i+1, start=sub.start, end=sub.end, content=f"Hej {i+1} svensk text")
+            for i, sub in enumerate(subs)
+        ]
+
+    monkeypatch.setattr(pipeline.translator, "translate_srt_content", mock_translate)
+
+    res = await pipeline.process_video_file(str(video_path), event_source="SONARR")
+
+    assert res["status"] == "translated"
+
+    # Assert no background bazarr_search tasks remain running/orphaned
+    current_tasks = [t for t in asyncio.all_tasks() if t.get_name().startswith("bazarr_search_")]
+    assert len(current_tasks) == 0

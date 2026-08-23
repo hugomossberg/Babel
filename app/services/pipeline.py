@@ -984,16 +984,23 @@ class SubtitlePipeline:
             return {"status": "skipped", "reason": "already_exists", "job_id": job_id}
 
         # -------------------------------------------------------------
-        # HYBRID MODE: Trigger Bazarr search in background (if enabled)
+        # HYBRID MODE: Trigger Bazarr search in background (True Concurrency)
         # -------------------------------------------------------------
         prep_start_time = time.time()
+        bazarr_tasks: List[asyncio.Task] = []
         if enable_bazarr and not force_retranslate:
             for lang_info in langs_needing_translation:
                 append_job_log(job_id, f"Hybrid Mode: Triggering Bazarr search for {lang_info['name']} ({lang_info['code']})...")
-                try:
-                    await self.trigger_bazarr_search(video_path, language=lang_info["code"])
-                except Exception as e:
-                    logger.warning(f"Failed to trigger Bazarr search: {e}")
+                async def _do_search(lcode=lang_info["code"]):
+                    try:
+                        await self.trigger_bazarr_search(video_path, language=lcode)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.warning(f"Failed to trigger Bazarr search for {lcode}: {e}")
+
+                t = asyncio.create_task(_do_search(), name=f"bazarr_search_{job_id}_{lang_info['code']}")
+                bazarr_tasks.append(t)
 
         # -------------------------------------------------------------
         # LOCATE SOURCE SUBTITLE for AI translation (Fallback Prep)
@@ -1030,7 +1037,10 @@ class SubtitlePipeline:
         # PRIORITY 3: Bazarr Safety Net — ask Bazarr for English subtitle
         if not raw_srt_text and enable_bazarr:
             append_job_log(job_id, "No embedded or external English sub found. Querying Bazarr for English subtitle...")
-            await self.trigger_bazarr_search(video_path, language="en")
+            try:
+                await self.trigger_bazarr_search(video_path, language="en")
+            except Exception as e:
+                logger.warning(f"Failed to trigger Bazarr safety net search: {e}")
 
             for _ in range(8):
                 await asyncio.sleep(2)
@@ -1046,6 +1056,12 @@ class SubtitlePipeline:
                     break
 
         if not raw_srt_text:
+            for t in bazarr_tasks:
+                if not t.done():
+                    t.cancel()
+            if bazarr_tasks:
+                await asyncio.gather(*bazarr_tasks, return_exceptions=True)
+
             err = "No English subtitle source found (neither embedded, external nor via Bazarr safety net)"
             append_job_log(job_id, f"ERROR: {err}")
             duration = round(time.time() - start_time, 2)
@@ -1090,6 +1106,13 @@ class SubtitlePipeline:
                 append_job_log(job_id, f"SDH cleaner disabled. Parsed {len(subs)} blocks directly.")
 
             prep_duration_ms = round((time.time() - prep_start_time) * 1000, 1)
+
+            # Ensure all background Bazarr trigger tasks are cleanly resolved/cancelled before final check
+            for t in bazarr_tasks:
+                if not t.done():
+                    t.cancel()
+            if bazarr_tasks:
+                await asyncio.gather(*bazarr_tasks, return_exceptions=True)
 
             # -------------------------------------------------------------
             # FINAL BAZARR CHECK (Target check before initiating AI translation)
