@@ -39,31 +39,31 @@
         </div>
         <div class="flex items-center relative" @click.stop>
           <span class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400 cursor-pointer" @click="currentTab = 'dashboard'">Babel</span>
-          <span class="text-xs text-slate-400 ml-2 px-2 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono">v{{VERSION}}</span>
-          
+          <span class="text-xs text-slate-400 ml-2 px-2 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono" x-text="updateData.current_version || 'v{{VERSION}}'">v{{VERSION}}</span>
+
           <!-- Header Update Indicator & Single Popover -->
-          <div class="relative ml-2" x-show="updateData.update_available || updateData.updater_status === 'updating' || updateData.updater_status === 'success' || updateData.updater_status === 'failed' || updateData.updater_status === 'rolled_back'" x-cloak>
+          <div class="relative ml-2" x-show="updateData.update_available || isUpdating() || updateJustSucceeded || isUpdateFailed()" x-cloak>
             <button @click.stop="popoverOpen = !popoverOpen"
                     id="header-update-badge"
                     class="text-xs px-2.5 py-0.5 rounded-full font-medium transition flex items-center gap-1.5 shadow-sm select-none cursor-pointer"
-                    :class="updateData.updater_status === 'updating' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse' : (updateData.updater_status === 'success' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : (updateData.updater_status === 'failed' || updateData.updater_status === 'rolled_back' ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40' : 'bg-purple-900/40 hover:bg-purple-900/60 text-purple-300 border border-purple-500/40 hover:border-purple-400/60'))">
-              <template x-if="updateData.updater_status === 'updating'">
+                    :class="isUpdating() ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse' : (updateJustSucceeded ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : (isUpdateFailed() ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40' : 'bg-purple-900/40 hover:bg-purple-900/60 text-purple-300 border border-purple-500/40 hover:border-purple-400/60'))">
+              <template x-if="isUpdating()">
                 <span class="flex items-center gap-1.5"><i class="fa-solid fa-circle-notch fa-spin text-amber-400 text-[10px]"></i> Updating...</span>
               </template>
-              <template x-if="updateData.updater_status === 'success'">
+              <template x-if="!isUpdating() && updateJustSucceeded">
                 <span class="flex items-center gap-1.5"><i class="fa-solid fa-check text-emerald-400 text-[10px]"></i> Updated</span>
               </template>
-              <template x-if="updateData.updater_status === 'failed' || updateData.updater_status === 'rolled_back'">
+              <template x-if="!isUpdating() && !updateJustSucceeded && isUpdateFailed()">
                 <span class="flex items-center gap-1.5"><i class="fa-solid fa-triangle-exclamation text-rose-400 text-[10px]"></i> Update failed</span>
               </template>
-              <template x-if="updateData.updater_status === 'idle' || !updateData.updater_status">
+              <template x-if="!isUpdating() && !updateJustSucceeded && !isUpdateFailed() && updateData.update_available">
                 <span class="flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-purple-400 animate-ping"></span> Update available</span>
               </template>
             </button>
 
             <!-- Compact Popover Dropdown -->
             <div x-show="popoverOpen"
-                 @click.outside="if (updateData.updater_status !== 'updating') popoverOpen = false"
+                 @click.outside="if (!isUpdating()) popoverOpen = false"
                  x-cloak
                  x-transition:enter="transition ease-out duration-150"
                  x-transition:enter-start="opacity-0 translate-y-1 scale-95"
@@ -73,8 +73,50 @@
                  x-transition:leave-end="opacity-0 translate-y-1 scale-95"
                  class="absolute left-0 mt-2 w-80 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl z-50 p-4 overflow-hidden backdrop-blur-md">
 
-              <!-- State 1: Update Available (Idle) -->
-              <div x-show="updateData.updater_status === 'idle' || !updateData.updater_status">
+              <!-- State 1: Updating State (Priority 1) -->
+              <div x-show="isUpdating()" class="py-2 text-center space-y-2">
+                <div class="w-8 h-8 mx-auto rounded-full bg-purple-600/20 border border-purple-500/30 flex items-center justify-center">
+                  <i class="fa-solid fa-circle-notch fa-spin text-purple-400 text-sm"></i>
+                </div>
+                <div>
+                  <div class="text-xs font-bold text-white">Updating Babel...</div>
+                  <div class="text-[11px] text-slate-400 mt-0.5">Installing <span class="text-purple-300 font-mono" x-text="updateTargetVersion || updateData.latest_version"></span></div>
+                </div>
+                <p class="text-[10px] text-slate-400 bg-slate-950/80 p-2 rounded-lg border border-slate-800">
+                  Babel will restart briefly. The page will reconnect automatically.
+                </p>
+              </div>
+
+              <!-- State 2: Success State (Priority 2, Transient) -->
+              <div x-show="!isUpdating() && updateJustSucceeded" class="py-2 text-center space-y-2">
+                <div class="w-8 h-8 mx-auto rounded-full bg-emerald-600/20 border border-emerald-500/30 flex items-center justify-center">
+                  <i class="fa-solid fa-check text-emerald-400 text-sm"></i>
+                </div>
+                <div class="text-xs font-bold text-emerald-400" x-text="'Updated to ' + (updateSuccessVersion || updateData.current_version)"></div>
+                <div class="text-[11px] text-slate-400">All services and settings preserved.</div>
+              </div>
+
+              <!-- State 3: Failed / Rolled Back State (Priority 3) -->
+              <div x-show="!isUpdating() && !updateJustSucceeded && isUpdateFailed()" class="py-1 space-y-2">
+                <div class="flex items-center gap-2 text-rose-400 text-xs font-bold">
+                  <i class="fa-solid fa-triangle-exclamation"></i>
+                  <span>Update failed</span>
+                </div>
+                <p class="text-[11px] text-slate-300 leading-relaxed">
+                  Babel is still running the previous version (<span class="font-mono text-purple-300" x-text="updateData.current_version"></span>).
+                </p>
+                <div class="pt-1 flex items-center justify-between border-t border-slate-800">
+                  <button @click="popoverOpen = false; currentTab = 'settings'; settingsTab = 'system'" class="text-[11px] text-purple-400 hover:text-purple-300 underline">
+                    View details
+                  </button>
+                  <button @click="updateFailed = false; updateData.updater_status = 'idle'; popoverOpen = false" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs">
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+
+              <!-- State 4: Update Available State (Priority 4) -->
+              <div x-show="!isUpdating() && !updateJustSucceeded && !isUpdateFailed() && updateData.update_available">
                 <div class="flex items-center justify-between pb-2 mb-2 border-b border-slate-800/80">
                   <div class="flex items-center gap-1.5">
                     <span class="text-xs font-bold text-white font-mono" x-text="updateData.latest_version"></span>
@@ -103,7 +145,7 @@
                     View details
                   </button>
                   <template x-if="updateData.one_click_update_available && (stats.active_jobs || 0) === 0">
-                    <button @click="startUpdate()" id="btn-popover-update" class="px-3 py-1.5 bg-green-600 hover:bg-green-500 rounded-lg text-xs font-medium text-white shadow-lg shadow-green-900/20 transition flex items-center gap-1.5">
+                    <button @click="startUpdate()" id="btn-popover-update" :disabled="updateInProgress" class="px-3 py-1.5 bg-green-600 hover:bg-green-500 rounded-lg text-xs font-medium text-white shadow-lg shadow-green-900/20 transition flex items-center gap-1.5">
                       <i class="fa-solid fa-cloud-arrow-down text-[11px]"></i> Update now
                     </button>
                   </template>
@@ -117,48 +159,6 @@
                       Manual update
                     </button>
                   </template>
-                </div>
-              </div>
-
-              <!-- State 2: Updating State -->
-              <div x-show="updateData.updater_status === 'updating'" class="py-2 text-center space-y-2">
-                <div class="w-8 h-8 mx-auto rounded-full bg-purple-600/20 border border-purple-500/30 flex items-center justify-center">
-                  <i class="fa-solid fa-circle-notch fa-spin text-purple-400 text-sm"></i>
-                </div>
-                <div>
-                  <div class="text-xs font-bold text-white">Updating Babel...</div>
-                  <div class="text-[11px] text-slate-400 mt-0.5">Installing <span class="text-purple-300 font-mono" x-text="updateData.latest_version"></span></div>
-                </div>
-                <p class="text-[10px] text-slate-400 bg-slate-950/80 p-2 rounded-lg border border-slate-800">
-                  Babel will restart briefly. The page will reconnect automatically.
-                </p>
-              </div>
-
-              <!-- State 3: Success State -->
-              <div x-show="updateData.updater_status === 'success'" class="py-2 text-center space-y-2">
-                <div class="w-8 h-8 mx-auto rounded-full bg-emerald-600/20 border border-emerald-500/30 flex items-center justify-center">
-                  <i class="fa-solid fa-check text-emerald-400 text-sm"></i>
-                </div>
-                <div class="text-xs font-bold text-emerald-400" x-text="'Updated to ' + (updateData.latest_version || updateData.current_version)"></div>
-                <div class="text-[11px] text-slate-400">All services and settings preserved.</div>
-              </div>
-
-              <!-- State 4: Failed / Rolled Back State -->
-              <div x-show="updateData.updater_status === 'failed' || updateData.updater_status === 'rolled_back'" class="py-1 space-y-2">
-                <div class="flex items-center gap-2 text-rose-400 text-xs font-bold">
-                  <i class="fa-solid fa-triangle-exclamation"></i>
-                  <span>Update failed</span>
-                </div>
-                <p class="text-[11px] text-slate-300 leading-relaxed">
-                  Babel is still running the previous version (<span class="font-mono text-purple-300" x-text="updateData.current_version"></span>).
-                </p>
-                <div class="pt-1 flex items-center justify-between border-t border-slate-800">
-                  <button @click="popoverOpen = false; currentTab = 'settings'; settingsTab = 'system'" class="text-[11px] text-purple-400 hover:text-purple-300 underline">
-                    View details
-                  </button>
-                  <button @click="updateData.updater_status = 'idle'; popoverOpen = false" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs">
-                    Dismiss
-                  </button>
                 </div>
               </div>
 
@@ -1186,37 +1186,68 @@
                   <div class="flex items-center justify-between">
                       <div>
                           <div class="text-sm font-semibold text-slate-200">Current Version</div>
-                          <div class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400 mt-1" x-text="updateData.current_version"></div>
+                          <div class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400 mt-1" x-text="updateData.current_version || 'v{{VERSION}}'"></div>
                       </div>
 
-                      <!-- Checking State -->
-                      <div class="text-right" x-show="checkingUpdates">
+                      <!-- Priority 1: Checking State -->
+                      <div class="text-right" x-show="checkingUpdates && !isUpdating()">
                           <div class="text-sm font-semibold text-slate-400 flex items-center justify-end gap-1.5">
                               <i class="fa-solid fa-circle-notch fa-spin text-purple-400"></i> Checking for updates...
                           </div>
                       </div>
 
-                      <!-- Update Check Error State -->
-                      <div class="text-right" x-show="!checkingUpdates && updateCheckError">
+                      <!-- Priority 2: Updating State (top right) -->
+                      <div class="text-right" x-show="isUpdating()">
+                          <div class="text-sm font-semibold text-amber-400 flex items-center justify-end gap-1.5">
+                              <i class="fa-solid fa-circle-notch fa-spin text-amber-400"></i> Updating...
+                          </div>
+                      </div>
+
+                      <!-- Priority 3: Just Succeeded State (top right) -->
+                      <div class="text-right" x-show="!isUpdating() && updateJustSucceeded">
+                          <div class="text-sm font-semibold text-emerald-400 flex items-center justify-end gap-1.5">
+                              <i class="fa-solid fa-check-circle text-emerald-400"></i> Updated to <span class="font-mono ml-1" x-text="updateSuccessVersion || updateData.current_version"></span>
+                          </div>
+                      </div>
+
+                      <!-- Priority 4: Failed / Rolled Back State -->
+                      <div class="text-right" x-show="!isUpdating() && !updateJustSucceeded && isUpdateFailed()">
+                          <div class="text-sm font-semibold text-rose-400 flex items-center justify-end gap-1.5">
+                              <i class="fa-solid fa-triangle-exclamation text-rose-400"></i> Update failed
+                          </div>
+                      </div>
+
+                      <!-- Priority 5: Update Check Error State -->
+                      <div class="text-right" x-show="!isUpdating() && !updateJustSucceeded && !isUpdateFailed() && !checkingUpdates && updateCheckError">
                           <div class="text-sm font-semibold text-slate-500">Unable to check for updates</div>
                       </div>
 
-                      <!-- Update Available State -->
-                      <div class="text-right" x-show="!checkingUpdates && !updateCheckError && updateData.update_available">
+                      <!-- Priority 6: Update Available State -->
+                      <div class="text-right" x-show="!isUpdating() && !updateJustSucceeded && !isUpdateFailed() && !checkingUpdates && !updateCheckError && updateData.update_available">
                           <div class="text-sm font-semibold text-green-400 mb-1">Update available · <span x-text="updateData.latest_version"></span></div>
                           <button @click="showNotes()" class="text-xs text-purple-400 hover:text-purple-300 transition underline decoration-purple-900 underline-offset-2">What's new</button>
                       </div>
 
-                      <!-- Up to date State -->
-                      <div class="text-right" x-show="!checkingUpdates && !updateCheckError && !updateData.update_available">
+                      <!-- Priority 7: Up to date State -->
+                      <div class="text-right" x-show="!isUpdating() && !updateJustSucceeded && !isUpdateFailed() && !checkingUpdates && !updateCheckError && !updateData.update_available">
                           <div class="text-sm font-semibold text-slate-500 flex items-center justify-end gap-1.5"><i class="fa-solid fa-check-circle text-green-500"></i> Up to date</div>
                       </div>
                   </div>
 
-                  <div class="mt-6 pt-4 border-t border-slate-800" x-show="updateData.update_available && ['idle', 'success', 'failed', 'rolled_back'].includes(updateData.updater_status)">
+                  <!-- Updating in progress action area -->
+                  <div class="mt-6 pt-4 border-t border-slate-800 flex items-center justify-center p-4" x-show="isUpdating()">
+                      <div class="text-center">
+                          <i class="fa-solid fa-circle-notch fa-spin text-purple-500 text-2xl mb-3"></i>
+                          <div class="text-sm font-medium text-slate-300">Updating...</div>
+                          <div class="text-xs text-slate-500 mt-1">Please wait, Babel is restarting. (<span x-text="updateData.updater_status || 'updating'"></span>)</div>
+                      </div>
+                  </div>
+
+                  <!-- Update Available Actions -->
+                  <div class="mt-6 pt-4 border-t border-slate-800" x-show="!isUpdating() && !updateJustSucceeded && !isUpdateFailed() && updateData.update_available">
                       <template x-if="updateData.one_click_update_available && (stats.active_jobs || 0) === 0">
                           <div>
-                              <button @click="startUpdate()" class="w-full sm:w-auto px-6 py-2.5 bg-green-600 hover:bg-green-500 text-white rounded-xl text-sm font-medium transition shadow-lg shadow-green-900/20 flex items-center gap-2"><i class="fa-solid fa-cloud-arrow-down"></i> Update to <span x-text="updateData.latest_version"></span></button>
+                              <button @click="startUpdate()" :disabled="updateInProgress" class="w-full sm:w-auto px-6 py-2.5 bg-green-600 hover:bg-green-500 text-white rounded-xl text-sm font-medium transition shadow-lg shadow-green-900/20 flex items-center gap-2"><i class="fa-solid fa-cloud-arrow-down"></i> Update to <span x-text="updateData.latest_version"></span></button>
                               <p class="text-xs text-slate-500 mt-3">Babel will briefly restart. Your database and settings are preserved.</p>
                           </div>
                       </template>
@@ -1239,11 +1270,17 @@ docker compose up -d babel</pre>
                       </template>
                   </div>
 
-                  <div class="mt-6 pt-4 border-t border-slate-800 flex items-center justify-center p-4" x-show="!['idle', 'success', 'failed', 'rolled_back'].includes(updateData.updater_status)">
-                      <div class="text-center">
-                          <i class="fa-solid fa-circle-notch fa-spin text-purple-500 text-2xl mb-3"></i>
-                          <div class="text-sm font-medium text-slate-300">Updating...</div>
-                          <div class="text-xs text-slate-500 mt-1">Please wait, Babel is restarting. (<span x-text="updateData.updater_status"></span>)</div>
+                  <!-- Update Failed / Rolled Back Alert -->
+                  <div class="mt-6 pt-4 border-t border-slate-800" x-show="!isUpdating() && isUpdateFailed()">
+                      <div class="bg-rose-950/30 border border-rose-800/50 p-4 rounded-xl">
+                          <div class="flex items-center justify-between">
+                              <div class="flex items-center gap-2 text-rose-400 font-semibold text-sm">
+                                  <i class="fa-solid fa-triangle-exclamation"></i>
+                                  <span>Update failed</span>
+                              </div>
+                              <button @click="updateFailed = false; updateData.updater_status = 'idle'" class="text-xs text-slate-400 hover:text-slate-200 px-2 py-1 bg-slate-800 rounded">Dismiss</button>
+                          </div>
+                          <p class="text-xs text-slate-300 mt-2">Babel was safely rolled back or remained on version <span class="font-mono text-purple-300" x-text="updateData.current_version"></span>. All settings and database state are preserved.</p>
                       </div>
                   </div>
               </div>
@@ -1409,8 +1446,8 @@ docker compose up -d babel</pre>
           <button @click="showUpdateNotes = false" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-medium text-white transition">
             Close
           </button>
-          <template x-if="updateData.update_available && updateData.one_click_update_available && (stats.active_jobs || 0) === 0">
-            <button @click="showUpdateNotes = false; startUpdate()" class="px-4 py-2 bg-green-600 hover:bg-green-500 rounded-xl text-xs font-medium text-white shadow-lg shadow-green-900/20 transition flex items-center gap-2">
+          <template x-if="!isUpdating() && !updateJustSucceeded && !isUpdateFailed() && updateData.update_available && updateData.one_click_update_available && (stats.active_jobs || 0) === 0">
+            <button @click="showUpdateNotes = false; startUpdate()" :disabled="updateInProgress" class="px-4 py-2 bg-green-600 hover:bg-green-500 rounded-xl text-xs font-medium text-white shadow-lg shadow-green-900/20 transition flex items-center gap-2">
               <i class="fa-solid fa-cloud-arrow-down"></i> Update now
             </button>
           </template>
@@ -1431,6 +1468,12 @@ docker compose up -d babel</pre>
         mediaLoaded: false,
 
         updateData: { update_available: false, current_version: 'v{{VERSION}}', latest_version: '', release_notes: '', one_click_update_available: false, updater_status: 'idle' },
+        updateInProgress: false,
+        updateTargetVersion: '',
+        updateJustSucceeded: false,
+        updateSuccessVersion: '',
+        updateSuccessTimer: null,
+        updateFailed: false,
         popoverOpen: false,
         checkingUpdates: false,
         updateCheckError: false,
@@ -1503,7 +1546,22 @@ docker compose up -d babel</pre>
         updatePollTimer: null,
 
         async init() {
-          
+          try {
+            const rawMarker = sessionStorage.getItem('babelUpdateSuccess');
+            if (rawMarker) {
+              const marker = JSON.parse(rawMarker);
+              sessionStorage.removeItem('babelUpdateSuccess');
+              if (marker && marker.version && (Date.now() - (marker.timestamp || 0)) < 60000) {
+                this.updateJustSucceeded = true;
+                this.updateSuccessVersion = marker.version;
+                if (this.updateSuccessTimer) clearTimeout(this.updateSuccessTimer);
+                this.updateSuccessTimer = setTimeout(() => {
+                  this.updateJustSucceeded = false;
+                }, 10000);
+              }
+            }
+          } catch(e) {}
+
           await this.loadStats();
           this.checkUpdates();
 
@@ -2068,7 +2126,14 @@ docker compose up -d babel</pre>
           });
         },
 
-        
+        isUpdating() {
+            return Boolean(this.updateInProgress || ['inspecting', 'pulling', 'replacing', 'verifying', 'updating', 'rolling_back'].includes(this.updateData.updater_status));
+        },
+
+        isUpdateFailed() {
+            return Boolean(this.updateFailed || this.updateData.updater_status === 'failed' || this.updateData.updater_status === 'rolled_back');
+        },
+
         getPreviewLines(notes) {
             if (!notes) return [];
             const lines = notes.split('\n')
@@ -2078,7 +2143,7 @@ docker compose up -d babel</pre>
         },
 
         async manualCheckUpdates() {
-            if (this.checkingUpdates) return;
+            if (this.checkingUpdates || this.isUpdating()) return;
             this.checkingUpdates = true;
             this.updateCheckError = false;
             try {
@@ -2104,25 +2169,41 @@ docker compose up -d babel</pre>
         },
 
         async checkUpdates(force=false) {
-            if (this.checkingUpdates) return;
+            if (this.checkingUpdates || this.updateInProgress) return;
             try {
                 let res = await fetch('/api/updates' + (force ? '?force=true' : ''));
                 if (res.ok) {
-                    this.updateData = await res.json();
+                    const data = await res.json();
+                    if (['inspecting', 'pulling', 'replacing', 'verifying', 'updating', 'rolling_back'].includes(data.updater_status)) {
+                        this.updateInProgress = true;
+                        this.updateTargetVersion = data.latest_version || this.updateTargetVersion;
+                    } else if (data.updater_status === 'idle' || data.updater_status === 'success') {
+                        if (!this.updateJustSucceeded && this.updateData.updater_status !== 'updating') {
+                            this.updateInProgress = false;
+                        }
+                    }
+                    this.updateData = data;
                 }
             } catch(e) {}
         },
-        
+
         showNotes() {
             this.showUpdateNotes = true;
         },
-        
+
         startUpdate() {
+            if (this.updateInProgress) return;
             if (this.stats && (this.stats.active_jobs || 0) > 0) {
                 this.showToast('Waiting for active jobs to finish before updating', 'info');
                 return;
             }
             const targetVer = this.updateData.latest_version;
+            if (!targetVer) return;
+
+            this.updateTargetVersion = targetVer;
+            this.updateInProgress = true;
+            this.updateJustSucceeded = false;
+            this.updateFailed = false;
             this.updateData.updater_status = 'updating';
             this.popoverOpen = true;
 
@@ -2132,8 +2213,10 @@ docker compose up -d babel</pre>
                 body: JSON.stringify({target_version: targetVer})
             }).then(r => r.json()).then(res => {
                 if (!res.success) {
-                    this.showToast(res.message || 'Failed to trigger update', 'error');
+                    this.updateInProgress = false;
+                    this.updateFailed = true;
                     this.updateData.updater_status = 'failed';
+                    this.showToast(res.message || 'Failed to trigger update', 'error');
                 } else {
                     this.pollHealth(targetVer);
                 }
@@ -2142,62 +2225,67 @@ docker compose up -d babel</pre>
                 this.pollHealth(targetVer);
             });
         },
-        
+
         pollHealth(expectedVersion) {
             let attempts = 0;
             const maxAttempts = 40; // 40 * 2.5s = 100 seconds
             const intervalTime = 2500;
+            let hasTriggeredReload = false;
 
             const iv = setInterval(async () => {
                 attempts++;
                 try {
-                    if (attempts >= 2) {
-                        const res = await fetch('/health?t=' + Date.now());
-                        if (res.ok) {
-                            try {
-                                const upRes = await fetch('/api/updates?force=true&t=' + Date.now());
-                                if (upRes.ok) {
-                                    const upData = await upRes.json();
+                    const res = await fetch('/health?t=' + Date.now());
+                    if (res.ok) {
+                        try {
+                            const upRes = await fetch('/api/updates?force=true&t=' + Date.now());
+                            if (upRes.ok) {
+                                const upData = await upRes.json();
 
-                                    const normCurrent = (upData.current_version || '').replace(/^v/, '');
-                                    const normExpected = (expectedVersion || '').replace(/^v/, '');
-                                    const st = upData.updater_status || 'idle';
-                                    const isExpected = (normCurrent && normExpected && normCurrent === normExpected);
+                                const normCurrent = (upData.current_version || '').replace(/^v/, '');
+                                const normExpected = (expectedVersion || '').replace(/^v/, '');
+                                const st = upData.updater_status || 'idle';
+                                const isExpected = (normCurrent && normExpected && normCurrent === normExpected);
 
-                                    if (st === 'failed') {
-                                        clearInterval(iv);
-                                        this.updateData = upData;
-                                        this.updateData.updater_status = 'failed';
-                                        this.popoverOpen = true;
-                                        return;
-                                    }
-
-                                    if (st === 'rolled_back') {
-                                        clearInterval(iv);
-                                        this.updateData = upData;
-                                        this.updateData.updater_status = 'rolled_back';
-                                        this.popoverOpen = true;
-                                        return;
-                                    }
-
-                                    if (isExpected && (st === 'success' || st === 'idle')) {
-                                        clearInterval(iv);
-                                        this.updateData = upData;
-                                        this.updateData.updater_status = 'success';
-                                        this.popoverOpen = true;
-                                        this.loadStats();
-                                        this.loadJobs();
-                                        setTimeout(() => {
-                                            this.popoverOpen = false;
-                                            this.updateData.updater_status = 'idle';
-                                        }, 6000);
-                                        return;
-                                    }
-
-                                    // If not terminal, continue polling (do nothing here)
+                                if (st === 'failed') {
+                                    clearInterval(iv);
+                                    this.updateInProgress = false;
+                                    this.updateFailed = true;
+                                    this.updateData = upData;
+                                    this.updateData.updater_status = 'failed';
+                                    this.popoverOpen = true;
+                                    return;
                                 }
-                            } catch(e) {}
-                        }
+
+                                if (st === 'rolled_back') {
+                                    clearInterval(iv);
+                                    this.updateInProgress = false;
+                                    this.updateFailed = true;
+                                    this.updateData = upData;
+                                    this.updateData.updater_status = 'rolled_back';
+                                    this.popoverOpen = true;
+                                    return;
+                                }
+
+                                if (isExpected && (st === 'success' || st === 'idle')) {
+                                    clearInterval(iv);
+                                    if (hasTriggeredReload) return;
+                                    hasTriggeredReload = true;
+
+                                    try {
+                                        sessionStorage.setItem('babelUpdateSuccess', JSON.stringify({
+                                            version: expectedVersion,
+                                            timestamp: Date.now()
+                                        }));
+                                    } catch(e) {}
+
+                                    window.location.reload();
+                                    return;
+                                }
+
+                                this.updateData = upData;
+                            }
+                        } catch(e) {}
                     }
                 } catch(e) {
                     // Connection errors during restart are expected
@@ -2205,6 +2293,8 @@ docker compose up -d babel</pre>
 
                 if (attempts >= maxAttempts) {
                     clearInterval(iv);
+                    this.updateInProgress = false;
+                    this.updateFailed = true;
                     this.updateData.updater_status = 'failed';
                     this.showToast('Update timed out. Please check container status on host.', 'error');
                 }

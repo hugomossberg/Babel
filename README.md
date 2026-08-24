@@ -12,7 +12,7 @@ It automatically finds the best available subtitle source, translates missing la
 > **Install it. Connect your media stack. Forget about subtitles.**
 
 ### At a Glance
-- **Docker-first:** Single container, instant deployment
+- **Docker-first:** Recommended Compose setup with Babel + lightweight updater sidecar
 - **Automated:** Sonarr & Radarr webhooks
 - **Smart Sourcing:** Hybrid Bazarr search + Embedded AI extraction
 - **AI Freedom:** Google Gemini, OpenAI, DeepL, or local Ollama models
@@ -74,7 +74,7 @@ Babel treats AI providers as **untrusted components**. Every generated subtitle 
 
 ## Status: Public Beta
 
-Babel is currently in **Public Beta** (`v2.3.23-beta`). The core pipeline, AI translation engines, and automated recovery loops are actively tested against diverse real-world media libraries.
+Babel is currently in **Public Beta**. The core pipeline, AI translation engines, and automated recovery loops are actively tested against diverse real-world media libraries.
 
 ---
 
@@ -184,7 +184,16 @@ Configure your preferred settings:
 
 ## Updating Babel
 
-To update to the latest release:
+### Recommended: One-Click In-App Updates
+If you use the recommended Docker Compose setup with `babel-updater`:
+- Babel automatically checks for new releases when the web UI is opened and periodically in the background.
+- When an update is released, an **Update available** badge appears in the header and Settings.
+- Click **Update now** (or review changes in "What's new").
+- The updater pulls the latest image, replaces the container, and verifies health.
+- If health verification fails, the updater automatically rolls back to the previous working container.
+
+### Manual Fallback
+You can also update manually via the terminal at any time:
 
 ```bash
 docker compose pull
@@ -307,13 +316,33 @@ Configuration is mostly handled in the web interface and stored in `/app/data/ba
 
 ### One-Click In-App Updates Details
 
-Babel supports updating itself directly from the web dashboard. The repository's `docker-compose.yml` includes the `babel-updater` sidecar container by default.
+Babel supports seamless in-app updates directly from the web dashboard. The repository's `docker-compose.yml` includes the lightweight `babel-updater` sidecar container by default.
 
-**Zero-Configuration Security:** The `babel` and `babel-updater` containers automatically generate and share a secure inner-container token on their first start. No host ports are published by the updater, and the token is never exposed to the browser.
+- **Automated Discovery:** Babel checks for new releases on web page load and continues checking periodically in the background.
+- **Safety & Rollback:** When "Update now" is triggered, the updater pulls the target image, performs container replacement, and verifies container health. If health checks fail, it automatically rolls back to the previous container.
+- **Zero-Configuration Security:** The `babel` and `babel-updater` containers automatically generate and share a secure inner-container token on first start. No host ports are exposed on the updater, `docker.sock` is only mounted to the updater, and the token is never exposed to the browser.
 
-When an update is detected, the dashboard simply displays an "Update now" button.
+*(Optional)* If you prefer to update strictly via `docker compose pull && docker compose up -d`, you can use the minimal `docker-compose.yml` provided in the Quick Start or remove the `babel-updater` service.
 
-*(Optional)* If you prefer to update strictly via `docker compose pull && docker compose up -d`, you can use the minimal `docker-compose.yml` provided in the Quick Start or manually remove the `babel-updater` service from your configuration.
+### Upgrading an Existing Installation to One-Click Updates
+
+Older single-container installations will not receive `babel-updater` automatically simply by updating the Babel image. To enable One-Click Updates on an existing deployment:
+
+1. **Backup your database first:**
+   ```bash
+   cp data/babel.db data/babel.db.bak
+   ```
+2. **Merge the updater configuration into your existing `docker-compose.yml`:**
+   Merge the updater definitions from the repository's `docker-compose.yml` without overwriting your custom media mounts or path mappings:
+   - Add `babel_updater_auth:/app/auth:ro` under `babel` volumes (read-only).
+   - Add the `babel-updater` service with `/var/run/docker.sock:/var/run/docker.sock` and `babel_updater_auth:/app/auth` (read-write).
+   - Ensure **no host ports** are exposed on `babel-updater`.
+   - Add the named volume `babel_updater_auth:` under the top-level `volumes:` section.
+3. **Pull and start:**
+   ```bash
+   docker compose pull
+   docker compose up -d
+   ```
 
 ---
 

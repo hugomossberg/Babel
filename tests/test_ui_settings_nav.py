@@ -52,7 +52,7 @@ def test_header_update_pill_and_single_popover():
 
     # 2. Popover toggle and click outside handling
     assert 'popoverOpen' in html
-    assert '@click.outside="if (updateData.updater_status !== \'updating\') popoverOpen = false"' in html
+    assert '@click.outside="if (!isUpdating()) popoverOpen = false"' in html
 
     # 3. What's new and preview bounds
     assert "What's new" in html
