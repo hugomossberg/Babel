@@ -316,16 +316,16 @@ Babel validates every subtitle before writing to disk using a three-tier decisio
 
 Babel can process media automatically upon download or upgrade.
 
-> **Docker Networking Note:** Using `http://YOUR-SERVER-IP:PORT` is the safest default and works regardless of whether services share a Docker network. If Babel and another service share a Docker network, Docker service names (such as `babel`, `bazarr`, `sonarr`, `radarr`, or `jellyfin`) can be used instead.
+> **Docker Networking Note:** Using `http://YOUR-SERVER-IP:PORT` is the safest default. If Babel and another service share a Docker network, Docker service names (such as `babel`, `bazarr`, `sonarr`, `radarr`, or `jellyfin`) can be used instead.
 
 ### Sonarr Configuration
 1. In Sonarr, navigate to **Settings → Connect → + (Add Webhook)**.
-2. Set **URL** to: `http://YOUR-SERVER-IP:8765/webhook/sonarr` (or `http://babel:8765/webhook/sonarr` if sharing a Docker network).
+2. Set **URL** to: `http://YOUR-SERVER-IP:8765/webhook/sonarr`.
 3. Check triggers: **On Download** and **On Upgrade**.
 
 ### Radarr Configuration
 1. In Radarr, navigate to **Settings → Connect → + (Add Webhook)**.
-2. Set **URL** to: `http://YOUR-SERVER-IP:8765/webhook/radarr` (or `http://babel:8765/webhook/radarr` if sharing a Docker network).
+2. Set **URL** to: `http://YOUR-SERVER-IP:8765/webhook/radarr`.
 3. Check triggers: **On Download** and **On Upgrade**.
 
 ### Remote Path Mapping
@@ -349,7 +349,7 @@ Configure Remote Path Mapping in Settings:
 ## Bazarr Integration
 
 Babel coordinates with Bazarr's REST API:
-- In Settings, enter your **Bazarr Host URL** (e.g. `http://YOUR-SERVER-IP:6767` or `http://bazarr:6767` if sharing a Docker network) and **API Key**.
+- In Settings, enter your **Bazarr Host URL** (e.g. `http://YOUR-SERVER-IP:6767`) and **API Key**.
 - Use **Test Connection** to verify connectivity.
 
 ---
