@@ -120,12 +120,23 @@ Install Babel using Docker Compose. The standard installation includes Babel and
 
 ### 1. Create directory and configuration
 
-Create a directory and create `docker-compose.yml` (or download it via curl):
+Create a directory and download the configuration files:
 
 ```bash
 mkdir babel && cd babel
 curl -O https://raw.githubusercontent.com/hugomossberg/Babel/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/hugomossberg/Babel/main/.env.example
+cp .env.example .env
 ```
+
+Before starting, open `.env` and set your host media paths:
+
+```env
+TV_PATH=/your/path/to/tv
+MOVIES_PATH=/your/path/to/movies
+```
+
+Other `.env` values are optional. Almost all other configuration — such as AI providers, API keys, languages, and integrations — is managed directly in Babel's web UI.
 
 Or copy this standard `docker-compose.yml`:
 
@@ -174,7 +185,7 @@ volumes:
 
 > **IMPORTANT: Volume Paths & Security**
 >
-> - **Media paths:** Change `/path/to/tv` and `/path/to/movies` to match your host media paths (or set `TV_PATH` and `MOVIES_PATH`).
+> - **Media paths:** Setting `TV_PATH` and `MOVIES_PATH` in your `.env` file is the recommended way to map your host media paths.
 > - **Isolation:** The main `babel` container has **no** access to the Docker socket. `docker.sock` is mounted strictly to the isolated `babel-updater` sidecar, which communicates internally via a shared auth token.
 
 ### 2. Start and Verify
@@ -291,6 +302,9 @@ Babel validates every subtitle before writing to disk using a three-tier decisio
 ## Sonarr & Radarr Integration
 
 Babel can process media automatically upon download or upgrade.
+
+* `http://babel:8765/...` works when Sonarr/Radarr and Babel can reach each other via the same Docker network.
+* If they run in separate Compose projects/networks, use `http://YOUR-SERVER-IP:8765/...` instead.
 
 ### Sonarr Configuration
 1. In Sonarr, navigate to **Settings → Connect → + (Add Webhook)**.
