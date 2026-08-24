@@ -1474,6 +1474,8 @@ docker compose up -d babel</pre>
         updateSuccessVersion: '',
         updateSuccessTimer: null,
         updateFailed: false,
+        healthPollActive: false,
+        healthPollTimer: null,
         popoverOpen: false,
         checkingUpdates: false,
         updateCheckError: false,
@@ -2181,22 +2183,42 @@ docker compose up -d babel</pre>
         },
 
         async checkUpdates(force=false) {
-            if (this.checkingUpdates || this.updateInProgress) return;
+            if (this.checkingUpdates) return;
+            this.checkingUpdates = true;
             try {
                 let res = await fetch('/api/updates' + (force ? '?force=true' : ''));
                 if (res.ok) {
                     const data = await res.json();
-                    if (['inspecting', 'pulling', 'replacing', 'verifying', 'updating', 'rolling_back'].includes(data.updater_status)) {
+                    this.updateData = data;
+                    const st = data.updater_status || 'idle';
+                    if (['inspecting', 'pulling', 'replacing', 'verifying', 'updating', 'rolling_back'].includes(st)) {
                         this.updateInProgress = true;
+                        this.updateFailed = false;
                         this.updateTargetVersion = data.latest_version || this.updateTargetVersion;
-                    } else if (data.updater_status === 'idle' || data.updater_status === 'success') {
-                        if (!this.updateJustSucceeded && this.updateData.updater_status !== 'updating') {
+                        if (!this.healthPollActive) {
+                            this.pollHealth(this.updateTargetVersion || data.latest_version);
+                        }
+                    } else if (st === 'failed') {
+                        this.updateInProgress = false;
+                        this.updateFailed = true;
+                        this.stopHealthPoll();
+                    } else if (st === 'rolled_back') {
+                        this.updateInProgress = false;
+                        this.updateFailed = true;
+                        this.stopHealthPoll();
+                    } else if (st === 'success') {
+                        this.updateInProgress = false;
+                        this.updateFailed = false;
+                    } else if (st === 'idle') {
+                        if (!this.updateJustSucceeded && !this.healthPollActive) {
                             this.updateInProgress = false;
                         }
                     }
-                    this.updateData = data;
                 }
-            } catch(e) {}
+            } catch(e) {
+            } finally {
+                this.checkingUpdates = false;
+            }
         },
 
         showNotes() {
@@ -2204,7 +2226,7 @@ docker compose up -d babel</pre>
         },
 
         startUpdate() {
-            if (this.updateInProgress) return;
+            if (this.isUpdating()) return;
             if (this.stats && (this.stats.active_jobs || 0) > 0) {
                 this.showToast('Waiting for active jobs to finish before updating', 'info');
                 return;
@@ -2219,32 +2241,43 @@ docker compose up -d babel</pre>
             this.updateData.updater_status = 'updating';
             this.popoverOpen = true;
 
+            this.pollHealth(targetVer);
+
             fetch('/api/updates/trigger', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({target_version: targetVer})
             }).then(r => r.json()).then(res => {
                 if (!res.success) {
+                    if (res.message && res.message.toLowerCase().includes('already in progress')) {
+                        return;
+                    }
+                    this.stopHealthPoll();
                     this.updateInProgress = false;
                     this.updateFailed = true;
                     this.updateData.updater_status = 'failed';
                     this.showToast(res.message || 'Failed to trigger update', 'error');
-                } else {
-                    this.pollHealth(targetVer);
                 }
             }).catch(e => {
-                // If the server restarted immediately, continue polling
-                this.pollHealth(targetVer);
+                // Connection errors during immediate container restart are expected
             });
         },
 
         pollHealth(expectedVersion) {
+            if (this.healthPollActive) return;
+            this.healthPollActive = true;
+
             let attempts = 0;
-            const maxAttempts = 40; // 40 * 2.5s = 100 seconds
+            const maxAttempts = 60; // 60 * 2.5s = 150 seconds
             const intervalTime = 2500;
             let hasTriggeredReload = false;
 
-            const iv = setInterval(async () => {
+            if (this.healthPollTimer) {
+                clearInterval(this.healthPollTimer);
+                this.healthPollTimer = null;
+            }
+
+            this.healthPollTimer = setInterval(async () => {
                 attempts++;
                 try {
                     const res = await fetch('/health?t=' + Date.now());
@@ -2255,12 +2288,12 @@ docker compose up -d babel</pre>
                                 const upData = await upRes.json();
 
                                 const normCurrent = (upData.current_version || '').replace(/^v/, '');
-                                const normExpected = (expectedVersion || '').replace(/^v/, '');
+                                const normExpected = (expectedVersion || this.updateTargetVersion || upData.latest_version || '').replace(/^v/, '');
                                 const st = upData.updater_status || 'idle';
                                 const isExpected = (normCurrent && normExpected && normCurrent === normExpected);
 
                                 if (st === 'failed') {
-                                    clearInterval(iv);
+                                    this.stopHealthPoll();
                                     this.updateInProgress = false;
                                     this.updateFailed = true;
                                     this.updateData = upData;
@@ -2270,7 +2303,7 @@ docker compose up -d babel</pre>
                                 }
 
                                 if (st === 'rolled_back') {
-                                    clearInterval(iv);
+                                    this.stopHealthPoll();
                                     this.updateInProgress = false;
                                     this.updateFailed = true;
                                     this.updateData = upData;
@@ -2280,13 +2313,15 @@ docker compose up -d babel</pre>
                                 }
 
                                 if (isExpected && (st === 'success' || st === 'idle')) {
-                                    clearInterval(iv);
+                                    this.stopHealthPoll();
+                                    this.updateInProgress = false;
+                                    this.updateFailed = false;
                                     if (hasTriggeredReload) return;
                                     hasTriggeredReload = true;
 
                                     try {
                                         sessionStorage.setItem('babelUpdateSuccess', JSON.stringify({
-                                            version: expectedVersion,
+                                            version: expectedVersion || upData.current_version,
                                             timestamp: Date.now()
                                         }));
                                     } catch(e) {}
@@ -2298,6 +2333,11 @@ docker compose up -d babel</pre>
                                     return;
                                 }
 
+                                if (['inspecting', 'pulling', 'replacing', 'verifying', 'updating', 'rolling_back'].includes(st)) {
+                                    this.updateInProgress = true;
+                                    this.updateFailed = false;
+                                }
+
                                 this.updateData = upData;
                             }
                         } catch(e) {}
@@ -2307,13 +2347,21 @@ docker compose up -d babel</pre>
                 }
 
                 if (attempts >= maxAttempts) {
-                    clearInterval(iv);
+                    this.stopHealthPoll();
                     this.updateInProgress = false;
                     this.updateFailed = true;
                     this.updateData.updater_status = 'failed';
                     this.showToast('Update timed out. Please check container status on host.', 'error');
                 }
             }, intervalTime);
+        },
+
+        stopHealthPoll() {
+            if (this.healthPollTimer) {
+                clearInterval(this.healthPollTimer);
+                this.healthPollTimer = null;
+            }
+            this.healthPollActive = false;
         },
 
         formatDate(isoStr) {

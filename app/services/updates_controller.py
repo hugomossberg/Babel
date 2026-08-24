@@ -60,12 +60,12 @@ class UpdatesController:
                 status_res = await client.get(f"{UPDATER_URL}/status", headers=headers)
                 if status_res.status_code == 200:
                     updater_real_status = status_res.json().get("status", "idle")
-                    if updater_real_status in ["inspecting", "pulling", "replacing", "verifying", "rolling_back"]:
+                    if updater_real_status in ["inspecting", "pulling", "replacing", "verifying", "rolling_back", "updating"]:
                         self.update_status = "updating"
-                    elif updater_real_status in ["success", "failed", "rolled_back"]:
+                        self.is_maintenance_locked = True
+                    elif updater_real_status in ["success", "failed", "rolled_back", "idle"]:
                         self.update_status = updater_real_status
-                    elif updater_real_status == "idle" and self.update_status not in ["updating"]:
-                        self.update_status = "idle"
+                        self.is_maintenance_locked = False
                 else:
                     updater_available = False
         except Exception:
@@ -203,6 +203,7 @@ class UpdatesController:
                     return {"success": False, "message": "Updater service unreachable. Is babel-updater running?"}
 
                 if current_st in ["inspecting", "pulling", "replacing", "verifying", "rolling_back", "updating"]:
+                    self.update_status = "updating"
                     self.is_maintenance_locked = False
                     return {"success": False, "message": f"Update already in progress ({current_st})"}
 
@@ -262,6 +263,15 @@ class UpdatesController:
                     )
                     if res.status_code == 200:
                         return {"success": True, "message": "Update initiated. System will restart shortly."}
+                    elif res.status_code == 409:
+                        avail, live_st = await self.get_real_updater_status()
+                        self.is_maintenance_locked = False
+                        if live_st in ["inspecting", "pulling", "replacing", "verifying", "rolling_back", "updating"]:
+                            self.update_status = "updating"
+                            return {"success": False, "message": f"Update already in progress ({live_st})"}
+                        else:
+                            self.update_status = "idle"
+                            return {"success": False, "message": f"Updater conflict: {res.text}"}
                     else:
                         self.update_status = "idle"
                         self.is_maintenance_locked = False
@@ -272,6 +282,13 @@ class UpdatesController:
                 self.is_maintenance_locked = False
                 return {"success": False, "message": "Updater service unreachable. Is babel-updater running?"}
             except Exception as e:
+                try:
+                    avail, live_st = await self.get_real_updater_status()
+                    if live_st in ["inspecting", "pulling", "replacing", "verifying", "rolling_back", "updating"]:
+                        self.update_status = "updating"
+                        return {"success": True, "message": "Update already in progress"}
+                except Exception:
+                    pass
                 self.update_status = "idle"
                 self.is_maintenance_locked = False
                 return {"success": False, "message": f"Updater request failed: {str(e)}"}

@@ -9,20 +9,21 @@ def test_poll_health_state_awareness():
     assert poll_health_match, "pollHealth function not found"
     poll_func = poll_health_match.group(0)
 
-    # A) old version + updater_status=pulling => continues polling
-    # B) old version + updater_status=verifying => continues polling
-    # To verify this, check that clearInterval is NOT called unconditionally after fetch
-    
-    # Assert unconditional clearInterval is GONE
-    assert "                                    const upData = await upRes.json();\n                                    clearInterval(iv);" not in poll_func
-    
-    # Check that failed explicitly leads to terminal
+    # 1. Terminal failed state cleanly handled
     assert "st === 'failed'" in poll_func
-    
-    # Check that rolled_back explicitly leads to terminal
+    assert "this.updateInProgress = false;" in poll_func
+    assert "this.updateFailed = true;" in poll_func
+    assert "this.stopHealthPoll();" in poll_func
+
+    # 2. Terminal rolled_back state cleanly handled (10)
     assert "st === 'rolled_back'" in poll_func
-    
-    # Check that success requires both version match and terminal state
+
+    # 3. Success state requires expected version match and terminal success/idle (9, 13)
     assert "isExpected" in poll_func
     assert "(st === 'success' || st === 'idle')" in poll_func
-    
+    assert "sessionStorage.setItem('babelUpdateSuccess'" in poll_func
+    assert "window.location.replace(newUrl)" in poll_func
+
+    # 4. Timeout stops polling and flags failure (14)
+    assert "attempts >= maxAttempts" in poll_func
+    assert "Update timed out" in poll_func
