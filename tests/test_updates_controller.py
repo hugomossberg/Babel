@@ -19,13 +19,13 @@ async def test_version_parsing():
 async def test_cached_updates():
     from datetime import datetime, timezone
     controller = UpdatesController()
-    controller.cached_release_metadata = {"latest_version": "v2.3.35-beta", "release_url": "https://github.com/...", "release_notes": "Notes", "published_at": "2026-08-24T00:00:00Z"}
+    controller.cached_release_metadata = {"latest_version": "v99.0.0-beta", "release_url": "https://github.com/...", "release_notes": "Notes", "published_at": "2026-08-24T00:00:00Z"}
     controller.cache_time = datetime.now(timezone.utc).timestamp()
 
     with patch.object(controller, "get_real_updater_status", new_callable=AsyncMock) as mock_st:
         mock_st.return_value = (True, "idle")
         info = await controller.get_update_info(force_refresh=False)
-        assert info["latest_version"] == "v2.3.35-beta"
+        assert info["latest_version"] == "v99.0.0-beta"
         assert info["update_available"] is True
         assert info["updater_status"] == "idle"
         assert info["one_click_update_available"] is True
@@ -37,8 +37,8 @@ async def test_release_channel_and_notes_bounding():
 
     mock_releases = [
         {
-            "tag_name": "v2.3.34-beta",
-            "html_url": "https://github.com/hugomossberg/Babel/releases/tag/v2.3.34-beta",
+            "tag_name": "v99.0.0-beta",
+            "html_url": "https://github.com/hugomossberg/Babel/releases/tag/v99.0.0-beta",
             "published_at": "2026-08-23T00:00:00Z",
             "body": "X" * 1500
         },
@@ -59,7 +59,7 @@ async def test_release_channel_and_notes_bounding():
         mock_get.return_value = mock_resp
         info = await controller.get_update_info(force_refresh=True)
         assert info["update_available"] is True
-        assert info["latest_version"] == "v2.3.34-beta"
+        assert info["latest_version"] == "v99.0.0-beta"
         assert len(info["release_notes"]) <= 1040
         assert "[View full release on GitHub]" in info["release_notes"]
 
@@ -107,8 +107,8 @@ async def test_trigger_update_validations():
          patch("app.core.db.get_jobs_by_status", return_value=[]), \
          patch.object(controller, "get_update_info", new_callable=AsyncMock) as mock_info:
         mock_st.return_value = (True, "idle")
-        mock_info.return_value = {"update_available": True, "latest_version": "v2.3.34-beta"}
-        res = await controller.trigger_update("v2.3.35-beta")
+        mock_info.return_value = {"update_available": True, "latest_version": "v99.0.0-beta"}
+        res = await controller.trigger_update("v99.0.1-beta")
         assert res["success"] is False
         assert "does not match verified latest release" in res["message"]
         assert controller.is_maintenance_locked is False
@@ -119,13 +119,13 @@ async def test_trigger_update_validations():
          patch.object(controller, "get_update_info", new_callable=AsyncMock) as mock_info, \
          patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
         mock_st.return_value = (True, "idle")
-        mock_info.return_value = {"update_available": True, "latest_version": "v2.3.34-beta"}
+        mock_info.return_value = {"update_available": True, "latest_version": "v99.0.0-beta"}
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_post.return_value = mock_resp
 
-        res = await controller.trigger_update("v2.3.34-beta")
+        res = await controller.trigger_update("v99.0.0-beta")
         assert res["success"] is True
         assert controller.update_status == "updating"
 
