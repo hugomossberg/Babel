@@ -1546,24 +1546,36 @@ docker compose up -d babel</pre>
         updatePollTimer: null,
 
         async init() {
+          let pendingMarker = null;
           try {
             const rawMarker = sessionStorage.getItem('babelUpdateSuccess');
             if (rawMarker) {
               const marker = JSON.parse(rawMarker);
               sessionStorage.removeItem('babelUpdateSuccess');
               if (marker && marker.version && (Date.now() - (marker.timestamp || 0)) < 60000) {
-                this.updateJustSucceeded = true;
-                this.updateSuccessVersion = marker.version;
-                if (this.updateSuccessTimer) clearTimeout(this.updateSuccessTimer);
-                this.updateSuccessTimer = setTimeout(() => {
-                  this.updateJustSucceeded = false;
-                }, 10000);
+                pendingMarker = marker;
               }
             }
           } catch(e) {}
 
           await this.loadStats();
-          this.checkUpdates();
+
+          // 1. Await a fresh, un-cached update check upon page initialization
+          await this.checkUpdates(true);
+
+          // 2. Only show "Updated to X" if current verified backend version matches marker
+          if (pendingMarker && pendingMarker.version && this.updateData && this.updateData.current_version) {
+            const normCurrent = (this.updateData.current_version || '').replace(/^v/, '').trim();
+            const normMarker = (pendingMarker.version || '').replace(/^v/, '').trim();
+            if (normCurrent && normMarker && normCurrent === normMarker) {
+              this.updateJustSucceeded = true;
+              this.updateSuccessVersion = this.updateData.current_version;
+              if (this.updateSuccessTimer) clearTimeout(this.updateSuccessTimer);
+              this.updateSuccessTimer = setTimeout(() => {
+                this.updateJustSucceeded = false;
+              }, 10000);
+            }
+          }
 
           await this.loadJobs();
           await this.loadAllSettings();
@@ -2279,7 +2291,10 @@ docker compose up -d babel</pre>
                                         }));
                                     } catch(e) {}
 
-                                    window.location.reload();
+                                    const cleanSearch = (window.location.search || '').replace(/([?&])updated=[^&]*/g, '').replace(/^[?&]/, '');
+                                    const sep = cleanSearch ? '&' : '?';
+                                    const newUrl = window.location.pathname + (cleanSearch ? '?' + cleanSearch : '') + sep + 'updated=' + Date.now();
+                                    window.location.replace(newUrl);
                                     return;
                                 }
 

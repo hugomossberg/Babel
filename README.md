@@ -116,27 +116,70 @@ Babel is currently in **Public Beta**. The core pipeline, AI translation engines
 
 ## Quick Start
 
-Running Babel with Docker Compose requires only a `docker-compose.yml` file. Babel automatically handles inner-container security generation out of the box.
+Install Babel using Docker Compose. The standard installation includes Babel and the `babel-updater` sidecar for zero-configuration One-Click in-app updates.
 
-### 1. Create directory and download configuration
+### 1. Create directory and configuration
 
-Download the standard `docker-compose.yml` from this repository (includes Babel and the `babel-updater` sidecar):
+Create a directory and create `docker-compose.yml` (or download it via curl):
 
 ```bash
 mkdir babel && cd babel
 curl -O https://raw.githubusercontent.com/hugomossberg/Babel/main/docker-compose.yml
 ```
 
-Edit the file to map your volume paths:
-> **IMPORTANT: Volume Paths**
+Or copy this standard `docker-compose.yml`:
+
+```yaml
+services:
+  babel:
+    image: ghcr.io/hugomossberg/babel:beta
+    container_name: babel
+    ports:
+      - "${BABEL_PORT:-8765}:8765"
+    environment:
+      - TZ=${TZ:-UTC}
+      - BABEL_AUTH_USERNAME=${BABEL_AUTH_USERNAME:-}
+      - BABEL_AUTH_PASSWORD=${BABEL_AUTH_PASSWORD:-}
+      - BABEL_WEBHOOK_SECRET=${BABEL_WEBHOOK_SECRET:-}
+      - "BABEL_UPDATER_SECRET=${BABEL_UPDATER_SECRET:-}"
+    volumes:
+      - ./data:/app/data
+      - babel_updater_auth:/app/auth:ro
+      - ${TV_PATH:-/path/to/tv}:/tv
+      - ${MOVIES_PATH:-/path/to/movies}:/movies
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8765/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  babel-updater:
+    image: ghcr.io/hugomossberg/babel:beta
+    container_name: babel-updater
+    command: python /app/app/updater/main.py
+    environment:
+      - BABEL_CONTAINER_NAME=babel
+      - ALLOWED_IMAGE=ghcr.io/hugomossberg/babel
+      - "BABEL_UPDATER_SECRET=${BABEL_UPDATER_SECRET:-}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - babel_updater_auth:/app/auth
+    restart: unless-stopped
+
+volumes:
+  babel_updater_auth:
+```
+
+> **IMPORTANT: Volume Paths & Security**
 >
-> You must map your host paths to Babel's container paths.
-> - For TV Shows: Change `/path/to/tv` (with your actual host path). Babel will see this as `/tv` internally.
-> - For Movies: Change `/path/to/movies` (with your actual host path). Babel will see this as `/movies` internally.
+> - **Media paths:** Change `/path/to/tv` and `/path/to/movies` to match your host media paths (or set `TV_PATH` and `MOVIES_PATH`).
+> - **Isolation:** The main `babel` container has **no** access to the Docker socket. `docker.sock` is mounted strictly to the isolated `babel-updater` sidecar, which communicates internally via a shared auth token.
 
 ### 2. Start and Verify
 
-Start the container in the background:
+Start Babel in the background:
 
 ```bash
 docker compose up -d

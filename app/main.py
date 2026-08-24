@@ -93,7 +93,14 @@ async def serve_ui():
     with open(template_path, "r", encoding="utf-8") as f:
         html = f.read()
         html = html.replace("{{VERSION}}", VERSION)
-        return HTMLResponse(content=html)
+        return HTMLResponse(
+            content=html,
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            }
+        )
 
 
 

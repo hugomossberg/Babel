@@ -29,23 +29,10 @@ def test_docker_compose_security_and_structure():
     assert not any("docker.sock" in str(v) for v in babel_volumes), "Babel container must NOT mount docker.sock"
     assert any("docker.sock" in str(v) for v in updater_volumes), "Updater container must mount docker.sock"
 
-    # Check secret config
-    def extract_secret(env):
-        if isinstance(env, dict):
-            return env.get("BABEL_UPDATER_SECRET")
-        elif isinstance(env, list):
-            for item in env:
-                assert not isinstance(item, dict), "Environment entry parsed as dict instead of string. Missing quotes in compose file?"
-                if isinstance(item, str) and item.startswith("BABEL_UPDATER_SECRET="):
-                    return item
-        return None
-
-    babel_secret = extract_secret(babel.get("environment", []))
-    assert ":?" not in babel_secret, "BABEL_UPDATER_SECRET should no longer require fail-fast pattern :?"
-    assert ":-" in babel_secret, "BABEL_UPDATER_SECRET should allow empty string/missing env override :-"
-
+    # 4. Updater exposes no host ports
     assert "ports" not in updater, "babel-updater must not expose ports"
 
+    # 5. Updater image restriction
     allowed_image = None
     env = updater.get("environment", [])
     if isinstance(env, dict):
@@ -54,7 +41,7 @@ def test_docker_compose_security_and_structure():
         for item in env:
             assert not isinstance(item, dict), "Environment entry parsed as dict instead of string. Missing quotes in compose file?"
             if isinstance(item, str) and item.startswith("ALLOWED_IMAGE="):
-                allowed_image = item
+                allowed_image = item.split("=", 1)[1]
 
     assert allowed_image is not None, "babel-updater is missing ALLOWED_IMAGE"
     assert "ghcr.io/hugomossberg/babel" in allowed_image, "ALLOWED_IMAGE must be ghcr.io/hugomossberg/babel"

@@ -13,7 +13,7 @@ logger = logging.getLogger("babel.updates")
 class UpdatesController:
     def __init__(self):
         self.github_repo = GITHUB_REPO
-        self.cached_info = None
+        self.cached_release_metadata = None
         self.cache_time = None
         self.update_status = "idle"  # idle, updating, success, failed, rolled_back
         self.is_maintenance_locked = False
@@ -84,85 +84,105 @@ class UpdatesController:
     async def get_update_info(self, force_refresh: bool = False) -> Dict[str, Any]:
         now = datetime.now(timezone.utc).timestamp()
 
-        # Use cache if within 2 hours and not forced
-        if not force_refresh and self.cached_info and self.cache_time and (now - self.cache_time) < 300:
-            return self.cached_info
+        # 1. ALWAYS query live runtime updater status (never served from stale cache)
+        avail, st = await self.get_real_updater_status()
 
-        # Single-flight lock: avoid parallel requests hammering GitHub
-        async with self._check_lock:
-            # Re-check after acquiring lock in case another coroutine just refreshed it
-            if not force_refresh and self.cached_info and self.cache_time and (now - self.cache_time) < 300:
-                return self.cached_info
+        # 2. Check if GitHub release metadata needs refresh (TTL: 120s)
+        cache_valid = (
+            not force_refresh
+            and self.cached_release_metadata is not None
+            and self.cache_time is not None
+            and (now - self.cache_time) < 120
+        )
 
-            is_beta_channel = "-beta" in VERSION
-            avail, st = await self.get_real_updater_status()
+        if not cache_valid:
+            async with self._check_lock:
+                # Re-check under lock
+                if (
+                    not force_refresh
+                    and self.cached_release_metadata is not None
+                    and self.cache_time is not None
+                    and (now - self.cache_time) < 120
+                ):
+                    pass
+                else:
+                    is_beta_channel = "-beta" in VERSION
+                    release_meta = {
+                        "latest_version": VERSION,
+                        "release_url": "",
+                        "release_notes": "",
+                        "published_at": None,
+                    }
 
-            # Default response
-            info = {
-                "current_version": VERSION,
-                "latest_version": VERSION,
-                "update_available": False,
-                "release_url": "",
-                "release_notes": "",
-                "published_at": None,
-                "one_click_update_available": avail,
-                "updater_status": st,
-            }
+                    try:
+                        async with httpx.AsyncClient(timeout=5.0) as client:
+                            res = await client.get(
+                                f"https://api.github.com/repos/{self.github_repo}/releases",
+                                headers={"Accept": "application/vnd.github.v3+json", "User-Agent": f"Babel/{VERSION}"}
+                            )
 
-            try:
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    res = await client.get(
-                        f"https://api.github.com/repos/{self.github_repo}/releases",
-                        headers={"Accept": "application/vnd.github.v3+json", "User-Agent": f"Babel/{VERSION}"}
-                    )
+                            if res.status_code == 200:
+                                releases = res.json()
+                                if isinstance(releases, list):
+                                    latest_release = None
+                                    for rel in releases:
+                                        if not isinstance(rel, dict):
+                                            continue
+                                        tag_name = rel.get("tag_name", "")
+                                        is_rel_beta = "-beta" in tag_name
 
-                    if res.status_code == 200:
-                        releases = res.json()
-                        if isinstance(releases, list):
-                            latest_release = None
-                            for rel in releases:
-                                if not isinstance(rel, dict):
-                                    continue
-                                tag_name = rel.get("tag_name", "")
-                                is_rel_beta = "-beta" in tag_name
+                                        # Match channel
+                                        if is_beta_channel and not is_rel_beta:
+                                            continue
+                                        if not is_beta_channel and is_rel_beta:
+                                            continue
 
-                                # Match channel
-                                if is_beta_channel and not is_rel_beta:
-                                    continue
-                                if not is_beta_channel and is_rel_beta:
-                                    continue
+                                        # Compare versions
+                                        current_tuple = self._parse_version(VERSION)
+                                        rel_tuple = self._parse_version(tag_name)
 
-                                # Compare versions
-                                current_tuple = self._parse_version(VERSION)
-                                rel_tuple = self._parse_version(tag_name)
+                                        if rel_tuple > current_tuple:
+                                            if latest_release is None or rel_tuple > self._parse_version(latest_release.get("tag_name", "")):
+                                                latest_release = rel
 
-                                if rel_tuple > current_tuple:
-                                    if latest_release is None or rel_tuple > self._parse_version(latest_release.get("tag_name", "")):
-                                        latest_release = rel
+                                    if latest_release:
+                                        release_meta["latest_version"] = latest_release.get("tag_name", "")
+                                        release_meta["release_url"] = latest_release.get("html_url", "")
+                                        release_meta["published_at"] = latest_release.get("published_at")
 
-                            if latest_release:
-                                info["update_available"] = True
-                                info["latest_version"] = latest_release.get("tag_name", "")
-                                info["release_url"] = latest_release.get("html_url", "")
-                                info["published_at"] = latest_release.get("published_at")
+                                        body = latest_release.get("body", "") or ""
+                                        if len(body) > 1000:
+                                            body = body[:1000] + "...\n\n[View full release on GitHub]"
+                                        release_meta["release_notes"] = body
 
-                                body = latest_release.get("body", "") or ""
-                                if len(body) > 1000:
-                                    body = body[:1000] + "...\n\n[View full release on GitHub]"
-                                info["release_notes"] = body
-                    else:
-                        logger.warning(f"GitHub release check returned status {res.status_code}")
-            except Exception as e:
-                logger.warning(f"Failed to check for updates: {e}")
-                # If cached info exists from earlier, preserve it on failure
-                if self.cached_info:
-                    self.cached_info["one_click_update_available"] = avail
-                    self.cached_info["updater_status"] = st
-                    return self.cached_info
+                                self.cached_release_metadata = release_meta
+                                self.cache_time = now
+                            else:
+                                logger.warning(f"GitHub release check returned status {res.status_code}")
+                    except Exception as e:
+                        logger.warning(f"Failed to check for updates: {e}")
 
-            self.cached_info = info
-            self.cache_time = now
-            return info
+        # 3. Construct response using live VERSION and live updater status
+        meta = self.cached_release_metadata or {
+            "latest_version": VERSION,
+            "release_url": "",
+            "release_notes": "",
+            "published_at": None,
+        }
+
+        latest_tag = meta.get("latest_version") or VERSION
+        is_update_available = (self._parse_version(latest_tag) > self._parse_version(VERSION))
+
+        return {
+            "current_version": VERSION,
+            "latest_version": latest_tag,
+            "update_available": is_update_available,
+            "release_url": meta.get("release_url", ""),
+            "release_notes": meta.get("release_notes", ""),
+            "published_at": meta.get("published_at"),
+            "one_click_update_available": avail,
+            "updater_status": st,
+        }
 
     async def trigger_update(self, target_version: str) -> Dict[str, Any]:
         if self.is_locked_for_update():

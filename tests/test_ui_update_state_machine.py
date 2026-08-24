@@ -40,26 +40,29 @@ def test_scenario_d_update_failed_cannot_show_while_updating():
     assert 'x-show="!isUpdating() && !updateJustSucceeded && isUpdateFailed()"' in html
 
 def test_scenario_e_full_reload_triggered_on_verified_success():
-    """E) Full reload is triggered on verified success."""
+    """E) Cache-busted reload is triggered on verified success."""
     html = get_index_html()
-    assert "window.location.reload();" in html
+    assert "window.location.replace(" in html
     assert "hasTriggeredReload = true;" in html
+    assert "updated=" in html
 
 def test_scenario_f_session_storage_transient_success_state():
-    """F) After reload, 'Updated to vX.Y.Z' is displayed transiently via sessionStorage."""
+    """F) After reload, 'Updated to vX.Y.Z' is verified and displayed transiently via sessionStorage."""
     html = get_index_html()
     # In pollHealth before reload
     assert "sessionStorage.setItem('babelUpdateSuccess'" in html
     # In init() after reload
     assert "sessionStorage.getItem('babelUpdateSuccess')" in html
     assert "sessionStorage.removeItem('babelUpdateSuccess')" in html
+    assert "normCurrent === normMarker" in html
     assert "this.updateJustSucceeded = true;" in html
-    assert "this.updateSuccessVersion = marker.version;" in html
-    # Transient timeout exists
+    assert "this.updateSuccessVersion = this.updateData.current_version;" in html
+    # Transient timeout exists (10 seconds)
     assert "this.updateSuccessTimer = setTimeout(" in html
+    assert "10000" in html
 
 def test_scenario_g_header_version_binds_to_current_version():
-    """G) Header version binds to current_version (not just static v{{VERSION}})."""
+    """G) Header version binds to current_version (same source as Settings)."""
     html = get_index_html()
     assert 'x-text="updateData.current_version || \'v{{VERSION}}\'"' in html
 
@@ -107,7 +110,7 @@ def test_scenario_l_start_update_buttons_disabled_during_update():
 def test_scenario_m_mutual_exclusivity_of_all_ui_states():
     """M) All UI states (idle, updating, success, failed, rollback) are mutually exclusive."""
     html = get_index_html()
-    
+
     # Priority order in Popover:
     # 1. isUpdating()
     assert 'x-show="isUpdating()"' in html
@@ -117,3 +120,11 @@ def test_scenario_m_mutual_exclusivity_of_all_ui_states():
     assert 'x-show="!isUpdating() && !updateJustSucceeded && isUpdateFailed()"' in html
     # 4. !isUpdating() && !updateJustSucceeded && !isUpdateFailed() && updateData.update_available
     assert 'x-show="!isUpdating() && !updateJustSucceeded && !isUpdateFailed() && updateData.update_available"' in html
+
+def test_init_fresh_check_and_background_polling():
+    """Verify init does fresh check (awaited) and background polling uses standard non-forced checks."""
+    html = get_index_html()
+    # init awaits fresh check
+    assert "await this.checkUpdates(true);" in html
+    # background polling runs every 60s without force
+    assert "this.updatePollTimer = setInterval(() => {\n            this.checkUpdates();\n          }, 60000);" in html
