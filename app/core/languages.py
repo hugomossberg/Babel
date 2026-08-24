@@ -29,7 +29,10 @@ LANGUAGES = [
     Language("ro", ["ron", "rum", "romanian", "română", "romana"], "Romanian", "RO"),
     Language("hu", ["hun", "hungarian", "magyar"], "Hungarian", "HU"),
     Language("tr", ["tur", "turkish", "türkçe", "turkce"], "Turkish", "TR"),
-    Language("el", ["ell", "gre", "greek", "ελληνικά", "ellinika"], "Greek", "EL")
+    Language("el", ["ell", "gre", "greek", "ελληνικά", "ellinika"], "Greek", "EL"),
+    Language("sr", ["srp", "scc", "serbian", "српски", "srpski"], "Serbian", "SR"),
+    Language("hr", ["hrv", "scr", "croatian", "hrvatski"], "Croatian", "HR"),
+    Language("bs", ["bos", "bosnian", "bosanski"], "Bosnian", "BS")
 ]
 
 def get_language(query: str) -> Optional[Language]:

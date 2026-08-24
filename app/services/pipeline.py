@@ -10,7 +10,7 @@ import uuid
 
 from app.core.cleaner import sanitize_srt_content, subs_to_srt_string
 from app.core.extractor import extract_embedded_srt, inspect_mkv_tracks
-from app.core.validator import verify_sync, check_dropped_lines, evaluate_subtitle_health, detect_language_heuristics, check_language_representative
+from app.core.validator import verify_sync, check_dropped_lines, evaluate_subtitle_health, detect_language_heuristics, check_language_representative, are_languages_compatible
 from app.core.db import (
     create_job, update_job, append_job_log, get_setting,
     get_positive_int_setting, get_int_setting, get_float_setting,
@@ -144,7 +144,7 @@ def qa_gate(
             detected = lang_check["detected_lang"]
             conf = lang_check["confidence"]
             target_norm = target_lang_code[:2].lower()
-            if detected != "unknown" and detected != target_norm and conf < 0.8:
+            if detected != "unknown" and not are_languages_compatible(detected, target_norm) and conf < 0.8:
                 warnings.append(f"Low confidence language detection: expected {target_lang_code}, detected {detected} ({conf*100:.0f}% confidence)")
                 score -= 10
 

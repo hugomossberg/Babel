@@ -29,6 +29,25 @@ from app.core.languages import get_language
 # Seed for deterministic tests/results
 DetectorFactory.seed = 0
 
+# Related / ambiguous language groups where general language detectors
+# cannot reliably distinguish closely-related languages (e.g., BCS family).
+SIMILAR_LANGUAGE_GROUPS = [
+    {"sr", "hr", "bs"}
+]
+
+def are_languages_compatible(lang_a: Optional[str], lang_b: Optional[str]) -> bool:
+    """Checks if two language codes are identical or belong to the same closely-related family."""
+    if not lang_a or not lang_b:
+        return False
+    a = lang_a.lower()[:2]
+    b = lang_b.lower()[:2]
+    if a == b:
+        return True
+    for group in SIMILAR_LANGUAGE_GROUPS:
+        if a in group and b in group:
+            return True
+    return False
+
 def detect_language_heuristics(text: str, expected_language: Optional[str] = None) -> dict:
     """
     Robust language detection for all languages.
@@ -67,7 +86,8 @@ def detect_language_heuristics(text: str, expected_language: Optional[str] = Non
             exp_lang_obj = get_language(expected_language)
             expected_norm = exp_lang_obj.code if exp_lang_obj else expected_language.lower().strip()[:2]
         
-        words = set(re.findall(r"\b\w+\b", cleaned.lower()))
+        words_list = re.findall(r"\b\w+\b", cleaned.lower())
+        words = set(words_list)
         swedish_word_matches = words & SWEDISH_COMMON_WORDS
         english_word_matches = words & ENGLISH_COMMON_WORDS
 
@@ -82,13 +102,33 @@ def detect_language_heuristics(text: str, expected_language: Optional[str] = Non
                 confidence = max(confidence, 0.90)
 
         # English heuristic assistance (prevents langdetect false positive collisions on short phrases, e.g., 'What did you do?' -> cy/so):
+        is_registered = get_language(detected_code) is not None
         if len(english_word_matches) >= 2 and len(swedish_word_matches) == 0:
-            if detected_code not in {"en", "sv", "no", "da", "de", "fr", "es", "it", "bg", "cs", "ro", "hu", "tr", "el", "pl", "pt", "ru", "ja", "zh", "ko", "fi", "nl"}:
+            token_count = len(words_list)
+            english_ratio = len(english_word_matches) / token_count if token_count > 0 else 0.0
+            if not is_registered:
+                # Detector returned an unregistered / spurious language code (e.g. cy, so, af, tl)
                 detected_code = "en"
                 confidence = max(confidence, 0.95)
-            elif detected_code == "cy":
+            elif detected_code != "en" and confidence < 0.80 and english_ratio >= 0.50:
+                # Detector returned a registered language with low confidence, but text is overwhelmingly English
                 detected_code = "en"
                 confidence = max(confidence, 0.95)
+
+        # Serbian Cyrillic assistance:
+        # langdetect lacks an 'sr' profile and often classifies Serbian Cyrillic as 'mk'.
+        # If expected is 'sr' and text contains Cyrillic letters:
+        # Only assist to 'sr' when POSITIVE Serbian diagnostic evidence is present (diagnostic letters ђ, ћ
+        # or distinctive grammatical words је, није, ово, шта, данас, пре, сви, овај, dobrodošli/хвала/молимо)
+        # AND positive Macedonian diagnostic evidence is ABSENT.
+        # Neutral or ambiguous Cyrillic without positive Serbian evidence stays 'mk' / unchanged.
+        if expected_norm == "sr" and detected_code == "mk":
+            has_cyrillic = bool(re.search(r'[\u0400-\u04FF]', cleaned))
+            if has_cyrillic:
+                has_sr_evidence = bool(re.search(r'[\u0402\u0452\u040B\u045B]|\b(је|није|ово|шта|данас|пре|сви|овај|овог|овом|добродошли|хвала|молимо)\b', cleaned, re.IGNORECASE))
+                has_mk_evidence = bool(re.search(r'[\u0403\u0453\u0405\u0455\u040C\u045C]|\b(ова|оваа|овој|овие|денес|зошто|нема|сака|треба|веќе|тука|многу|додека|во)\b', cleaned, re.IGNORECASE))
+                if has_sr_evidence and not has_mk_evidence:
+                    detected_code = "sr"
 
         # Normalize via central language registry
         registry_lang = get_language(detected_code)
@@ -221,19 +261,19 @@ def classify_cue_language_mismatch(
     s_lang = s_info["lang"]
     s_conf = s_info["confidence"]
 
-    # 2. Correct target language or uncertain/short
-    if t_lang == target_norm or t_lang == "unknown" or t_conf < 0.75:
-        return {"status": "CORRECT_TARGET" if t_lang == target_norm else "UNCERTAIN", "target_lang": t_lang, "source_lang": s_lang, "details": "Target language matched or uncertain"}
+    # 2. Correct target language, compatible related language, or uncertain/short
+    if are_languages_compatible(t_lang, target_norm) or t_lang == "unknown" or t_conf < 0.75:
+        return {"status": "CORRECT_TARGET" if are_languages_compatible(t_lang, target_norm) else "UNCERTAIN", "target_lang": t_lang, "source_lang": s_lang, "details": "Target language matched or uncertain"}
 
-    # 3. Target is detected as a foreign language (not target_norm, e.g. 'de', 'fr', 'es', 'it')
+    # 3. Target is detected as a foreign language (not target_norm and not compatible, e.g. 'de', 'fr', 'es', 'it')
     # Check if source also contains this foreign dialogue:
-    if s_lang == t_lang and s_lang not in {source_norm, "unknown"} and s_conf >= 0.75:
+    if s_lang == t_lang and not are_languages_compatible(s_lang, source_norm) and s_lang != "unknown" and s_conf >= 0.75:
         if is_verified_foreign_text(source_text, s_lang):
             return {"status": "LEGIT_FOREIGN_PRESERVED", "target_lang": t_lang, "source_lang": s_lang, "details": f"Preserved foreign dialogue ({t_lang})"}
 
     norm_t = re.sub(r'[^\w]', '', (target_text or '').lower())
     norm_s = re.sub(r'[^\w]', '', (source_text or '').lower())
-    if norm_t and norm_t == norm_s and s_lang not in {source_norm, "unknown"} and is_verified_foreign_text(source_text, s_lang):
+    if norm_t and norm_t == norm_s and not are_languages_compatible(s_lang, source_norm) and s_lang != "unknown" and is_verified_foreign_text(source_text, s_lang):
         return {"status": "LEGIT_FOREIGN_PRESERVED", "target_lang": t_lang, "source_lang": s_lang, "details": "Identical non-English source dialogue"}
 
     # Source is English dialogue but target became a foreign non-target language:
@@ -300,7 +340,7 @@ def check_language_representative(
             det = lang_info["lang"]
             conf = lang_info["confidence"]
 
-            if det != "unknown" and det != target_norm and conf > 0.85:
+            if det != "unknown" and not are_languages_compatible(det, target_norm) and conf > 0.85:
                 sec_indices = samples.get(f"{sec}_indices", [])
                 is_wrong, wrong_ids, legit_ids = evaluate_mismatch_cues(sec_indices, det)
                 if is_wrong:
@@ -323,7 +363,7 @@ def check_language_representative(
         det = lang_info["lang"]
         conf = lang_info["confidence"]
 
-        if det != "unknown" and det != target_norm and conf > 0.8:
+        if det != "unknown" and not are_languages_compatible(det, target_norm) and conf > 0.8:
             all_indices = samples.get("all_indices", [])
             is_wrong, wrong_ids, legit_ids = evaluate_mismatch_cues(all_indices, det)
             if is_wrong:
@@ -498,7 +538,7 @@ def evaluate_subtitle_health(
         }
 
     target_norm = target_lang_code[:2].lower()
-    if detected_lang != "unknown" and detected_lang != target_norm and confidence < 0.8:
+    if detected_lang != "unknown" and not are_languages_compatible(detected_lang, target_norm) and confidence < 0.8:
         return {
             "status": "YELLOW",
             "health_score": 50,

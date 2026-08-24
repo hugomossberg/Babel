@@ -42,6 +42,9 @@ def test_language_normalization():
         ("Hungarian", "hu"), ("magyar", "hu"), ("hun", "hu"), ("hu", "hu"),
         ("Turkish", "tr"), ("türkçe", "tr"), ("tur", "tr"), ("tr", "tr"),
         ("Greek", "el"), ("ελληνικά", "el"), ("ell", "el"), ("gre", "el"), ("el", "el"),
+        ("Serbian", "sr"), ("српски", "sr"), ("srpski", "sr"), ("srp", "sr"), ("scc", "sr"), ("sr", "sr"),
+        ("Croatian", "hr"), ("hrvatski", "hr"), ("hrv", "hr"), ("scr", "hr"), ("hr", "hr"),
+        ("Bosnian", "bs"), ("bosanski", "bs"), ("bos", "bs"), ("bs", "bs"),
     ]
     for raw, expected in test_cases:
         assert normalize_language_code(raw) == expected
@@ -56,3 +59,95 @@ def test_scandinavian_disambiguation():
     no_text = "Hei, hvordan har du det i dag? Dette er en test på norsk språk."
     res_no = detect_language_heuristics(no_text, expected_language="no")
     assert res_no["lang"] == "no"
+
+def test_serbian_cyrillic_and_latin_detection():
+    # Serbian Cyrillic
+    sr_cyr = "Ово је сасвим природна српска реченица коју користимо за тестирање превода и детекције језика у систему."
+    res_cyr = detect_language_heuristics(sr_cyr, expected_language="sr")
+    assert res_cyr["lang"] == "sr"
+    assert res_cyr["confidence"] > 0.8
+
+    # Serbian Latin (detects as hr/bcs family, normalized/compatible)
+    sr_lat = "Ovo je sasvim prirodna srpska rečenica koju koristimo za testiranje prevoda i detekcije jezika u sistemu."
+    res_lat = detect_language_heuristics(sr_lat, expected_language="sr")
+    assert res_lat["lang"] in ["sr", "hr", "bs"]
+    assert res_lat["confidence"] > 0.8
+
+
+def test_polish_english_word_collisions_retains_polish():
+    """Issue #2: Polish text with English collision words (a, on, to) must detect as pl with high confidence."""
+    polish_text = (
+        "To nie jest to, co myslisz. Musimy stad uciekac, zanim oni tu dotra.\n"
+        "A co jesli nas znajda? Wtedy bedziemy walczyc. Nie mamy innego wyboru.\n"
+        "On powiedzial, ze nigdy nie wolno mi sie poddawac, bez wzgledu na wszystko."
+    )
+    res_with_expected = detect_language_heuristics(polish_text, expected_language="pl")
+    assert res_with_expected["lang"] == "pl"
+    assert res_with_expected["confidence"] > 0.90
+
+    res_without_expected = detect_language_heuristics(polish_text)
+    assert res_without_expected["lang"] == "pl"
+    assert res_without_expected["confidence"] > 0.90
+
+
+def test_finnish_english_word_collisions_retains_finnish():
+    """Issue #2: Finnish text with English collision words (he, on) must detect as fi with high confidence."""
+    finnish_text = (
+        "En uskonut etta nain kavisi. Sanoin sinulle ettet menisi yksin ulos.\n"
+        "Meidan on loydettava keino paasta pois taalta ennen kuin he saapuvat.\n"
+        "Mita jos he loytavat meidat? Sitten taistelemme.\n"
+        "Meilla ei ole vaihtoehtoa."
+    )
+    res_with_expected = detect_language_heuristics(finnish_text, expected_language="fi")
+    assert res_with_expected["lang"] == "fi"
+    assert res_with_expected["confidence"] > 0.90
+
+    res_without_expected = detect_language_heuristics(finnish_text)
+    assert res_without_expected["lang"] == "fi"
+    assert res_without_expected["confidence"] > 0.90
+
+
+def test_generic_registered_language_collision_resilience():
+    """Any registered language with high confidence detector result must not be overwritten by few English words."""
+    # German sentence containing English common words ("in", "so", "and", "on")
+    de_text = "Dies ist ein ganz normaler deutscher Text mit ein paar Wörtern wie in and so on."
+    res_de = detect_language_heuristics(de_text, expected_language="de")
+    assert res_de["lang"] == "de"
+    assert res_de["confidence"] > 0.90
+
+    # Italian sentence containing English common words ("in", "me", "come")
+    it_text = "Questa è una frase completa in italiano per me e per tutti quelli che vogliono imparare come fare."
+    res_it = detect_language_heuristics(it_text, expected_language="it")
+    assert res_it["lang"] == "it"
+    assert res_it["confidence"] > 0.90
+
+
+def test_short_english_rescue_unregistered_detector_noise():
+    """Short English phrases misidentified by langdetect as unregistered codes (e.g. 'cy', 'af') are rescued to 'en'."""
+    # 'What did you do?' raw langdetect returns Welsh ('cy') @ ~1.0 confidence
+    res_cy = detect_language_heuristics("What did you do?")
+    assert res_cy["lang"] == "en"
+    assert res_cy["confidence"] >= 0.95
+
+    # 'Did you get what you want?' raw langdetect returns Afrikaans ('af') @ ~0.85 confidence
+    res_af = detect_language_heuristics("Did you get what you want?")
+    assert res_af["lang"] == "en"
+    assert res_af["confidence"] >= 0.95
+
+
+def test_macedonian_vs_serbian_cyrillic_differentiation():
+    """Genuine Macedonian with expected_language='sr' must not be falsely converted to exact Serbian."""
+    # Standard Macedonian sample with common markers
+    mk_text = "Ова е македонски текст за проверка на јазикот во системот. Здраво, како сте денес? Ова е тест на македонски јазик."
+    res_mk = detect_language_heuristics(mk_text, expected_language="sr")
+    assert res_mk["lang"] == "mk"
+
+    # Macedonian without common marker words (proving absence of MK words does NOT fabricate Serbian)
+    mk_subtle = "Слушам музика во собата додека читам книга со приказни за светот."
+    res_subtle = detect_language_heuristics(mk_subtle, expected_language="sr")
+    assert res_subtle["lang"] == "mk"
+
+    # Neutral Cyrillic without positive Serbian evidence must NOT be fabricated as sr
+    neutral_cyr = "Гледаме филм за историјата на светот со интерес."
+    res_neutral = detect_language_heuristics(neutral_cyr, expected_language="sr")
+    assert res_neutral["lang"] != "sr"

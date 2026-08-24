@@ -28,9 +28,9 @@ from app.services.translator import SubtitleTranslator, get_system_instruction
 
 
 # ===========================================================================
-# 1. TEST MATRIX FOR ALL 22 REGISTERED TARGET LANGUAGES
+# 1. TEST MATRIX FOR ALL REGISTERED TARGET LANGUAGES
 # ===========================================================================
-ALL_22_SAMPLES = {
+ALL_LANGUAGE_SAMPLES = {
     "sv": ("Swedish", "swe", "Detta är en fullständigt naturlig svensk mening som vi använder för att verifiera språkdetektering i systemet."),
     "en": ("English", "eng", "This is a completely natural English sentence that we use to verify language detection in the system."),
     "de": ("German", "deu", "Dies ist ein vollkommen natürlicher deutscher Satz, den wir verwenden, um die Spracherkennung im System zu überprüfen."),
@@ -52,11 +52,14 @@ ALL_22_SAMPLES = {
     "ro": ("Romanian", "ron", "Aceasta este o propoziție complet naturală în limba română pe care o folosim pentru a verifica detectarea limbii în sistem."),
     "hu": ("Hungarian", "hun", "Ez egy teljesen természetes magyar mondat, amelyet a rendszer nyelvi felismerésének ellenőrzésére használunk."),
     "tr": ("Turkish", "tur", "Bu, sistemdeki dil algılamasını doğrulamak için kullandığımız tamamen doğal bir Türkçe cümledir."),
-    "el": ("Greek", "ell", "Αυτή είναι μια εντελώς φυσική πρόταση στα ελληνικά που χρησιμοποιούμε για την επαλήθευση της ανίχνευσης γλώσσας στο σύστημα.")
+    "el": ("Greek", "ell", "Αυτή είναι μια εντελώς φυσική πρόταση στα ελληνικά που χρησιμοποιούμε για την επαλήθευση της ανίχνευσης γλώσσας στο σύστημα."),
+    "sr": ("Serbian", "srp", "Ово је сасвим природна српска реченица коју користимо за тестирање превода и детекције језика у систему."),
+    "hr": ("Croatian", "hrv", "Ovo je potpuno prirodna hrvatska rečenica koju koristimo za provjeru prijevoda i detekcije jezika u sustavu."),
+    "bs": ("Bosnian", "bos", "Ovo je sasvim prirodna bosanska rečenica koju koristimo za provjeru prevoda i detekcije jezika u sistemu.")
 }
 
-@pytest.mark.parametrize("code,data", list(ALL_22_SAMPLES.items()))
-def test_all_22_languages_registry_normalization_and_detection(code, data):
+@pytest.mark.parametrize("code,data", list(ALL_LANGUAGE_SAMPLES.items()))
+def test_all_registered_languages_registry_normalization_and_detection(code, data):
     name, alias, sample_text = data
     
     # 1. Registry lookup
@@ -72,7 +75,8 @@ def test_all_22_languages_registry_normalization_and_detection(code, data):
 
     # 3. Detection with expected_language
     det = detect_language_heuristics(sample_text, expected_language=code)
-    assert det["lang"] == code, f"Detection mismatch for {code}: expected {code}, got {det['lang']}"
+    from app.core.validator import are_languages_compatible
+    assert are_languages_compatible(det["lang"], code), f"Detection mismatch for {code}: expected {code}, got {det['lang']}"
     assert det["confidence"] >= 0.75, f"Confidence too low for {code}: {det['confidence']}"
 
     # 4. Stratified representative sample check
@@ -82,7 +86,7 @@ def test_all_22_languages_registry_normalization_and_detection(code, data):
     ]
     rep = check_language_representative(subs, target_lang_code=code)
     assert rep["confident_wrong_language"] is False, f"Representative check falsely failed for {code}: {rep}"
-    assert rep["detected_lang"] == code, f"Representative check detected wrong lang for {code}: {rep['detected_lang']}"
+    assert are_languages_compatible(rep["detected_lang"], code), f"Representative check detected wrong lang for {code}: {rep['detected_lang']}"
 
 
 # ===========================================================================
@@ -629,7 +633,10 @@ async def test_provider_dispatch_openai(target_lang, expected_keyword):
     ("Swedish", "SV"),
     ("Czech", "CS"),
     ("Greek", "EL"),
-    ("Portuguese", "PT-PT")
+    ("Portuguese", "PT-PT"),
+    ("Serbian", "SR"),
+    ("Croatian", "HR"),
+    ("Bosnian", "BS")
 ])
 async def test_provider_dispatch_deepl(target_lang, expected_deepl_code):
     """Verify DeepL provider maps target languages to canonical DeepL codes via registry without hardcoding."""
@@ -744,3 +751,335 @@ def test_qa_strictness_dropped_cues_strictly_fails():
     qa = qa_gate(src, target_bg, target_lang_code="bg")
     assert qa["passed"] is False, "Dropped cue must strictly fail QA"
     assert qa["dropped_count"] >= 1
+
+
+# ===========================================================================
+# 8. SERBIAN, CROATIAN & BOSNIAN QA SUITE
+# ===========================================================================
+def test_bcs_languages_qa_gate_passes():
+    """BCS translations (sr Cyrillic/Latin, hr, bs) must pass QA without detector confusion."""
+    src = [
+        srt.Subtitle(i+1, timedelta(seconds=i*3), timedelta(seconds=i*3+2), f"This is an important English line number {i+1} for testing.")
+        for i in range(15)
+    ]
+
+    # Serbian Cyrillic
+    sr_cyr_target = [
+        srt.Subtitle(i+1, timedelta(seconds=i*3), timedelta(seconds=i*3+2), f"Ово је важна српска реченица број {i+1} за тестирање превода.")
+        for i in range(15)
+    ]
+    qa_sr_cyr = qa_gate(src, sr_cyr_target, target_lang_code="sr")
+    assert qa_sr_cyr["passed"] is True, f"Serbian Cyrillic failed QA: {qa_sr_cyr}"
+
+    # Croatian
+    hr_target = [
+        srt.Subtitle(i+1, timedelta(seconds=i*3), timedelta(seconds=i*3+2), f"Ovo je važna hrvatska rečenica broj {i+1} za provjeru prijevoda.")
+        for i in range(15)
+    ]
+    qa_hr = qa_gate(src, hr_target, target_lang_code="hr")
+    assert qa_hr["passed"] is True, f"Croatian failed QA: {qa_hr}"
+
+    # Bosnian
+    bs_target = [
+        srt.Subtitle(i+1, timedelta(seconds=i*3), timedelta(seconds=i*3+2), f"Ovo je važna bosanska rečenica broj {i+1} za provjeru prevoda.")
+        for i in range(15)
+    ]
+    qa_bs = qa_gate(src, bs_target, target_lang_code="bs")
+    assert qa_bs["passed"] is True, f"Bosnian failed QA: {qa_bs}"
+
+
+def test_bcs_languages_qa_gate_fails_on_unrelated_language():
+    """BCS target languages must strictly fail QA when translated into an unrelated language like German or English."""
+    src = [
+        srt.Subtitle(i+1, timedelta(seconds=i*3), timedelta(seconds=i*3+2), f"This is an English line number {i+1} for testing.")
+        for i in range(20)
+    ]
+    de_target = [
+        srt.Subtitle(i+1, timedelta(seconds=i*3), timedelta(seconds=i*3+2), f"Das ist eine deutsche Zeile Nummer {i+1} für diesen Test.")
+        for i in range(20)
+    ]
+    en_untranslated_target = [
+        srt.Subtitle(i+1, timedelta(seconds=i*3), timedelta(seconds=i*3+2), f"This is an English line number {i+1} for testing.")
+        for i in range(20)
+    ]
+    for bcs_lang in ["sr", "hr", "bs"]:
+        qa_de = qa_gate(src, de_target, target_lang_code=bcs_lang)
+        assert qa_de["passed"] is False, f"German translation for {bcs_lang} target must strictly fail QA"
+
+        qa_en = qa_gate(src, en_untranslated_target, target_lang_code=bcs_lang)
+        assert qa_en["passed"] is False, f"Untranslated English for {bcs_lang} target must strictly fail QA"
+
+
+def test_polish_qa_gate_passes_and_rejects_untranslated_english(tmp_path):
+    """Issue #2: Realistic Polish subtitle must pass QA gate and subtitle health, but untranslated English must fail."""
+    src = [
+        srt.Subtitle(1, timedelta(seconds=1), timedelta(seconds=4), "This is not what you think. We have to run away before they arrive."),
+        srt.Subtitle(2, timedelta(seconds=5), timedelta(seconds=8), "And what if they find us? Then we will fight. We have no other choice."),
+        srt.Subtitle(3, timedelta(seconds=9), timedelta(seconds=12), "He said that I should never give up, no matter what happens."),
+        srt.Subtitle(4, timedelta(seconds=13), timedelta(seconds=16), "We need to prepare everything carefully for tomorrow morning."),
+        srt.Subtitle(5, timedelta(seconds=17), timedelta(seconds=20), "Everything will be fine as long as we stay together here.")
+    ]
+    pl_cues = [
+        "To nie jest to, co myslisz. Musimy stad uciekac, zanim oni tu dotra.",
+        "A co jesli nas znajda? Wtedy bedziemy walczyc. Nie mamy innego wyboru.",
+        "On powiedzial, ze nigdy nie wolno mi sie poddawac, bez wzgledu na wszystko.",
+        "Musimy przygotowac wszystko bardzo uwaznie na jutrzejszy poranek.",
+        "Wszystko bedzie dobrze, dopoki jestesmy tutaj razem."
+    ]
+    pl_target = [
+        srt.Subtitle(i+1, src[i].start, src[i].end, pl_cues[i])
+        for i in range(len(pl_cues))
+    ]
+
+    qa_pl = qa_gate(src, pl_target, target_lang_code="pl")
+    assert qa_pl["passed"] is True, f"Polish translation unexpectedly failed QA: {qa_pl}"
+
+    pl_file = tmp_path / "polish.pl.srt"
+    with open(pl_file, "w", encoding="utf-8") as f:
+        f.write(srt.compose(pl_target))
+    health_pl = evaluate_subtitle_health(str(pl_file), target_lang_code="pl")
+    assert health_pl["status"] == "GREEN", f"Polish health score unexpected: {health_pl}"
+
+    # English unchanged for target pl must fail QA
+    qa_fail = qa_gate(src, src, target_lang_code="pl")
+    assert qa_fail["passed"] is False, "Untranslated English must strictly fail QA when target is Polish"
+
+
+def test_finnish_qa_gate_passes_and_rejects_untranslated_english(tmp_path):
+    """Issue #2: Realistic Finnish subtitle must pass QA gate and subtitle health, but untranslated English must fail."""
+    src = [
+        srt.Subtitle(1, timedelta(seconds=1), timedelta(seconds=4), "I did not think this would happen. I told you not to go out alone."),
+        srt.Subtitle(2, timedelta(seconds=5), timedelta(seconds=8), "We must find a way to get out of here before they arrive."),
+        srt.Subtitle(3, timedelta(seconds=9), timedelta(seconds=12), "What if they find us? Then we fight. We have no other choice."),
+        srt.Subtitle(4, timedelta(seconds=13), timedelta(seconds=16), "We will stay together until the morning comes."),
+        srt.Subtitle(5, timedelta(seconds=17), timedelta(seconds=20), "Everything is going to work out fine in the end.")
+    ]
+    fi_cues = [
+        "En uskonut etta nain kavisi. Sanoin sinulle ettet menisi yksin ulos.",
+        "Meidan on loydettava keino paasta pois taalta ennen kuin he saapuvat.",
+        "Mita jos he loytavat meidat? Sitten taistelemme. Meilla ei ole vaihtoehtoa.",
+        "Pysymme yhdessa aina siihen asti kunnes aamu saapuu.",
+        "Kaikki tulee jarjestymaan aivan hyvin loppujen lopuksi."
+    ]
+    fi_target = [
+        srt.Subtitle(i+1, src[i].start, src[i].end, fi_cues[i])
+        for i in range(len(fi_cues))
+    ]
+
+    qa_fi = qa_gate(src, fi_target, target_lang_code="fi")
+    assert qa_fi["passed"] is True, f"Finnish translation unexpectedly failed QA: {qa_fi}"
+
+    fi_file = tmp_path / "finnish.fi.srt"
+    with open(fi_file, "w", encoding="utf-8") as f:
+        f.write(srt.compose(fi_target))
+    health_fi = evaluate_subtitle_health(str(fi_file), target_lang_code="fi")
+    assert health_fi["status"] == "GREEN", f"Finnish health score unexpected: {health_fi}"
+
+    # English unchanged for target fi must fail QA
+    qa_fail = qa_gate(src, src, target_lang_code="fi")
+    assert qa_fail["passed"] is False, "Untranslated English must strictly fail QA when target is Finnish"
+
+
+# ===========================================================================
+# 9. BCS FULL PIPELINE HERMETIC E2E (SR, HR, BS & MULTI-TARGET)
+# ===========================================================================
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_code,target_name,translations", [
+    ("sr", "Serbian", [
+        "Ово је сасвим природна српска реченица број један за тестирање превода.",
+        "Морамо пронаћи решење за овај проблем пре него што почне састанак.",
+        "Хвала вам пуно што сте дошли данас да нам помогнете у раду.",
+        "Све је спремно према плану и можемо одмах почети."
+    ]),
+    ("hr", "Croatian", [
+        "Ovo je potpuno prirodna hrvatska rečenica broj jedan za provjeru prijevoda.",
+        "Moramo pronaći rješenje za ovaj problem prije nego što počne sastanak.",
+        "Hvala vam puno što ste došli danas kako biste nam pomogli u radu.",
+        "Sve je spremno prema planu i možemo odmah započeti."
+    ]),
+    ("bs", "Bosnian", [
+        "Ovo je sasvim prirodna bosanska rečenica broj jedan za provjeru prevoda.",
+        "Moramo pronaći rješenje za ovaj problem prije nego što počne sastanak.",
+        "Hvala vam puno što ste došli danas kako biste nam pomogli u radu.",
+        "Sve je spremno prema planu i možemo odmah početi."
+    ])
+])
+async def test_bcs_individual_full_pipeline_hermetic_e2e(tmp_path, target_code, target_name, translations):
+    """
+    Hermetic E2E test for each BCS target individually:
+    English source -> AI Translation -> REAL QA gate PASS -> .<lang>.srt atomic publish -> 0ms sync lock.
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.cursor().execute("DELETE FROM jobs")
+    conn.commit()
+    conn.close()
+
+    with patch("google.genai.Client"):
+        pipeline = SubtitlePipeline()
+
+    video_path = tmp_path / f"bcs_video_{target_code}.mkv"
+    video_path.touch()
+
+    source_cues = [
+        "This is an important English sentence number one for testing translation.",
+        "We must find a solution to this problem before the meeting begins.",
+        "Thank you very much for coming today to help us with the work.",
+        "Everything is ready according to the plan and we can start immediately."
+    ]
+    source_subs = [
+        srt.Subtitle(index=i+1, start=timedelta(seconds=i*4), end=timedelta(seconds=i*4+3), content=source_cues[i])
+        for i in range(len(source_cues))
+    ]
+    source_srt_path = str(video_path).replace(f"_{target_code}.mkv", f"_{target_code}.en.srt")
+    with open(source_srt_path, "w", encoding="utf-8") as f:
+        f.write(srt.compose(source_subs))
+
+    def fake_get_setting(key, default=None):
+        if key == "languages":
+            return json.dumps([{"name": target_name, "code": target_code, "enabled": True}])
+        if key == "auto_repair_unhealthy": return "false"
+        if key == "extract_target_embedded": return "false"
+        if key == "extract_source_embedded": return "false"
+        if key == "enable_bazarr_check": return "false"
+        return default
+
+    async def fake_translate(subs, target_language=target_name, *args, **kwargs):
+        return [
+            srt.Subtitle(index=sub.index, start=sub.start, end=sub.end, content=translations[sub.index - 1])
+            for sub in subs
+        ]
+
+    with patch("app.services.pipeline.get_setting", side_effect=fake_get_setting), \
+         patch.object(pipeline, "trigger_bazarr_search"), \
+         patch.object(pipeline.translator, "translate_srt_content", side_effect=fake_translate):
+
+        job_id = create_job(str(video_path))
+        res = await pipeline._run_pipeline_logic(job_id, str(video_path), wait_seconds=0)
+
+        assert res["status"] in ["success", "translated"]
+        job = get_job_by_id(job_id)
+        assert job["status"] in ["COMPLETED", "TRANSLATED"]
+
+        out_path = str(video_path).replace(f"_{target_code}.mkv", f"_{target_code}.{target_code}.srt")
+        assert os.path.exists(out_path), f"Output file {out_path} was not published"
+
+        with open(out_path, "r", encoding="utf-8") as f:
+            out_content = f.read()
+
+        out_subs = list(srt.parse(out_content))
+        assert len(out_subs) == len(source_subs)
+
+        # 0ms sync lock & 0 dropped cues
+        sync_report = verify_sync(source_subs, out_subs)
+        assert sync_report["valid"] is True
+        assert sync_report["start_diff_ms"] == 0
+        assert sync_report["end_diff_ms"] == 0
+
+        dropped_count, _ = check_dropped_lines(source_subs, out_subs)
+        assert dropped_count == 0
+
+
+@pytest.mark.asyncio
+async def test_bcs_multi_target_real_qa_all_success_sr_hr_bs(tmp_path):
+    """
+    REAL multi-target E2E pipeline for sr + hr + bs concurrently:
+    - Real QA gate executes for all 3 targets and cleanly PASSES
+    - Output files movie.sr.srt, movie.hr.srt, movie.bs.srt all created atomically
+    - Cue count matches source exactly (0 dropped cues)
+    - 0ms timestamp drift across all 3
+    - No cross-target language state contamination or temp collisions
+    - Final job status is TRANSLATED with target_languages='sr,hr,bs'
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.cursor().execute("DELETE FROM jobs")
+    conn.commit()
+    conn.close()
+
+    with patch("google.genai.Client"):
+        pipeline = SubtitlePipeline()
+
+    video_path = tmp_path / "bcs_multi_movie.mkv"
+    video_path.touch()
+
+    source_cues = [
+        "Welcome everyone to tonight's special presentation.",
+        "We are glad to have all our international guests with us.",
+        "The conference will start in ten minutes in the grand auditorium.",
+        "Please silence all mobile devices before the program begins."
+    ]
+    source_subs = [
+        srt.Subtitle(index=i+1, start=timedelta(seconds=i*5), end=timedelta(seconds=i*5+4), content=source_cues[i])
+        for i in range(len(source_cues))
+    ]
+    source_srt_path = str(video_path).replace(".mkv", ".en.srt")
+    with open(source_srt_path, "w", encoding="utf-8") as f:
+        f.write(srt.compose(source_subs))
+
+    target_translations = {
+        "Serbian": [
+            "Добродошли сви на вечерашњу специјалну презентацију.",
+            "Драго нам је што су сви наши међународни гости са нама.",
+            "Конференција ће почети за десет минута у великој сали.",
+            "Молимо вас да утишате све мобилне уређаје пре почетка."
+        ],
+        "Croatian": [
+            "Dobrodošli svi na večerašnju posebnu prezentaciju.",
+            "Drago nam je što su svi naši međunarodni gosti s nama.",
+            "Konferencija će započeti za deset minuta u velikoj dvorani.",
+            "Molimo vas da utišate sve mobilne uređaje prije početka."
+        ],
+        "Bosnian": [
+            "Dobrodošli svi na večerašnju posebnu prezentaciju.",
+            "Drago nam je što su svi naši međunarodni gosti sa nama.",
+            "Konferencija će početi za deset minuta u velikoj dvorani.",
+            "Molimo vas da utišate sve mobilne uređaje prije početka."
+        ]
+    }
+
+    def fake_get_setting(key, default=None):
+        if key == "languages":
+            return json.dumps([
+                {"name": "Serbian", "code": "sr", "enabled": True},
+                {"name": "Croatian", "code": "hr", "enabled": True},
+                {"name": "Bosnian", "code": "bs", "enabled": True}
+            ])
+        if key == "auto_repair_unhealthy": return "false"
+        if key == "extract_target_embedded": return "false"
+        if key == "extract_source_embedded": return "false"
+        if key == "enable_bazarr_check": return "false"
+        return default
+
+    async def fake_translate(subs, target_language="Serbian", *args, **kwargs):
+        trans_list = target_translations.get(target_language, [])
+        return [
+            srt.Subtitle(index=sub.index, start=sub.start, end=sub.end, content=trans_list[sub.index - 1])
+            for sub in subs
+        ]
+
+    with patch("app.services.pipeline.get_setting", side_effect=fake_get_setting), \
+         patch.object(pipeline, "trigger_bazarr_search"), \
+         patch.object(pipeline.translator, "translate_srt_content", side_effect=fake_translate):
+
+        job_id = create_job(str(video_path))
+        res = await pipeline._run_pipeline_logic(job_id, str(video_path), wait_seconds=0)
+
+        assert res["status"] in ["success", "translated"]
+        job = get_job_by_id(job_id)
+        assert job["status"] in ["COMPLETED", "TRANSLATED"]
+
+        for code in ["sr", "hr", "bs"]:
+            out_file = str(video_path).replace(".mkv", f".{code}.srt")
+            assert os.path.exists(out_file), f"Output file for {code} missing: {out_file}"
+            with open(out_file, "r", encoding="utf-8") as f:
+                parsed = list(srt.parse(f.read()))
+            assert len(parsed) == len(source_subs)
+
+            sync_report = verify_sync(source_subs, parsed)
+            assert sync_report["valid"] is True
+            assert sync_report["start_diff_ms"] == 0
+            assert sync_report["end_diff_ms"] == 0
+
+            dropped, _ = check_dropped_lines(source_subs, parsed)
+            assert dropped == 0
