@@ -1500,6 +1500,7 @@ docker compose up -d babel</pre>
           }
         },
         pollTimer: null,
+        updatePollTimer: null,
 
         async init() {
           
@@ -1516,6 +1517,11 @@ docker compose up -d babel</pre>
               this.loadJobs();
             }
           }, 2000);
+
+          if (this.updatePollTimer) clearInterval(this.updatePollTimer);
+          this.updatePollTimer = setInterval(() => {
+            this.checkUpdates();
+          }, 60000);
         },
 
         showToast(msg, type = 'success') {

@@ -85,13 +85,13 @@ class UpdatesController:
         now = datetime.now(timezone.utc).timestamp()
 
         # Use cache if within 2 hours and not forced
-        if not force_refresh and self.cached_info and self.cache_time and (now - self.cache_time) < 7200:
+        if not force_refresh and self.cached_info and self.cache_time and (now - self.cache_time) < 300:
             return self.cached_info
 
         # Single-flight lock: avoid parallel requests hammering GitHub
         async with self._check_lock:
             # Re-check after acquiring lock in case another coroutine just refreshed it
-            if not force_refresh and self.cached_info and self.cache_time and (now - self.cache_time) < 7200:
+            if not force_refresh and self.cached_info and self.cache_time and (now - self.cache_time) < 300:
                 return self.cached_info
 
             is_beta_channel = "-beta" in VERSION

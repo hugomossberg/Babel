@@ -19,11 +19,11 @@ async def test_version_parsing():
 async def test_cached_updates():
     from datetime import datetime, timezone
     controller = UpdatesController()
-    controller.cached_info = {"latest_version": "v2.3.28-beta", "update_available": True}
+    controller.cached_info = {"latest_version": "v2.3.29-beta", "update_available": True}
     controller.cache_time = datetime.now(timezone.utc).timestamp()
 
     info = await controller.get_update_info(force_refresh=False)
-    assert info["latest_version"] == "v2.3.28-beta"
+    assert info["latest_version"] == "v2.3.29-beta"
 
 @pytest.mark.asyncio
 async def test_release_channel_and_notes_bounding():
@@ -62,7 +62,7 @@ async def test_trigger_update_validations():
 
     # 1. Blocked if locked
     controller.is_maintenance_locked = True
-    res = await controller.trigger_update("v2.3.28-beta")
+    res = await controller.trigger_update("v2.3.29-beta")
     assert res["success"] is False
     assert "already in progress" in res["message"]
     controller.is_maintenance_locked = False
@@ -70,7 +70,7 @@ async def test_trigger_update_validations():
     # 2. Blocked if updater unreachable
     with patch.object(controller, "get_real_updater_status", new_callable=AsyncMock) as mock_st:
         mock_st.return_value = (False, "idle")
-        res = await controller.trigger_update("v2.3.28-beta")
+        res = await controller.trigger_update("v2.3.29-beta")
         assert res["success"] is False
         assert "unreachable" in res["message"]
         assert controller.is_maintenance_locked is False
@@ -79,7 +79,7 @@ async def test_trigger_update_validations():
     with patch.object(controller, "get_real_updater_status", new_callable=AsyncMock) as mock_st, \
          patch("app.core.db.get_jobs_by_status", return_value=[{"id": 1, "status": "TRANSLATING"}]):
         mock_st.return_value = (True, "idle")
-        res = await controller.trigger_update("v2.3.28-beta")
+        res = await controller.trigger_update("v2.3.29-beta")
         assert res["success"] is False
         assert "Active jobs are running" in res["message"]
         assert controller.is_maintenance_locked is False
