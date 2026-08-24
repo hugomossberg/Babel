@@ -218,7 +218,40 @@
           </div>
           <div class="text-3xl font-bold text-amber-400" x-text="(stats.avg_duration_seconds || 0) + 's'"></div>
         </div>
-      </div>
+      <!-- Quota Notice Banner in Activity Feed if active provider is blocked or probing -->
+      <template x-if="quotaData.providers && quotaData.providers[settingsData.ai.ai_provider] && (quotaData.providers[settingsData.ai.ai_provider].blocked || quotaData.providers[settingsData.ai.ai_provider].state === 'HALF_OPEN')">
+        <div class="mb-6 p-4 bg-cyan-950/40 border border-cyan-800/60 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-sm text-cyan-200 shadow-lg">
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-xl bg-cyan-900/60 border border-cyan-700/50 flex items-center justify-center shrink-0">
+              <i class="fa-regular fa-hourglass-half text-cyan-300 text-base" :class="quotaData.providers[settingsData.ai.ai_provider].state === 'HALF_OPEN' ? 'animate-spin' : ''"></i>
+            </div>
+            <div>
+              <div class="font-semibold text-white" x-text="quotaData.providers[settingsData.ai.ai_provider].state === 'HALF_OPEN' ? 'Checking Provider Availability — Single-Flight Probe In Flight' : 'Daily AI Quota Reached — Jobs Gracefully Deferred'"></div>
+              <div class="text-xs text-cyan-300/80 mt-0.5">
+                Provider <strong class="uppercase font-mono" x-text="settingsData.ai.ai_provider"></strong>
+                <span x-show="quotaData.providers[settingsData.ai.ai_provider].state === 'HALF_OPEN'">
+                  is currently being probed with a real deferred job to verify quota availability.
+                </span>
+                <span x-show="quotaData.providers[settingsData.ai.ai_provider].state !== 'HALF_OPEN' && quotaData.providers[settingsData.ai.ai_provider].reset_type === 'exact'">
+                  is blocked. Exact reset reported: <span class="font-mono text-cyan-100 font-medium" x-text="quotaData.providers[settingsData.ai.ai_provider].blocked_until"></span>.
+                </span>
+                <span x-show="quotaData.providers[settingsData.ai.ai_provider].state !== 'HALF_OPEN' && quotaData.providers[settingsData.ai.ai_provider].reset_type !== 'exact'">
+                  is blocked. Next recheck: <span class="font-mono text-cyan-100 font-medium" x-text="quotaData.providers[settingsData.ai.ai_provider].blocked_until"></span> (Adaptive probe attempt <span x-text="quotaData.providers[settingsData.ai.ai_provider].probe_attempt || 0"></span>).
+                </span>
+                New translation jobs will be queued as <span class="font-semibold text-cyan-200">DEFERRED</span> and resumed automatically. Bazarr and media matching continue normally.
+              </div>
+            </div>
+          </div>
+          <div class="flex items-center gap-2 self-end sm:self-auto shrink-0">
+            <button @click="unblockProvider(settingsData.ai.ai_provider)" class="text-xs px-3 py-1.5 bg-cyan-900/50 hover:bg-cyan-800/70 border border-cyan-700/60 rounded-lg text-cyan-200 transition flex items-center gap-1.5">
+              <i class="fa-solid fa-lock-open"></i> Unblock
+            </button>
+            <button @click="currentTab = 'settings'; settingsTab = 'ai'" class="text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-slate-300 transition">
+              View Budget
+            </button>
+          </div>
+        </div>
+      </template>
 
       <!-- Activity Feed Table -->
       <div class="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
@@ -314,6 +347,11 @@
                           <i class="fa-solid fa-ban"></i> CANCELLED
                         </span>
                       </template>
+                      <template x-if="job.status === 'DEFERRED'">
+                        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-cyan-950 text-cyan-400 border border-cyan-800/50" :title="job.error_message">
+                          <i class="fa-regular fa-hourglass-half"></i> DEFERRED
+                        </span>
+                      </template>
                       <template x-if="job.status === 'WAITING_PROVIDER' || job.status === 'RETRY_PENDING' || job.status === 'RECOVERING'">
                         <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-orange-950 text-orange-400 border border-orange-800/50 animate-pulse">
                           <i class="fa-solid fa-triangle-exclamation"></i> <span x-text="job.status"></span>
@@ -332,7 +370,7 @@
                     </div>
                   </td>
                   <td class="px-5 py-4">
-                    <template x-if="['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER'].includes(job.status)">
+                    <template x-if="['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER', 'DEFERRED'].includes(job.status)">
                       <div class="space-y-1 min-w-[130px]">
                         <div class="flex items-center justify-between text-[11px] font-mono">
                           <span class="text-amber-300" x-text="(job.processed_lines || 0) + '/' + (job.total_lines || '?')"></span>
@@ -343,7 +381,7 @@
                         </div>
                       </div>
                     </template>
-                    <template x-if="!['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER'].includes(job.status)">
+                    <template x-if="!['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER', 'DEFERRED'].includes(job.status)">
                       <div>
                         <span x-text="job.total_lines || 0"></span>
                         <span class="text-xs text-slate-500" x-show="job.cleaned_sdh_lines > 0" x-text="'(' + job.cleaned_sdh_lines + ' sdh)'"></span>
@@ -764,6 +802,96 @@
                   <label class="block text-sm font-medium text-slate-300 mb-1.5">Simultaneous Videos</label>
                   <input type="number" x-model.number="settingsData.ai.max_concurrent_jobs" min="1" max="10" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
                   <span class="text-xs text-slate-500 mt-1 block">Videos that can translate at the same time.</span>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium text-slate-300 mb-1.5">Daily Request Budget (RPD)</label>
+                  <div class="relative">
+                    <input type="number"
+                           x-model.number="settingsData.ai['daily_request_budget_' + settingsData.ai.ai_provider]"
+                           min="0" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                    <div class="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none"
+                         x-show="settingsData.ai['daily_request_budget_' + settingsData.ai.ai_provider] == 0">
+                      <span class="text-xs font-semibold text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded border border-emerald-400/20">Unlimited</span>
+                    </div>
+                  </div>
+                  <span class="text-xs text-slate-500 mt-1 block">Max AI requests per day (0 = Unlimited). Babel will DEFER jobs when quota is met.</span>
+                </div>
+
+                <!-- Daily Request Budget & Live Quota Status Card -->
+                <div class="col-span-1 md:col-span-2 p-4 bg-slate-950/90 rounded-2xl border border-slate-800 space-y-3">
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                      <i class="fa-solid fa-gauge-high text-purple-400"></i>
+                      <span class="text-sm font-semibold text-slate-200">Daily Quota & Budget Status</span>
+                      <span class="text-xs uppercase font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-400" x-text="settingsData.ai.ai_provider"></span>
+                    </div>
+                    <div>
+                      <template x-if="quotaData.providers && quotaData.providers[settingsData.ai.ai_provider] && quotaData.providers[settingsData.ai.ai_provider].state === 'HALF_OPEN'">
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-cyan-950 text-cyan-300 border border-cyan-700/60 animate-pulse">
+                          <i class="fa-solid fa-spinner animate-spin text-[10px]"></i> Probing Availability...
+                        </span>
+                      </template>
+                      <template x-if="quotaData.providers && quotaData.providers[settingsData.ai.ai_provider] && quotaData.providers[settingsData.ai.ai_provider].state === 'BLOCKED'">
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-rose-950 text-rose-400 border border-rose-800/60 animate-pulse">
+                          <i class="fa-solid fa-ban text-[10px]"></i> Daily Quota Reached
+                        </span>
+                      </template>
+                      <template x-if="!quotaData.providers || !quotaData.providers[settingsData.ai.ai_provider] || quotaData.providers[settingsData.ai.ai_provider].state === 'ACTIVE' || (!quotaData.providers[settingsData.ai.ai_provider].blocked && quotaData.providers[settingsData.ai.ai_provider].state !== 'HALF_OPEN')">
+                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800/60">
+                          <i class="fa-solid fa-circle-check text-[10px]"></i> Active (Normal)
+                        </span>
+                      </template>
+                    </div>
+                  </div>
+
+                  <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                    <div class="p-3 bg-slate-900/80 rounded-xl border border-slate-800/70">
+                      <div class="text-[11px] text-slate-400 uppercase font-medium">Requests Today</div>
+                      <div class="text-lg font-bold text-slate-100 font-mono mt-0.5" x-text="(quotaData.providers && quotaData.providers[settingsData.ai.ai_provider]) ? quotaData.providers[settingsData.ai.ai_provider].requests_today : 0"></div>
+                      <div class="text-[10px] text-slate-500">UTC Day Window (00:00 UTC reset)</div>
+                    </div>
+                    <div class="p-3 bg-slate-900/80 rounded-xl border border-slate-800/70">
+                      <div class="text-[11px] text-slate-400 uppercase font-medium">Daily Limit / Budget</div>
+                      <div class="text-lg font-bold font-mono mt-0.5" :class="settingsData.ai['daily_request_budget_' + settingsData.ai.ai_provider] > 0 ? 'text-purple-300' : 'text-emerald-400'" x-text="settingsData.ai['daily_request_budget_' + settingsData.ai.ai_provider] > 0 ? settingsData.ai['daily_request_budget_' + settingsData.ai.ai_provider] + ' req/day' : 'Unlimited'"></div>
+                      <div class="text-[10px] text-slate-500" x-text="settingsData.ai['daily_request_budget_' + settingsData.ai.ai_provider] > 0 ? 'Configured Max RPD' : 'No local throttle'"></div>
+                    </div>
+                    <div class="p-3 bg-slate-900/80 rounded-xl border border-slate-800/70">
+                      <div class="text-[11px] text-slate-400 uppercase font-medium">Remaining Today</div>
+                      <div class="text-lg font-bold font-mono mt-0.5" :class="quotaData.providers && quotaData.providers[settingsData.ai.ai_provider] && quotaData.providers[settingsData.ai.ai_provider].requests_remaining !== null ? (quotaData.providers[settingsData.ai.ai_provider].requests_remaining <= 0 ? 'text-rose-400' : 'text-cyan-300') : 'text-slate-300'" x-text="(quotaData.providers && quotaData.providers[settingsData.ai.ai_provider] && quotaData.providers[settingsData.ai.ai_provider].requests_remaining !== null) ? quotaData.providers[settingsData.ai.ai_provider].requests_remaining : 'Unlimited'"></div>
+                      <div class="text-[10px] text-slate-500" x-text="quotaData.providers && quotaData.providers[settingsData.ai.ai_provider] && quotaData.providers[settingsData.ai.ai_provider].requests_remaining !== null ? 'Before auto-deferral' : 'Unlimited budget'"></div>
+                    </div>
+                  </div>
+
+                  <!-- Provider Block details & Manual Reset button if blocked or probing -->
+                  <template x-if="quotaData.providers && quotaData.providers[settingsData.ai.ai_provider] && (quotaData.providers[settingsData.ai.ai_provider].blocked || quotaData.providers[settingsData.ai.ai_provider].state === 'HALF_OPEN')">
+                    <div class="p-3 bg-rose-950/40 border border-rose-900/50 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                      <div class="space-y-1">
+                        <div class="font-semibold text-rose-300 flex items-center gap-1.5">
+                          <i class="fa-solid fa-triangle-exclamation"></i>
+                          <span x-text="quotaData.providers[settingsData.ai.ai_provider].state === 'HALF_OPEN' ? 'Provider in HALF-OPEN state: single-flight probe active' : 'Provider blocked: AI jobs are DEFERRED and will resume automatically'"></span>
+                        </div>
+                        <div class="text-slate-300 text-[11px]" x-show="quotaData.providers[settingsData.ai.ai_provider].blocked_until">
+                          <template x-if="quotaData.providers[settingsData.ai.ai_provider].reset_type === 'exact'">
+                            <span class="inline-flex items-center gap-1">
+                              <span class="font-semibold text-emerald-400">Exact Reset Time (Provider reported):</span>
+                              <span class="text-slate-100 font-mono" x-text="quotaData.providers[settingsData.ai.ai_provider].blocked_until"></span>
+                            </span>
+                          </template>
+                          <template x-if="quotaData.providers[settingsData.ai.ai_provider].reset_type !== 'exact'">
+                            <span class="inline-flex items-center gap-1">
+                              <span class="font-semibold text-amber-400">Next Recheck:</span>
+                              <span class="text-slate-100 font-mono" x-text="quotaData.providers[settingsData.ai.ai_provider].blocked_until"></span>
+                              <span class="text-slate-400">(Adaptive probe attempt <span x-text="quotaData.providers[settingsData.ai.ai_provider].probe_attempt || 0"></span>)</span>
+                            </span>
+                          </template>
+                        </div>
+                        <div class="text-slate-400 text-[11px] truncate max-w-xl" x-show="quotaData.providers[settingsData.ai.ai_provider].reason" :title="quotaData.providers[settingsData.ai.ai_provider].reason" x-text="'Reason: ' + quotaData.providers[settingsData.ai.ai_provider].reason"></div>
+                      </div>
+                      <button @click="unblockProvider(settingsData.ai.ai_provider)" class="px-3 py-1.5 bg-rose-900/60 hover:bg-rose-800 text-rose-200 border border-rose-700/60 rounded-lg font-medium transition text-xs flex items-center gap-1.5 self-start sm:self-auto shrink-0">
+                        <i class="fa-solid fa-lock-open"></i> Unblock / Reset Quota
+                      </button>
+                    </div>
+                  </template>
                 </div>
               </div>
 
@@ -1481,6 +1609,7 @@ docker compose up -d babel</pre>
         updateCheckError: false,
         showUpdateNotes: false,
         updateLogs: '',
+        quotaData: { active_provider: 'gemini', providers: {} },
 
         mediaData: { series: [], movies: [] },
         modalOpen: false,
@@ -1507,14 +1636,20 @@ docker compose up -d babel</pre>
         availableLanguages: [],
         settingsData: {
           ai: {
+            ai_provider: 'gemini',
             gemini_api_key: '',
             gemini_model: 'gemini-3.5-flash-lite',
             escalation_provider: 'none',
             escalation_model: '',
             escalate_to_pro: false,
             batch_size: 50,
+            batch_concurrency: 2,
             max_concurrent_jobs: 1,
-            glossary: ''
+            glossary: '',
+            daily_request_budget_gemini: 0,
+            daily_request_budget_openai: 0,
+            daily_request_budget_deepl: 0,
+            daily_request_budget_ollama: 0
           },
           modules: {
             clean_sdh: true,
@@ -1581,12 +1716,16 @@ docker compose up -d babel</pre>
 
           await this.loadJobs();
           await this.loadAllSettings();
+          await this.loadQuotaStatus();
           await this.loadMediaFiles();
 
           this.pollTimer = setInterval(() => {
             if (this.currentTab === 'dashboard' || this.modalOpen) {
               this.loadStats();
               this.loadJobs();
+              this.loadQuotaStatus();
+            } else if (this.currentTab === 'settings' && this.settingsTab === 'ai') {
+              this.loadQuotaStatus();
             }
           }, 2000);
 
@@ -1832,8 +1971,34 @@ docker compose up -d babel</pre>
             }
             this.showToast('AI Settings saved!');
             await this.loadAllSettings();
+            await this.loadQuotaStatus();
           } catch(e) {
             this.showToast('Error: ' + e.message, 'error');
+          }
+        },
+
+        async loadQuotaStatus() {
+          try {
+            const res = await fetch('/api/quota');
+            if (res.ok) {
+              this.quotaData = await res.json();
+            }
+          } catch(e) {}
+        },
+
+        async unblockProvider(provider) {
+          try {
+            const res = await fetch('/api/quota/' + encodeURIComponent(provider) + '/unblock', { method: 'POST' });
+            if (res.ok) {
+              this.showToast('Provider ' + provider + ' quota unblocked/reset', 'success');
+              await this.loadQuotaStatus();
+              await this.loadJobs();
+            } else {
+              const err = await res.json().catch(() => ({}));
+              this.showToast(err.detail || 'Failed to unblock provider', 'error');
+            }
+          } catch(e) {
+            this.showToast('Failed to unblock: ' + e, 'error');
           }
         },
 

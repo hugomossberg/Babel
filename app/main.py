@@ -110,29 +110,38 @@ async def process_one_retry_pass():
         return
 
     from app.core.db import claim_job_for_retry
+    from app.core.quota import is_provider_blocked
+    from app.core.db import get_setting
     try:
-        jobs = get_jobs_by_status(["WAITING_PROVIDER", "RETRY_PENDING", "RECOVERING", "PARTIAL", "WAITING_SOURCE"])
+        jobs = get_jobs_by_status(["WAITING_PROVIDER", "RETRY_PENDING", "RECOVERING", "PARTIAL", "WAITING_SOURCE", "DEFERRED"])
         for job in jobs:
             try:
                 should_retry = False
                 now = datetime.now(timezone.utc)
-                if job["status"] in ["RETRY_PENDING", "WAITING_PROVIDER", "RECOVERING", "PARTIAL", "WAITING_SOURCE"]:
+                if job["status"] in ["RETRY_PENDING", "WAITING_PROVIDER", "RECOVERING", "PARTIAL", "WAITING_SOURCE", "DEFERRED"]:
                     if job.get("next_retry_at"):
                         next_retry_at = datetime.fromisoformat(job["next_retry_at"])
+                        if next_retry_at.tzinfo is None:
+                            next_retry_at = next_retry_at.replace(tzinfo=timezone.utc)
                         if now >= next_retry_at:
                             should_retry = True
                     else:
                         updated_at = datetime.fromisoformat(job["updated_at"])
+                        if updated_at.tzinfo is None:
+                            updated_at = updated_at.replace(tzinfo=timezone.utc)
                         if (now - updated_at).total_seconds() > 300: # 5 min fallback
                             should_retry = True
 
+                # For DEFERRED jobs: also check that the provider is no longer blocked
+                if should_retry and job["status"] == "DEFERRED":
+                    active_provider = get_setting("ai_provider", "gemini").lower()
+                    if is_provider_blocked(active_provider):
+                        # Provider still blocked — keep the job deferred, don't retry yet
+                        should_retry = False
+
                 if should_retry:
                     if claim_job_for_retry(job["id"]):
-                        logging.info(f"Retrying job {job['id']}")
-                        # wait for the task to finish if it's running synchronously in a test
-                        # but in production, we want to run them concurrently.
-                        # For testability without sleep, maybe we can await them or just create task
-                        # Let's keep create_task but return the tasks so tests can await them
+                        logging.info(f"Retrying job {job['id']} (was {job['status']})")
                         yield asyncio.create_task(pipeline.process_video_file(
                             job["video_path"],
                             event_source="RETRY",
@@ -152,6 +161,7 @@ async def retry_waiting_jobs():
             background_tasks.add(task)
             task.add_done_callback(background_tasks.discard)
         await asyncio.sleep(10)
+
 
 @app.get("/health")
 async def health():

@@ -52,7 +52,8 @@ async def test_675_targeted_recovery(tmp_path):
              
              with patch.object(pipeline, "trigger_bazarr_search"), \
                   patch.object(pipeline.translator, "translate_srt_content", side_effect=fake_translate), \
-                  patch.object(pipeline.translator, "escalate_single_line", side_effect=fake_escalate):
+                  patch.object(pipeline.translator, "escalate_single_line", side_effect=fake_escalate), \
+                  patch.object(pipeline.translator, "translate_batch", return_value=[]):
                   
                   res = await pipeline._run_pipeline_logic(1, str(video_path), wait_seconds=0)
                   

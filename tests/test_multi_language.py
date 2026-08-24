@@ -62,11 +62,12 @@ async def test_multi_language_partial_e2e(tmp_path):
         return {"passed": False, "score": 50, "issues": ["dropped line"], "dropped_count": 1, "untranslated_ids": [1], "real_untranslated_ids": [1], "dropped_details": [{"id": 1}], "sync_diff_ms": 0}
 
     with patch("app.services.pipeline.get_setting", side_effect=fake_get_setting):
-         with patch.object(pipeline, "trigger_bazarr_search"), \
-              patch.object(pipeline.translator, "translate_srt_content", side_effect=fake_translate), \
-              patch.object(pipeline.translator, "escalate_single_line", return_value="Escalated"), \
-              patch.object(pipeline.translator, "classify_and_recover_identical", return_value=[{"id": 1, "action": "translate", "text": "Recovered text"}]), \
-              patch("app.services.pipeline.qa_gate", side_effect=fake_qa_gate):
+             with patch.object(pipeline, "trigger_bazarr_search"), \
+                  patch.object(pipeline.translator, "translate_srt_content", side_effect=fake_translate), \
+                  patch.object(pipeline.translator, "escalate_single_line", return_value="Escalated"), \
+                  patch.object(pipeline.translator, "classify_and_recover_identical", return_value=[{"id": 1, "action": "translate", "text": "Recovered text"}]), \
+                  patch.object(pipeline.translator, "translate_batch", return_value=[]), \
+                  patch("app.services.pipeline.qa_gate", side_effect=fake_qa_gate):
               
               from app.core.db import create_job
               job_id = create_job(str(video_path))

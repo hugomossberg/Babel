@@ -58,6 +58,7 @@ async def test_never_give_up_recovers_in_loop(setup_teardown_db):
     with patch("app.services.pipeline.find_external_subtitle", return_value=en_srt_path), \
          patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate), \
          patch("app.services.translator.SubtitleTranslator.classify_and_recover_identical", return_value=[]), \
+             patch("app.services.translator.SubtitleTranslator.translate_batch", return_value=[]), \
          patch("app.services.translator.SubtitleTranslator.escalate_single_line", side_effect=mock_escalate):
 
         result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
@@ -95,6 +96,7 @@ async def test_never_give_up_fails_all_loops(setup_teardown_db):
     with patch("app.services.pipeline.find_external_subtitle", return_value=en_srt_path), \
          patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate), \
          patch("app.services.translator.SubtitleTranslator.classify_and_recover_identical", return_value=[]), \
+             patch("app.services.translator.SubtitleTranslator.translate_batch", return_value=[]), \
          patch("app.services.translator.SubtitleTranslator.escalate_single_line", return_value=""):
 
         result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
@@ -135,6 +137,7 @@ async def test_recovering_is_not_dead_state(setup_teardown_db):
     with patch("app.services.pipeline.find_external_subtitle", return_value=en_srt_path), \
          patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate_good), \
          patch("app.services.translator.SubtitleTranslator.classify_and_recover_identical", return_value=[]), \
+             patch("app.services.translator.SubtitleTranslator.translate_batch", return_value=[]), \
          patch("app.services.translator.SubtitleTranslator.escalate_single_line", return_value=""):
 
         from app.main import process_one_retry_pass

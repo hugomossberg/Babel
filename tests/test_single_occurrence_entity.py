@@ -272,6 +272,7 @@ async def test_semantic_deadlock_fails_closed_no_worker_retry(tmp_path):
          patch.object(pipeline.translator, "translate_srt_content", side_effect=mock_translate_srt), \
          patch.object(pipeline.translator, "classify_and_recover_identical", side_effect=mock_classify), \
          patch.object(pipeline.translator, "translate_batch", side_effect=mock_batch), \
+             patch.object(pipeline.translator, "escalate_single_line", return_value="What did you do?"), \
          patch.object(pipeline.translator, "fast_final_rescue_batch", side_effect=mock_rescue), \
          patch.object(pipeline, "trigger_bazarr_search"):
 

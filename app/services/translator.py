@@ -8,6 +8,8 @@ from typing import List, Optional, Dict, Any
 
 logger = logging.getLogger("babel.translator")
 
+from app.core.quota import QuotaError, DailyQuotaExhaustedError, RequestBudgetExhaustedError
+
 class ProviderUnavailableError(Exception):
     """Transient error: rate limit, network timeout, 5xx server error."""
     pass
@@ -26,37 +28,147 @@ def is_usable_translation(text) -> bool:
         return False
     return True
 
-def with_retry(func):
-    @functools.wraps(func)
-    async def wrapper(*args, **kwargs):
-        retries = 3
-        backoffs = [5, 15, 30]
-        for attempt in range(retries + 1):
-            try:
-                return await func(*args, **kwargs)
-            except Exception as e:
-                err_str = str(e).lower()
-                # Check for permanent configuration errors
-                permanent = any(x in err_str for x in [
-                    "401", "403", "unauthorized", "forbidden", "api key not valid",
-                    "invalid api key", "not found", "model_not_found", "permission_denied"
-                ])
-                if permanent:
-                    raise ProviderConfigurationError(f"Permanent provider configuration error in {func.__name__}: {str(e)}")
+def with_retry(func_or_provider=None, **decorator_kwargs):
+    """
+    Decorator for AI provider API calls. Responsibilities:
+    1. Single-Flight Quota & Circuit Breaker Gate:
+       - Checks provider / model scope state in SQLite.
+       - If ACTIVE: consumes 1 local request budget slot.
+       - If BLOCKED (before next_probe_at): raises DailyQuotaExhaustedError (0 API calls).
+       - If HALF_OPEN (after next_probe_at): atomically claims the single-flight probe lease.
+         Any competing callers receive DailyQuotaExhaustedError (0 API calls).
+    2. Atomic request budget gate (consumes exactly 1 slot per actual request and per retry).
+    3. Transient RPM / network error backoff and retries.
+    4. Immediate propagation and recording of daily quota failures and permanent configuration errors.
+    5. Automatic reset of circuit breaker to ACTIVE upon successful probe / response.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            from app.core.quota import (
+                acquire_dispatch_slot, record_provider_success, record_provider_quota_exhausted,
+                get_daily_budget, get_daily_requests_used,
+                DailyQuotaExhaustedError, RequestBudgetExhaustedError,
+                classify_provider_error, extract_retry_after_from_exception,
+            )
 
-                recoverable = any(x in err_str for x in [
-                    "429", "500", "502", "503", "504", "timeout", "connection",
-                    "rate limit", "quota", "resource_exhausted", "service unavailable", "overloaded"
-                ])
-                if not recoverable or attempt == retries:
-                    if recoverable:
-                        raise ProviderUnavailableError(f"Provider unavailable after {retries} retries: {str(e)}")
-                    raise e
+            # Determine provider
+            explicit_provider = decorator_kwargs.get("provider")
+            if not explicit_provider and isinstance(func_or_provider, str):
+                explicit_provider = func_or_provider
 
-                wait_time = backoffs[attempt]
-                logger.warning(f"Transient provider error in {func.__name__} (Attempt {attempt+1}/{retries}): {e}. Waiting {wait_time}s...")
-                await asyncio.sleep(wait_time)
-    return wrapper
+            if explicit_provider:
+                provider = explicit_provider.lower()
+            elif "provider" in kwargs and kwargs["provider"]:
+                provider = str(kwargs["provider"]).lower()
+            elif func.__name__.endswith("_gemini"):
+                provider = "gemini"
+            elif func.__name__.endswith("_openai"):
+                provider = "openai"
+            elif func.__name__.endswith("_deepl"):
+                provider = "deepl"
+            elif func.__name__.endswith("_ollama"):
+                provider = "ollama"
+            else:
+                try:
+                    from app.core.db import get_setting as _gs
+                    provider = _gs("ai_provider", "gemini").lower()
+                except Exception:
+                    provider = "gemini"
+
+            model_name = kwargs.get("model_name") or kwargs.get("model") or decorator_kwargs.get("model")
+            job_id = kwargs.get("job_id")
+
+            retries = 3
+            backoffs = [5, 15, 30]
+
+            for attempt in range(retries + 1):
+                # 1. Single-Flight Quota & Circuit Breaker Gate
+                allowed, dispatch_info = acquire_dispatch_slot(
+                    provider=provider,
+                    model=model_name,
+                    job_id=job_id,
+                )
+                if not allowed:
+                    if dispatch_info.get("reason") == "REQUEST_BUDGET_EXHAUSTED":
+                        budget = get_daily_budget(provider)
+                        used = get_daily_requests_used(provider)
+                        raise RequestBudgetExhaustedError(provider=provider, used=used, budget=budget or 0)
+                    else:
+                        blocked_until = dispatch_info.get("blocked_until")
+                        reset_type = dispatch_info.get("reset_type", "estimated")
+                        reason = dispatch_info.get("reason", "Daily quota exhausted")
+                        raise DailyQuotaExhaustedError(
+                            provider=provider,
+                            retry_after_seconds=None,
+                            raw_message=f"Provider '{provider}' circuit breaker {dispatch_info.get('state', 'BLOCKED')} (blocked until {blocked_until}, reset_type={reset_type}). Reason: {reason}",
+                        )
+
+                try:
+                    result = await func(*args, **kwargs)
+                    # 2. SUCCESS: Reset circuit breaker to ACTIVE
+                    record_provider_success(provider=provider, model=model_name)
+                    return result
+                except Exception as e:
+                    # Re-raise quota/budget errors immediately — never retry
+                    if isinstance(e, (DailyQuotaExhaustedError, RequestBudgetExhaustedError)):
+                        raise
+
+                    # Re-raise already-classified errors immediately
+                    if isinstance(e, (ProviderConfigurationError, ProviderUnavailableError)):
+                        raise
+
+                    retry_after = extract_retry_after_from_exception(e)
+                    signal = classify_provider_error(e, provider, model=model_name, retry_after_seconds=retry_after)
+
+                    if signal == "AUTH_ERROR":
+                        raise ProviderConfigurationError(
+                            f"Permanent provider configuration error in {func.__name__}: {str(e)}"
+                        )
+
+                    if signal == "DAILY_QUOTA_EXHAUSTED":
+                        # Record failure and transition circuit breaker to BLOCKED
+                        record_provider_quota_exhausted(
+                            provider=provider,
+                            reason=str(e),
+                            retry_after_seconds=signal.retry_after_seconds or retry_after,
+                            model=model_name,
+                            scope_type=signal.scope_type,
+                            scope_id=signal.scope_id,
+                        )
+                        raise DailyQuotaExhaustedError(
+                            provider=provider,
+                            retry_after_seconds=signal.retry_after_seconds or retry_after,
+                            raw_message=str(e),
+                        )
+
+                    if signal == "PERMANENT_REQUEST_ERROR":
+                        raise ProviderConfigurationError(
+                            f"Permanent request error in {func.__name__}: {str(e)}"
+                        )
+
+                    # TRANSIENT_RPM or PROVIDER_UNAVAILABLE: short backoff + retry
+                    recoverable = signal in ("TRANSIENT_RPM", "PROVIDER_UNAVAILABLE")
+                    if not recoverable or attempt == retries:
+                        if recoverable:
+                            raise ProviderUnavailableError(
+                                f"Provider unavailable after {retries} retries: {str(e)}"
+                            )
+                        raise e
+
+                    wait_time = backoffs[attempt]
+                    logger.warning(
+                        "Transient provider error in %s (Attempt %d/%d, provider=%s, class=%s): %s. Waiting %ds...",
+                        func.__name__, attempt + 1, retries, provider, signal, e, wait_time,
+                    )
+                    await asyncio.sleep(wait_time)
+
+        return wrapper
+
+    if callable(func_or_provider):
+        return decorator(func_or_provider)
+    return decorator
+
 
 from google import genai
 from google.genai import types
@@ -886,7 +998,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                         else:
                             r["reason"] = "unverified_entity"
                             logger.info(f"Context Entity Verification: ID {rid} ('{items_map.get(rid, '')}') REJECTED -> remains TRANSLATE")
-            except (ProviderUnavailableError, ProviderConfigurationError):
+            except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
                 raise
             except Exception as e:
                 err_str = str(e).lower()
@@ -1066,6 +1178,78 @@ CRITICAL INSTRUCTIONS:
         return self._cached_openai_client
 
     @with_retry
+    async def _execute_single_escalation_call(
+        self,
+        provider: str,
+        model_name: str,
+        system_prompt: str,
+        prompt: str,
+        schema: dict,
+        target_language: str,
+        target_text: str,
+    ) -> Optional[str]:
+        if provider == "gemini":
+            from google import genai
+            from google.genai import types
+            api_key = get_setting("gemini_api_key", "")
+            client = genai.Client(api_key=api_key)
+            config = types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.1,
+                response_mime_type="application/json",
+                response_schema=schema,
+            )
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(
+                None,
+                lambda: client.models.generate_content(
+                    model=model_name, contents=prompt, config=config
+                ),
+            )
+            return resp.text
+
+        elif provider == "openai":
+            import openai
+            api_key = get_setting("openai_api_key", "")
+            client = openai.OpenAI(api_key=api_key)
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(
+                None,
+                lambda: client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.1,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {"name": "esc", "schema": schema, "strict": True},
+                    },
+                ),
+            )
+            return resp.choices[0].message.content
+
+        elif provider == "deepl":
+            import httpx
+            api_key = get_setting("deepl_api_key", "")
+            from app.core.languages import get_language
+            lang_obj = get_language(target_language)
+            target_lang_code = lang_obj.deepl_code if lang_obj else target_language.upper()[:2]
+            url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
+            async with httpx.AsyncClient(timeout=30.0) as http_client:
+                resp = await http_client.post(
+                    url,
+                    headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
+                    json={"text": [target_text], "target_lang": target_lang_code, "source_lang": "EN"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                raw_res = data["translations"][0]["text"]
+                return json.dumps({"translation": raw_res})
+
+        return None
+
     async def escalate_single_line(self, target_idx: int, target_text: str, prev_text: str, next_text: str, target_language: str, show_title: str, is_real_untranslated: bool = False, job_id: Optional[int] = None, exhausted_strategies: set = None) -> Optional[str]:
         import logging
         import unicodedata
@@ -1129,6 +1313,8 @@ CRITICAL INSTRUCTIONS:
             }
 
             def _safe_parse(raw_resp: str) -> Optional[str]:
+                if not raw_resp:
+                    return None
                 clean_text = raw_resp.strip()
                 if clean_text.startswith("```"):
                     lines = clean_text.split('\n')
@@ -1164,87 +1350,24 @@ CRITICAL INSTRUCTIONS:
                     return None
 
             try:
-                if provider == "gemini":
-                    from google import genai
-                    from google.genai import types
-                    import asyncio
-                    api_key = get_setting("gemini_api_key", "")
-
-                    model_name = get_setting("gemini_model", "gemini-3.5-flash-lite")
-                    if escalate_enabled and provider == esc_provider:
-                        esc_model = get_setting("escalation_model", "")
-                        if esc_model: model_name = esc_model
-
-                    client = genai.Client(api_key=api_key)
-                    config = types.GenerateContentConfig(
-                        system_instruction=system_prompt,
-                        temperature=0.1,
-                        response_mime_type="application/json",
-                        response_schema=schema,
-                    )
-                    loop = asyncio.get_event_loop()
-                    resp = await loop.run_in_executor(None, lambda: client.models.generate_content(model=model_name, contents=prompt, config=config))
-                    res = _safe_parse(resp.text)
-                    if res: return res
-
-                elif provider == "openai":
-                    import openai
-                    import asyncio
-                    api_key = get_setting("openai_api_key", "")
-
-                    model = get_setting("openai_model", "gpt-4o-mini")
-                    if escalate_enabled and provider == esc_provider:
-                        esc_model = get_setting("escalation_model", "")
-                        if esc_model: model = esc_model
-
-                    client = openai.OpenAI(api_key=api_key)
-                    loop = asyncio.get_event_loop()
-                    resp = await loop.run_in_executor(None, lambda: client.chat.completions.create(
-                        model=model,
-                        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}],
-                        temperature=0.1,
-                        response_format={"type": "json_schema", "json_schema": {"name": "esc", "schema": schema, "strict": True}}
-                    ))
-                    res = _safe_parse(resp.choices[0].message.content)
-                    if res: return res
-
-                elif provider == "deepl":
-                    import httpx
-                    api_key = get_setting("deepl_api_key", "")
-                    from app.core.languages import get_language
-                    lang_obj = get_language(target_language)
-                    target_lang_code = lang_obj.deepl_code if lang_obj else target_language.upper()[:2]
-                    url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
-                    async with httpx.AsyncClient(timeout=30.0) as http_client:
-                        resp = await http_client.post(
-                            url,
-                            headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
-                            json={"text": [target_text], "target_lang": target_lang_code, "source_lang": "EN"}
-                        )
-                        resp.raise_for_status()
-                        data = resp.json()
-                        raw_res = data["translations"][0]["text"]
-
-                        if not is_usable_translation(raw_res):
-                            logger.info(f"Escalation line {target_idx} attempt {i+1}/3: rejected blank")
-                            if job_id:
-                                from app.core.db import append_job_log
-                                append_job_log(job_id, f"Escalation cue {target_idx + 1} attempt {i+1}/3: rejected blank")
-                        elif not is_meaningful_translation(target_text, raw_res):
-                            logger.info(f"Escalation line {target_idx} attempt {i+1}/3: rejected identical source")
-                            if job_id:
-                                from app.core.db import append_job_log
-                                append_job_log(job_id, f"Escalation cue {target_idx + 1} attempt {i+1}/3: rejected identical source")
-                        else:
-                            logger.info(f"Escalation line {target_idx} attempt {i+1}/3: translated successfully")
-                            if job_id:
-                                from app.core.db import append_job_log
-                                append_job_log(job_id, f"Escalation cue {target_idx + 1} attempt {i+1}/3: translated successfully")
-                            return raw_res
+                raw_out = await self._execute_single_escalation_call(
+                    provider=provider,
+                    model_name=model_name,
+                    system_prompt=system_prompt,
+                    prompt=prompt,
+                    schema=schema,
+                    target_language=target_language,
+                    target_text=target_text,
+                )
+                res = _safe_parse(raw_out)
+                if res:
+                    return res
 
                 if exhausted_strategies is not None:
                     exhausted_strategies.add(strategy_key)
 
+            except (DailyQuotaExhaustedError, RequestBudgetExhaustedError, ProviderConfigurationError):
+                raise
             except Exception as e:
                 logger.error(f"Escalation line {target_idx} API call failed: {e}")
                 raise ProviderUnavailableError(f"Escalation failed: {e}") from e
@@ -1417,6 +1540,7 @@ CRITICAL INSTRUCTIONS:
 
     async def translate_batch(self, items: List[dict], target_language: str = "English", context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
         provider = get_setting("ai_provider", "gemini").lower()
+
         if provider == "openai":
             model = get_setting("openai_model", "gpt-4o-mini")
             return await self.translate_batch_openai(items, target_language, model, context_lines=context_lines, show_title=show_title)
@@ -1428,6 +1552,7 @@ CRITICAL INSTRUCTIONS:
         else:
             model = get_setting("gemini_model", "gemini-3.5-flash-lite")
             return await self.translate_batch_gemini(items, target_language, model, context_lines=context_lines, show_title=show_title)
+
 
     async def translate_srt_content(
         self,
@@ -1613,7 +1738,7 @@ CRITICAL INSTRUCTIONS:
                                                 recovered_micro_count += 1
                             if job_id:
                                 append_job_log(job_id, f"First-Pass Micro Repair: evaluated {len(failed_cues)} missing/identical cues (batch {start_idx + 1}-{end_idx}) -> recovered {recovered_micro_count}/{len(failed_cues)}")
-                        except (ProviderUnavailableError, ProviderConfigurationError):
+                        except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
                             raise
                         except Exception as e:
                             err_str = str(e).lower()
@@ -1661,6 +1786,14 @@ CRITICAL INSTRUCTIONS:
                         update_job(job_id, processed_lines=processed_count)
                 raise e
             except Exception as e:
+                # Re-raise quota errors so they propagate to the pipeline exception handler
+                # which will set the job to DEFERRED (not FAILED)
+                if isinstance(e, (DailyQuotaExhaustedError, RequestBudgetExhaustedError)):
+                    async with state_lock:
+                        if job_id:
+                            update_job(job_id, processed_lines=processed_count)
+                    raise
+
                 err_str = str(e).lower()
                 permanent = any(x in err_str for x in [
                     "401", "403", "unauthorized", "forbidden", "api key not valid",
@@ -1678,6 +1811,7 @@ CRITICAL INSTRUCTIONS:
                     if job_id:
                         append_job_log(job_id, f"Warning: Lines {start_idx + 1}-{end_idx} could not be translated: {e}. Keeping original text.")
                         update_job(job_id, processed_lines=processed_count)
+
 
         async def run_batch_with_sem(batch_idx, start_idx, chunk, payload):
             async with sem:

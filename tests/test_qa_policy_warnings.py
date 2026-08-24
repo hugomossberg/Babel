@@ -380,7 +380,8 @@ async def test_pipeline_679_cues_with_1_deadlocked_cue_publishes_with_warnings(t
          patch.object(pipeline.translator, "translate_srt_content", side_effect=fake_translate), \
          patch.object(pipeline.translator, "classify_and_recover_identical", side_effect=fake_classify_and_recover), \
          patch.object(pipeline.translator, "translate_batch", side_effect=fake_translate_batch), \
-         patch.object(pipeline.translator, "escalate_single_line", side_effect=fake_escalate), \
+         patch.object(pipeline.translator, "translate_batch", return_value=[]), \
+             patch.object(pipeline.translator, "escalate_single_line", side_effect=fake_escalate), \
          patch.object(pipeline.translator, "fast_final_rescue_batch", side_effect=fake_fast_rescue):
 
         res = await pipeline._run_pipeline_logic(1, str(video_path), wait_seconds=0)
@@ -547,7 +548,8 @@ async def test_deadlock_optimization_exact_call_counts_measured(tmp_path):
          patch.object(pipeline, "trigger_bazarr_search"), \
          patch.object(pipeline.translator, "translate_srt_content", side_effect=fake_translate), \
          patch.object(pipeline.translator, "classify_and_recover_identical", side_effect=fake_classify_and_recover), \
-         patch.object(pipeline.translator, "escalate_single_line", side_effect=fake_escalate), \
+         patch.object(pipeline.translator, "translate_batch", return_value=[]), \
+             patch.object(pipeline.translator, "escalate_single_line", side_effect=fake_escalate), \
          patch.object(pipeline.translator, "fast_final_rescue_batch", side_effect=fake_fast_rescue):
 
         res = await pipeline._run_pipeline_logic(3, str(video_path), wait_seconds=0)

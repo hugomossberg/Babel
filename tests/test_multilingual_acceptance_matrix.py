@@ -493,6 +493,7 @@ async def test_multi_target_isolation_sv_bg_cs_partial_failure(tmp_path):
          patch.object(pipeline.translator, "translate_srt_content", side_effect=fake_translate), \
          patch.object(pipeline.translator, "escalate_single_line", return_value=None), \
          patch.object(pipeline.translator, "classify_and_recover_identical", return_value=[]), \
+         patch.object(pipeline.translator, "translate_batch", return_value=[]), \
          patch("app.services.pipeline.qa_gate", side_effect=fake_qa_gate):
 
         job_id = create_job(str(video_path))

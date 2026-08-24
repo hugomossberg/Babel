@@ -36,6 +36,12 @@ class AISettingsRequest(BaseModel):
     max_concurrent_jobs: Optional[int] = Field(default=None, ge=1)
     batch_concurrency: Optional[int] = Field(default=None, ge=1)
     glossary: Optional[str] = ""
+    # Daily request budget: 0 = Unlimited (default), positive integer = daily limit
+    daily_request_budget_gemini: Optional[int] = Field(default=None, ge=0)
+    daily_request_budget_openai: Optional[int] = Field(default=None, ge=0)
+    daily_request_budget_deepl: Optional[int] = Field(default=None, ge=0)
+    daily_request_budget_ollama: Optional[int] = Field(default=None, ge=0)
+
 
 class TestAIRequest(BaseModel):
     provider: str
@@ -202,7 +208,12 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "batch_size": get_positive_int_setting("batch_size", 50),
             "max_concurrent_jobs": get_positive_int_setting("max_concurrent_jobs", 1),
             "batch_concurrency": get_positive_int_setting("batch_concurrency", 3),
-            "glossary": get_setting("glossary", "")
+            "glossary": get_setting("glossary", ""),
+            # Daily request budgets (0 = Unlimited)
+            "daily_request_budget_gemini": int(get_setting("daily_request_budget_gemini", "0") or "0"),
+            "daily_request_budget_openai": int(get_setting("daily_request_budget_openai", "0") or "0"),
+            "daily_request_budget_deepl": int(get_setting("daily_request_budget_deepl", "0") or "0"),
+            "daily_request_budget_ollama": int(get_setting("daily_request_budget_ollama", "0") or "0"),
         },
         "modules": {
             "clean_sdh": get_setting("clean_sdh", "true").lower() == "true",
@@ -242,6 +253,28 @@ async def api_container_action(req: ContainerActionRequest):
     res = await docker_controller.toggle_container(req.container_name, target_action)
     return res
 
+@router.get("/quota")
+async def api_get_quota_status():
+    """Return per-provider quota / budget status for UI display."""
+    from app.core.quota import get_quota_status_for_provider
+    active_provider = get_setting("ai_provider", "gemini").lower()
+    providers = ["gemini", "openai", "deepl", "ollama"]
+    quota_data = {p: get_quota_status_for_provider(p) for p in providers}
+    return {
+        "active_provider": active_provider,
+        "providers": quota_data,
+    }
+
+@router.post("/quota/{provider}/unblock")
+async def api_unblock_provider(provider: str):
+    """Manually unblock a provider (admin action)."""
+    from app.core.quota import unblock_provider
+    allowed = {"gemini", "openai", "deepl", "ollama"}
+    if provider not in allowed:
+        raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'")
+    unblock_provider(provider)
+    return {"status": "unblocked", "provider": provider}
+
 @router.post("/settings/ai")
 async def api_save_ai_settings(req: AISettingsRequest):
     if req.ai_provider:
@@ -275,7 +308,14 @@ async def api_save_ai_settings(req: AISettingsRequest):
         set_setting("batch_concurrency", str(safe_batch_concurrency))
     if req.glossary is not None:
         set_setting("glossary", req.glossary)
+    # Daily request budgets: 0 = unlimited
+    for provider_key in ["gemini", "openai", "deepl", "ollama"]:
+        budget_field = f"daily_request_budget_{provider_key}"
+        budget_val = getattr(req, budget_field, None)
+        if budget_val is not None:
+            set_setting(budget_field, str(max(0, int(budget_val))))
     return {"status": "saved"}
+
 
 @router.post("/settings/test-ai")
 async def api_test_ai(req: TestAIRequest):

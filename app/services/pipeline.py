@@ -23,7 +23,12 @@ from app.services.translator import (
     normalize_for_compare, is_safe_keep_prefilter, has_entity_evidence,
     is_strictly_valid_entity_candidate
 )
+from app.core.quota import (
+    DailyQuotaExhaustedError, RequestBudgetExhaustedError,
+    block_provider, is_provider_blocked,
+)
 from app.services.jellyfin_notifier import notify_jellyfin_library_refresh
+
 
 logger = logging.getLogger("babel.pipeline")
 
@@ -1372,7 +1377,7 @@ class SubtitlePipeline:
                                                         chunk, lang_name, effective_tm_key or title or ""
                                                     )
                                                 recovery_results.extend(chunk_res)
-                                            except (ProviderUnavailableError, ProviderConfigurationError):
+                                            except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
                                                 raise
                                             except Exception as e:
                                                 append_job_log(job_id, f"QA Primary Recovery chunk failed: {e}")
@@ -1532,7 +1537,7 @@ class SubtitlePipeline:
                                                     translated_subs[idx].content = esc_text
                                                     append_job_log(job_id, f"Escalation: Translated cue {idx + 1} using dialogue context")
                                                     recovered_cues.add(idx)
-                                        except (ProviderUnavailableError, ProviderConfigurationError):
+                                        except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
                                             raise
                                         except Exception as e:
                                             append_job_log(job_id, f"Escalation failed for cue {idx + 1}: {e}")
@@ -1601,7 +1606,7 @@ class SubtitlePipeline:
                                             attempt=1,
                                             job_id=job_id
                                         )
-                                    except (ProviderUnavailableError, ProviderConfigurationError):
+                                    except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
                                         raise
                                     except Exception as e:
                                         append_job_log(job_id, f"Fast Final Rescue attempt 1 failed: {e}")
@@ -1621,9 +1626,9 @@ class SubtitlePipeline:
                                         seen_ids_1.add(rid)
                                         text = r.get("text", "")
                                         if is_usable_translation(text) and is_meaningful_translation(subs[rid].content, text):
-                                            translated_subs[rid].content = text
-                                            recovered_cues.add(rid)
-                                            rec_att1_count += 1
+                                             translated_subs[rid].content = text
+                                             recovered_cues.add(rid)
+                                             rec_att1_count += 1
 
                                     append_job_log(job_id, f"Fast Final Rescue attempt 1: recovered {rec_att1_count}/{total_to_rescue} in {round(t_att1_end - t_att1_start, 1)}s")
 
@@ -1644,7 +1649,7 @@ class SubtitlePipeline:
                                                 attempt=2,
                                                 job_id=job_id
                                             )
-                                        except (ProviderUnavailableError, ProviderConfigurationError):
+                                        except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
                                             raise
                                         except Exception as e:
                                             append_job_log(job_id, f"Fast Final Rescue attempt 2 failed: {e}")
@@ -1925,6 +1930,82 @@ class SubtitlePipeline:
                 "output_files": output_files
             }
 
+        except DailyQuotaExhaustedError as e:
+            if os.path.exists(temp_extracted_srt):
+                try: os.remove(temp_extracted_srt)
+                except: pass
+            total_duration = round(time.time() - start_time, 2)
+
+            from datetime import datetime, timezone, timedelta
+            from app.core.quota import get_provider_block_info, block_provider
+
+            # Ensure provider block is persisted if not already done by translator
+            block_info = get_provider_block_info(e.provider)
+            if not block_info.get("blocked"):
+                block_provider(
+                    e.provider,
+                    reason=f"Daily quota exhausted: {e.raw_message[:200]}",
+                    retry_after_seconds=e.retry_after_seconds,
+                )
+                block_info = get_provider_block_info(e.provider)
+
+            blocked_until = block_info.get("blocked_until")
+            reset_type = block_info.get("reset_type", "estimated")
+            probe_attempt = block_info.get("probe_attempt", 0)
+
+            if reset_type == "exact":
+                resume_msg = f"exact reset scheduled at {blocked_until}"
+            else:
+                resume_msg = f"next probe scheduled at {blocked_until} (attempt {probe_attempt})"
+
+            log_msg = (
+                f"DEFERRED: Daily provider quota reached for '{e.provider}'. "
+                f"Job deferred — {resume_msg}. "
+                f"No provider requests will be made until quota resets."
+            )
+            append_job_log(job_id, log_msg)
+
+            next_retry_at = blocked_until  # scheduler will pick it up after reset/probe time
+            update_job(
+                job_id,
+                status="DEFERRED",
+                error_message=f"Daily provider quota reached for '{e.provider}'. {resume_msg}.",
+                duration_seconds=total_duration,
+                next_retry_at=next_retry_at,
+                last_error=str(e),
+            )
+            return {"status": "deferred", "error": str(e), "job_id": job_id}
+
+        except RequestBudgetExhaustedError as e:
+            if os.path.exists(temp_extracted_srt):
+                try: os.remove(temp_extracted_srt)
+                except: pass
+            total_duration = round(time.time() - start_time, 2)
+
+            from datetime import datetime, timezone, timedelta
+
+            # Defer until next UTC midnight (daily budget resets at 00:00 UTC)
+            now = datetime.now(timezone.utc)
+            tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            next_retry_at = tomorrow.isoformat()
+
+            log_msg = (
+                f"DEFERRED: Daily request budget reached for '{e.provider}' "
+                f"({e.used}/{e.budget} requests used today). "
+                f"Job deferred until {next_retry_at} (UTC midnight reset)."
+            )
+            append_job_log(job_id, log_msg)
+
+            update_job(
+                job_id,
+                status="DEFERRED",
+                error_message=f"Daily request budget reached ({e.used}/{e.budget}). Deferred until {next_retry_at}.",
+                duration_seconds=total_duration,
+                next_retry_at=next_retry_at,
+                last_error=str(e),
+            )
+            return {"status": "deferred", "error": str(e), "job_id": job_id}
+
         except ProviderConfigurationError as e:
             if os.path.exists(temp_extracted_srt):
                 try: os.remove(temp_extracted_srt)
@@ -1939,6 +2020,7 @@ class SubtitlePipeline:
                 last_error=str(e)
             )
             return {"status": "failed", "error": str(e), "job_id": job_id}
+
 
         except ProviderUnavailableError as e:
             if os.path.exists(temp_extracted_srt):

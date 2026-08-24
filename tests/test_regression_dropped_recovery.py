@@ -61,9 +61,10 @@ async def test_dropped_line_recovery(setup_teardown_db):
     with patch("app.services.pipeline.SubtitlePipeline.get_configured_languages", return_value=[{"name": "Swedish", "code": "sv", "enabled": True}]):
         with patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=mock_translate_srt_content):
             with patch("app.services.translator.SubtitleTranslator.escalate_single_line", side_effect=mock_escalate_single_line):
-                with patch("app.services.pipeline.find_external_subtitle", return_value=srt_path):
-                    with patch("os.rename"):
-                        result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
+                with patch("app.services.translator.SubtitleTranslator.translate_batch", return_value=[]):
+                    with patch("app.services.pipeline.find_external_subtitle", return_value=srt_path):
+                        with patch("os.rename"):
+                            result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
 
     assert result["status"] == "translated"
 

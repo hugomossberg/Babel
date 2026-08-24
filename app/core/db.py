@@ -62,6 +62,54 @@ def init_db():
         )
         """)
 
+        # Provider quota / RPD block state and Circuit Breaker
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS provider_quota (
+            provider            TEXT PRIMARY KEY,
+            state               TEXT NOT NULL DEFAULT 'ACTIVE',
+            blocked             INTEGER NOT NULL DEFAULT 0,
+            reason              TEXT,
+            blocked_at          TEXT,
+            blocked_until       TEXT,
+            reset_type          TEXT DEFAULT 'estimated',
+            probe_attempt       INTEGER NOT NULL DEFAULT 0,
+            probe_lease_until   TEXT,
+            probe_lease_owner   TEXT,
+            last_probe_at       TEXT,
+            scope_type          TEXT DEFAULT 'provider',
+            scope_id            TEXT,
+            updated_at          TEXT NOT NULL
+        )
+        """)
+
+        for col, col_type in [
+            ("state", "TEXT NOT NULL DEFAULT 'ACTIVE'"),
+            ("reset_type", "TEXT DEFAULT 'estimated'"),
+            ("probe_attempt", "INTEGER NOT NULL DEFAULT 0"),
+            ("probe_lease_until", "TEXT"),
+            ("probe_lease_owner", "TEXT"),
+            ("last_probe_at", "TEXT"),
+            ("scope_type", "TEXT DEFAULT 'provider'"),
+            ("scope_id", "TEXT"),
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE provider_quota ADD COLUMN {col} {col_type}")
+            except Exception:
+                pass
+
+        # Clear any in-flight probe leases from prior session on restart
+        cursor.execute("UPDATE provider_quota SET probe_lease_until = NULL, probe_lease_owner = NULL WHERE probe_lease_until IS NOT NULL")
+
+        # Per-provider daily request counter (UTC calendar day window)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS daily_request_counts (
+            provider        TEXT NOT NULL,
+            window_date     TEXT NOT NULL,
+            request_count   INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (provider, window_date)
+        )
+        """)
+
         # Reset stuck jobs on restart
         cursor.execute("""
         UPDATE jobs
@@ -74,6 +122,10 @@ def init_db():
         SET status = 'RETRY_PENDING', error_message = 'Recovered from restart'
         WHERE status IN ('TRANSLATING', 'RECOVERING', 'ESCALATING', 'WAITING_PROVIDER', 'RETRY_PENDING')
         """)
+
+        # DEFERRED jobs survive restart — they keep their next_retry_at and will
+        # be picked up by the scheduler automatically after the quota resets.
+        # No state change needed for DEFERRED on restart.
 
         # Add columns if not existing yet on old database files
         try:
@@ -119,12 +171,18 @@ def init_db():
             "qa_max_unresolved_ratio": "0.01",
             "languages": json.dumps([
                 {"name": "Swedish", "code": "sv", "enabled": True}
-            ])
+            ]),
+            # Daily request budget defaults — "0" means Unlimited (backward compatible)
+            "daily_request_budget_gemini": "0",
+            "daily_request_budget_openai": "0",
+            "daily_request_budget_deepl": "0",
+            "daily_request_budget_ollama": "0",
         }
         for k, v in defaults.items():
             cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
         conn.commit()
+
 
 def get_setting(key: str, default: str = "") -> str:
     with sqlite3.connect(DB_PATH) as conn:
@@ -264,9 +322,14 @@ def clear_all_jobs():
 def claim_job_for_retry(job_id: int) -> bool:
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE jobs SET status = 'QUEUED' WHERE id = ? AND status IN ('WAITING_PROVIDER', 'RETRY_PENDING', 'RECOVERING', 'PARTIAL', 'WAITING_SOURCE')", (job_id,))
+        cursor.execute(
+            "UPDATE jobs SET status = 'QUEUED' WHERE id = ? AND status IN "
+            "('WAITING_PROVIDER', 'RETRY_PENDING', 'RECOVERING', 'PARTIAL', 'WAITING_SOURCE', 'DEFERRED')",
+            (job_id,)
+        )
         conn.commit()
         return cursor.rowcount > 0
+
 
 def get_job_by_id(job_id: int) -> Optional[Dict[str, Any]]:
     with sqlite3.connect(DB_PATH) as conn:
@@ -312,6 +375,7 @@ def get_job_stats() -> Dict[str, Any]:
         healthy = cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'HEALTHY'").fetchone()[0]
         repaired = cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'REPAIRED'").fetchone()[0]
         failed = cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'FAILED'").fetchone()[0]
+        deferred = cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'DEFERRED'").fetchone()[0]
         active = cursor.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('EXTRACTING', 'TRANSLATING', 'QUEUED', 'WAITING_PROVIDER', 'RECOVERING', 'PARTIAL', 'WAITING_SOURCE')").fetchone()[0]
         avg_dur = cursor.execute("SELECT AVG(duration_seconds) FROM jobs WHERE status IN ('TRANSLATED', 'REPAIRED', 'SUCCESS')").fetchone()[0] or 0.0
         return {
@@ -320,7 +384,9 @@ def get_job_stats() -> Dict[str, Any]:
             "healthy": healthy,
             "repaired": repaired,
             "failed": failed,
+            "deferred": deferred,
             "active_jobs": active,
+
             "avg_duration_seconds": round(avg_dur, 1)
         }
 
