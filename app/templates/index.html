@@ -2158,12 +2158,30 @@ docker compose up -d babel</pre>
                                 const upRes = await fetch('/api/updates?force=true&t=' + Date.now());
                                 if (upRes.ok) {
                                     const upData = await upRes.json();
-                                    clearInterval(iv);
 
                                     const normCurrent = (upData.current_version || '').replace(/^v/, '');
                                     const normExpected = (expectedVersion || '').replace(/^v/, '');
+                                    const st = upData.updater_status || 'idle';
+                                    const isExpected = (normCurrent && normExpected && normCurrent === normExpected);
 
-                                    if (normCurrent && normExpected && normCurrent === normExpected) {
+                                    if (st === 'failed') {
+                                        clearInterval(iv);
+                                        this.updateData = upData;
+                                        this.updateData.updater_status = 'failed';
+                                        this.popoverOpen = true;
+                                        return;
+                                    }
+
+                                    if (st === 'rolled_back') {
+                                        clearInterval(iv);
+                                        this.updateData = upData;
+                                        this.updateData.updater_status = 'rolled_back';
+                                        this.popoverOpen = true;
+                                        return;
+                                    }
+
+                                    if (isExpected && (st === 'success' || st === 'idle')) {
+                                        clearInterval(iv);
                                         this.updateData = upData;
                                         this.updateData.updater_status = 'success';
                                         this.popoverOpen = true;
@@ -2173,12 +2191,10 @@ docker compose up -d babel</pre>
                                             this.popoverOpen = false;
                                             this.updateData.updater_status = 'idle';
                                         }, 6000);
-                                    } else {
-                                        this.updateData = upData;
-                                        this.updateData.updater_status = 'rolled_back';
-                                        this.popoverOpen = true;
+                                        return;
                                     }
-                                    return;
+
+                                    // If not terminal, continue polling (do nothing here)
                                 }
                             } catch(e) {}
                         }
