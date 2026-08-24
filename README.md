@@ -129,14 +129,16 @@ curl -O https://raw.githubusercontent.com/hugomossberg/Babel/main/.env.example
 cp .env.example .env
 ```
 
-Before starting, open `.env` and set your host media paths:
+Babel requires access to your media files through Docker volume mounts. The recommended approach is to open `.env` and set your host media paths:
 
 ```env
-TV_PATH=/your/path/to/tv
-MOVIES_PATH=/your/path/to/movies
+TV_PATH=/your/host/path/to/tv
+MOVIES_PATH=/your/host/path/to/movies
 ```
 
-Other `.env` values are optional. Almost all other configuration — such as AI providers, API keys, languages, and integrations — is managed directly in Babel's web UI.
+*(Setting `.env` is recommended for simplicity, but optional — advanced users can edit volume mounts directly in `docker-compose.yml`.)*
+
+All other `.env` values are optional. Almost all application configuration (such as AI providers, API keys, target languages, and integrations) is managed directly in Babel's web UI.
 
 Or copy this standard `docker-compose.yml`:
 
@@ -183,10 +185,21 @@ volumes:
   babel_updater_auth:
 ```
 
-> **IMPORTANT: Volume Paths & Security**
+> **IMPORTANT: Host Paths vs. Container Paths**
 >
-> - **Media paths:** Setting `TV_PATH` and `MOVIES_PATH` in your `.env` file is the recommended way to map your host media paths.
-> - **Isolation:** The main `babel` container has **no** access to the Docker socket. `docker.sock` is mounted strictly to the isolated `babel-updater` sidecar, which communicates internally via a shared auth token.
+> Docker determines which host folders Babel can access. Babel's web UI operates with **paths inside the container**, not host paths.
+>
+> With the standard Compose setup:
+> ```text
+> Host Path                      Babel Container Path
+> TV_PATH=/srv/media/Series   -> /tv
+> MOVIES_PATH=/srv/media/Movies -> /movies
+> ```
+> - In **Settings → Media Root Folders**, enter the internal container paths: `TV Series Path: /tv` and `Movies Path: /movies`.
+> - If you configure custom volume mounts (e.g. `- /srv/media/Series:/media/Series`), enter the matching internal path (`/media/Series`).
+> - *Note:* The web UI cannot create Docker volume mounts; it can only access folders that Docker has already mounted into the container.
+>
+> **Container Isolation:** The main `babel` container has **no** access to the Docker socket. `docker.sock` is mounted strictly to the isolated `babel-updater` sidecar.
 
 ### 2. Start and Verify
 
@@ -303,8 +316,7 @@ Babel validates every subtitle before writing to disk using a three-tier decisio
 
 Babel can process media automatically upon download or upgrade.
 
-* `http://babel:8765/...` works when Sonarr/Radarr and Babel can reach each other via the same Docker network.
-* If they run in separate Compose projects/networks, use `http://YOUR-SERVER-IP:8765/...` instead.
+* `http://babel:8765/...` works when Sonarr/Radarr and Babel share a Docker network and the `babel` hostname can be resolved. Otherwise, use `http://YOUR-SERVER-IP:8765/...`.
 
 ### Sonarr Configuration
 1. In Sonarr, navigate to **Settings → Connect → + (Add Webhook)**.
@@ -317,9 +329,20 @@ Babel can process media automatically upon download or upgrade.
 3. Check triggers: **On Download** and **On Upgrade**.
 
 ### Remote Path Mapping
-If Sonarr/Radarr runs in a container with different mount paths than Babel (e.g. Sonarr uses `/data/media/tv` while Babel uses `/tv`), configure Babel's **Remote Path Mapping** in Settings:
-- **Remote Path Prefix:** `/data/media/tv`
-- **Local Path Prefix:** `/tv`
+
+Remote Path Mapping is **not** a volume mount and does not grant Babel access to new files. It is only required when Sonarr or Radarr reports a file path formatted differently than how Babel sees that same file inside its container.
+
+For example, if Sonarr reports an imported file as:
+`/data/media/Series/Show/episode.mkv`
+
+but Babel sees that same media library mounted at:
+`/tv/Show/episode.mkv`
+
+Configure Remote Path Mapping in Settings:
+- **Remote Path Prefix:** `/data/media/Series` *(path reported by Sonarr/Radarr)*
+- **Local Path Prefix:** `/tv` *(corresponding path inside the Babel container)*
+
+*Summary:* **Remote** = path reported by Sonarr/Radarr, **Local** = path inside the Babel container.
 
 ---
 
