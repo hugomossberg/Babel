@@ -29,9 +29,10 @@ from app.core.languages import get_language
 # Seed for deterministic tests/results
 DetectorFactory.seed = 0
 
-def detect_language_heuristics(text: str) -> dict:
+def detect_language_heuristics(text: str, expected_language: Optional[str] = None) -> dict:
     """
     Robust language detection for all languages.
+    Accepts optional expected_language (code, alias, or name) for target-aware disambiguation.
     Returns a dict with 'lang' (normalized ISO code) and 'confidence'.
     """
     if not text or len(text.strip()) < 10:
@@ -60,22 +61,29 @@ def detect_language_heuristics(text: str) -> dict:
         best_match = langs[0]
         detected_code = best_match.lang.lower()
         confidence = best_match.prob
+
+        expected_norm = None
+        if expected_language:
+            exp_lang_obj = get_language(expected_language)
+            expected_norm = exp_lang_obj.code if exp_lang_obj else expected_language.lower().strip()[:2]
         
-        # Swedish heuristic assistance:
         words = set(re.findall(r"\b\w+\b", cleaned.lower()))
         swedish_word_matches = words & SWEDISH_COMMON_WORDS
-        if len(swedish_word_matches) >= 2:
-            if detected_code in {"no", "da", "unknown"}:
+        english_word_matches = words & ENGLISH_COMMON_WORDS
+
+        # Swedish heuristic assistance:
+        # Only assist Swedish if expected_norm is 'sv' OR expected_norm is None
+        if expected_norm == "sv" or expected_norm is None:
+            if len(swedish_word_matches) >= 2 and detected_code in {"no", "da", "unknown"}:
                 detected_code = "sv"
                 confidence = max(confidence, 0.95)
-        elif len(swedish_word_matches) >= 1 and detected_code in {"no", "da", "unknown"}:
-            detected_code = "sv"
-            confidence = max(confidence, 0.90)
+            elif len(swedish_word_matches) >= 1 and detected_code in {"no", "da", "unknown"} and expected_norm == "sv":
+                detected_code = "sv"
+                confidence = max(confidence, 0.90)
 
         # English heuristic assistance (prevents langdetect false positive collisions on short phrases, e.g., 'What did you do?' -> cy/so):
-        english_word_matches = words & ENGLISH_COMMON_WORDS
         if len(english_word_matches) >= 2 and len(swedish_word_matches) == 0:
-            if detected_code not in {"en", "sv", "no", "da", "de", "fr", "es", "it"}:
+            if detected_code not in {"en", "sv", "no", "da", "de", "fr", "es", "it", "bg", "cs", "ro", "hu", "tr", "el", "pl", "pt", "ru", "ja", "zh", "ko", "fi", "nl"}:
                 detected_code = "en"
                 confidence = max(confidence, 0.95)
             elif detected_code == "cy":
@@ -89,6 +97,7 @@ def detect_language_heuristics(text: str) -> dict:
         return {"lang": normalized_code, "confidence": confidence}
     except Exception:
         return {"lang": "unknown", "confidence": 0.0}
+
 
 def extract_representative_dialogue_samples(sub_blocks: List[srt.Subtitle], max_blocks: int = 90) -> Dict[str, Any]:
     """
@@ -204,11 +213,11 @@ def classify_cue_language_mismatch(
     target_norm = target_lang_code[:2].lower()
     source_norm = source_lang_code[:2].lower()
 
-    t_info = detect_language_heuristics(target_text)
+    t_info = detect_language_heuristics(target_text, expected_language=target_norm)
     t_lang = t_info["lang"]
     t_conf = t_info["confidence"]
 
-    s_info = detect_language_heuristics(source_text) if source_text else {"lang": "unknown", "confidence": 0.0}
+    s_info = detect_language_heuristics(source_text, expected_language=source_norm) if source_text else {"lang": "unknown", "confidence": 0.0}
     s_lang = s_info["lang"]
     s_conf = s_info["confidence"]
 
@@ -287,7 +296,7 @@ def check_language_representative(
         sec_texts = samples[sec]
         sec_text = " ".join(sec_texts)
         if len(sec_text) >= 50 and len(sec_texts) >= 5:
-            lang_info = detect_language_heuristics(sec_text)
+            lang_info = detect_language_heuristics(sec_text, expected_language=target_norm)
             det = lang_info["lang"]
             conf = lang_info["confidence"]
 
@@ -310,7 +319,7 @@ def check_language_representative(
     # 2. Overall check
     full_sample_text = " ".join(samples["all"])
     if len(full_sample_text) >= 20:
-        lang_info = detect_language_heuristics(full_sample_text)
+        lang_info = detect_language_heuristics(full_sample_text, expected_language=target_norm)
         det = lang_info["lang"]
         conf = lang_info["confidence"]
 
@@ -331,7 +340,7 @@ def check_language_representative(
                 accumulated_legit_ids.extend(legit_ids)
 
     # Return overall detected language info
-    lang_info = detect_language_heuristics(" ".join(samples["all"]))
+    lang_info = detect_language_heuristics(" ".join(samples["all"]), expected_language=target_norm)
     det = lang_info["lang"]
     conf = lang_info["confidence"]
 
