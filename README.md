@@ -120,40 +120,19 @@ Running Babel with Docker Compose requires only a `docker-compose.yml` file. Bab
 
 ### 1. Create directory and download configuration
 
-The recommended installation uses the comprehensive `docker-compose.yml` from this repository, which includes the One-Click In-App updater.
+Download the standard `docker-compose.yml` from this repository (includes Babel and the `babel-updater` sidecar):
 
 ```bash
 mkdir babel && cd babel
 curl -O https://raw.githubusercontent.com/hugomossberg/Babel/main/docker-compose.yml
 ```
 
-2. Edit the file to map your volume paths:
+Edit the file to map your volume paths:
 > **IMPORTANT: Volume Paths**
 >
 > You must map your host paths to Babel's container paths.
 > - For TV Shows: Change `/path/to/tv` (with your actual host path). Babel will see this as `/tv` internally.
 > - For Movies: Change `/path/to/movies` (with your actual host path). Babel will see this as `/movies` internally.
-
-*(Optional)* **Minimal Installation without Updater:** If you prefer not to use the in-app updater, instead create this minimal `docker-compose.yml` manually:
-```yaml
-services:
-  babel:
-    image: ghcr.io/hugomossberg/babel:beta
-    container_name: babel
-    ports:
-      - "8765:8765"
-    volumes:
-      - ./data:/app/data
-      - /path/to/tv:/tv
-      - /path/to/movies:/movies
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8765/health || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-```
 
 ### 2. Start and Verify
 
@@ -322,7 +301,7 @@ Babel supports seamless in-app updates directly from the web dashboard. The repo
 - **Safety & Rollback:** When "Update now" is triggered, the updater pulls the target image, performs container replacement, and verifies container health. If health checks fail, it automatically rolls back to the previous container.
 - **Zero-Configuration Security:** The `babel` and `babel-updater` containers automatically generate and share a secure inner-container token on first start. No host ports are exposed on the updater, `docker.sock` is only mounted to the updater, and the token is never exposed to the browser.
 
-*(Optional)* If you prefer to update strictly via `docker compose pull && docker compose up -d`, you can use the minimal `docker-compose.yml` provided in the Quick Start or remove the `babel-updater` service.
+Advanced users who prefer manual updates can remove the `babel-updater` service and updater auth volume from their Compose configuration.
 
 ### Upgrading an Existing Installation to One-Click Updates
 
