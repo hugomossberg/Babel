@@ -70,3 +70,26 @@ def test_get_positive_int_setting(tmp_path, monkeypatch):
 
     db.set_setting("batch_concurrency", "")
     assert db.get_positive_int_setting("batch_concurrency", 3) == 3
+
+
+def test_init_db_performance_defaults(tmp_path, monkeypatch):
+    """Verify fresh DB gets 150/2/3 and already saved custom values are preserved."""
+    # 1. Fresh DB gets performance defaults (150 / 2 / 3)
+    db_path = tmp_path / "test_defaults.db"
+    monkeypatch.setattr(db, "DB_PATH", str(db_path))
+    db.init_db()
+
+    assert db.get_setting("batch_size") == "150"
+    assert db.get_setting("batch_concurrency") == "2"
+    assert db.get_setting("max_concurrent_jobs") == "3"
+
+    # 2. Pre-existing custom values are NOT overwritten by subsequent init_db()
+    db.set_setting("batch_size", "75")
+    db.set_setting("batch_concurrency", "4")
+    db.set_setting("max_concurrent_jobs", "5")
+
+    db.init_db()
+
+    assert db.get_setting("batch_size") == "75"
+    assert db.get_setting("batch_concurrency") == "4"
+    assert db.get_setting("max_concurrent_jobs") == "5"

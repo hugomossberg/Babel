@@ -676,7 +676,7 @@ class SubtitlePipeline:
                 pass
 
     def _get_semaphore(self) -> asyncio.Semaphore:
-        max_jobs = get_positive_int_setting("max_concurrent_jobs", 1)
+        max_jobs = get_positive_int_setting("max_concurrent_jobs", 3)
         if self._video_semaphore is None or self._current_max_jobs != max_jobs:
             self._current_max_jobs = max_jobs
             self._video_semaphore = asyncio.Semaphore(max_jobs)
@@ -1194,7 +1194,7 @@ class SubtitlePipeline:
                 append_job_log(job_id, f"Source preparation completed in {round(prep_duration_ms / 1000, 2)}s {perf_breakdown}.")
 
             total_source_lines = len(subs)
-            batch_size = get_positive_int_setting("batch_size", 50)
+            batch_size = get_positive_int_setting("batch_size", 150)
             ai_provider = get_setting("ai_provider", "gemini").lower()
             if ai_provider == "openai":
                 active_engine_name = f"OpenAI ({get_setting('openai_model', 'gpt-4o-mini')})"

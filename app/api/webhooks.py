@@ -106,8 +106,33 @@ async def sonarr_webhook(request: Request, background_tasks: BackgroundTasks):
             except HTTPException as e:
                 logger.error(f"Webhook path validation failed: {e.detail}")
                 return {"status": "error", "reason": e.detail}
-            
-            job_id = db.create_job(video_path=video_path, event_source="SONARR", title=title)
+
+            try:
+                result = db.create_job_if_no_active(
+                    video_path=video_path,
+                    event_source="SONARR",
+                    title=title,
+                    force_retranslate=False,
+                )
+            except Exception as e:
+                logger.error(f"Sonarr webhook: dedupe DB error for {video_path}: {e}")
+                raise HTTPException(
+                    status_code=503,
+                    detail="Dedupe check temporarily unavailable. Please retry."
+                )
+            job_id = result["job_id"]
+            if not result["created"]:
+                logger.info(
+                    f"Sonarr webhook: active job {job_id} already exists for {video_path} "
+                    f"(status={result['existing_job']['status']}) — not creating duplicate"
+                )
+                return {
+                    "status": "already_active",
+                    "event": event_type,
+                    "video_path": video_path,
+                    "job_id": job_id,
+                    "existing_status": result["existing_job"]["status"],
+                }
             logger.info(f"Queueing Babel processing for Sonarr episode: {video_path} (Job ID: {job_id})")
             background_tasks.add_task(
                 pipeline.process_video_file,
@@ -118,6 +143,7 @@ async def sonarr_webhook(request: Request, background_tasks: BackgroundTasks):
                 job_id=job_id
             )
             return {"status": "queued", "event": event_type, "video_path": video_path, "title": title, "job_id": job_id}
+
 
     return {"status": "ignored", "event": event_type}
 
@@ -161,8 +187,33 @@ async def radarr_webhook(request: Request, background_tasks: BackgroundTasks):
             except HTTPException as e:
                 logger.error(f"Webhook path validation failed: {e.detail}")
                 return {"status": "error", "reason": e.detail}
-            
-            job_id = db.create_job(video_path=video_path, event_source="RADARR", title=title)
+
+            try:
+                result = db.create_job_if_no_active(
+                    video_path=video_path,
+                    event_source="RADARR",
+                    title=title,
+                    force_retranslate=False,
+                )
+            except Exception as e:
+                logger.error(f"Radarr webhook: dedupe DB error for {video_path}: {e}")
+                raise HTTPException(
+                    status_code=503,
+                    detail="Dedupe check temporarily unavailable. Please retry."
+                )
+            job_id = result["job_id"]
+            if not result["created"]:
+                logger.info(
+                    f"Radarr webhook: active job {job_id} already exists for {video_path} "
+                    f"(status={result['existing_job']['status']}) — not creating duplicate"
+                )
+                return {
+                    "status": "already_active",
+                    "event": event_type,
+                    "video_path": video_path,
+                    "job_id": job_id,
+                    "existing_status": result["existing_job"]["status"],
+                }
             logger.info(f"Queueing Babel processing for Radarr movie: {video_path} (Job ID: {job_id})")
             background_tasks.add_task(
                 pipeline.process_video_file,
@@ -173,6 +224,7 @@ async def radarr_webhook(request: Request, background_tasks: BackgroundTasks):
                 job_id=job_id
             )
             return {"status": "queued", "event": event_type, "video_path": video_path, "title": title, "job_id": job_id}
+
 
     return {"status": "ignored", "event": event_type}
 
@@ -190,7 +242,35 @@ async def manual_process(req: ManualProcessRequest, background_tasks: Background
         base = os.path.splitext(base)[0]
         title = re.sub(r'(?i)(WEBDL|WEB-DL|WEB|HDTV|Bluray|720p|1080p|2160p|4K|x264|x265|HDR|AMZN).*', '', base).strip(' -._')
 
-    job_id = db.create_job(video_path=req.video_path, event_source="MANUAL", title=title)
+    try:
+        result = db.create_job_if_no_active(
+            video_path=req.video_path,
+            event_source="MANUAL",
+            title=title,
+            force_retranslate=req.force_retranslate,
+        )
+    except Exception as e:
+        logger.error(f"Manual process: dedupe DB error for {req.video_path}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Dedupe check temporarily unavailable. Please retry."
+        )
+    job_id = result["job_id"]
+
+    if not result["created"]:
+        existing = result["existing_job"]
+        logger.info(
+            f"Manual process: active job {job_id} already exists for {req.video_path} "
+            f"(status={existing['status']}) — returning existing job"
+        )
+        return {
+            "status": "already_active",
+            "job_id": job_id,
+            "video_path": req.video_path,
+            "existing_status": existing["status"],
+            "defer_reason": existing.get("defer_reason"),
+        }
+
     logger.info(f"Queueing manual Babel processing: {req.video_path} (Job ID: {job_id})")
 
     background_tasks.add_task(

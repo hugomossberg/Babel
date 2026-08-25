@@ -32,7 +32,7 @@ class AISettingsRequest(BaseModel):
     escalation_provider: Optional[str] = "none"
     escalation_model: Optional[str] = ""
     escalate_to_pro: bool = False
-    batch_size: int = Field(default=50, ge=1)
+    batch_size: int = Field(default=150, ge=1)
     max_concurrent_jobs: Optional[int] = Field(default=None, ge=1)
     batch_concurrency: Optional[int] = Field(default=None, ge=1)
     glossary: Optional[str] = ""
@@ -89,6 +89,29 @@ class DeleteSubRequest(BaseModel):
 async def api_stats() -> Dict[str, Any]:
     return get_job_stats()
 
+@router.get("/active-jobs")
+async def api_active_jobs() -> Dict[str, Any]:
+    """
+    Return all currently active (non-terminal) jobs as a dict keyed by video_path.
+    Cheap endpoint — pure DB query, no filesystem scan.
+    Used by Library auto-refresh to update per-item job state.
+    """
+    from app.core.db import ACTIVE_JOB_STATUSES, get_jobs_by_status
+    active = get_jobs_by_status(list(ACTIVE_JOB_STATUSES))
+    result = {}
+    for job in active:
+        vp = os.path.normpath(job.get("video_path", ""))
+        result[vp] = {
+            "id": job.get("id"),
+            "status": job.get("status"),
+            "processed_lines": job.get("processed_lines"),
+            "total_lines": job.get("total_lines"),
+            "defer_reason": job.get("defer_reason"),
+            "error_message": job.get("error_message"),
+            "waiting_provider": job.get("waiting_provider"),
+        }
+    return result
+
 @router.get("/jobs")
 async def api_jobs(limit: int = 50) -> List[Dict[str, Any]]:
     # Bug #33: GET endpoint should NEVER delete/mutate data
@@ -134,6 +157,20 @@ async def api_clear_jobs() -> Dict[str, Any]:
 async def api_delete_subtitles(req: DeleteSubRequest):
     from app.core.security import validate_media_path
     video_path = validate_media_path(req.video_path)
+
+    # Guard: refuse subtitle deletion while an active job is processing this video.
+    # Deleting during TRANSLATING would leave the video with no subtitle if the job fails.
+    # Uses the full ACTIVE_JOB_STATUSES set — the single source of truth — not a subset.
+    from app.core.db import get_active_job_for_video, ACTIVE_JOB_STATUSES
+    active_job = get_active_job_for_video(video_path)
+    if active_job and active_job.get("status") in ACTIVE_JOB_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete subtitles: an active job ({active_job['status']}) is "
+                   f"currently processing this video. Wait for it to complete first."
+        )
+
+
     base_no_ext, _ = os.path.splitext(video_path)
     parent_dir = os.path.dirname(video_path)
     base_name = os.path.basename(base_no_ext)
@@ -222,9 +259,9 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "escalation_provider": get_setting("escalation_provider", "none"),
             "escalation_model": get_setting("escalation_model", ""),
             "escalate_to_pro": get_setting("escalate_to_pro", "false").lower() == "true",
-            "batch_size": get_positive_int_setting("batch_size", 50),
-            "max_concurrent_jobs": get_positive_int_setting("max_concurrent_jobs", 1),
-            "batch_concurrency": get_positive_int_setting("batch_concurrency", 3),
+            "batch_size": get_positive_int_setting("batch_size", 150),
+            "max_concurrent_jobs": get_positive_int_setting("max_concurrent_jobs", 3),
+            "batch_concurrency": get_positive_int_setting("batch_concurrency", 2),
             "glossary": get_setting("glossary", ""),
             # Daily request budgets (0 = Unlimited)
             "daily_request_budget_gemini": int(get_setting("daily_request_budget_gemini", "0") or "0"),
@@ -478,10 +515,44 @@ async def api_get_media_files():
         series_data = await asyncio.to_thread(scan_library_folders, series_path, "series")
         movies_data = await asyncio.to_thread(scan_library_folders, movies_path, "movies")
 
+        # Collect all video paths from the scan result for a single batch DB lookup
+        all_paths: list = []
+        for show in series_data:
+            for ep in show.get("episodes", []):
+                all_paths.append(ep["path"])
+        for movie in movies_data:
+            all_paths.append(movie["path"])
+
+        # One batch query: video_path → active job (if any)
+        from app.core.db import get_active_jobs_by_video_paths
+        active_jobs_map = await asyncio.to_thread(get_active_jobs_by_video_paths, all_paths)
+
+        # Attach active_job metadata to each item (only fields relevant to UI)
+        def _slim_job(job: dict) -> dict:
+            return {
+                "id": job.get("id"),
+                "status": job.get("status"),
+                "processed_lines": job.get("processed_lines"),
+                "total_lines": job.get("total_lines"),
+                "defer_reason": job.get("defer_reason"),
+                "error_message": job.get("error_message"),
+                "waiting_provider": job.get("waiting_provider"),
+            }
+
+        for show in series_data:
+            for ep in show.get("episodes", []):
+                job = active_jobs_map.get(ep["path"])
+                ep["active_job"] = _slim_job(job) if job else None
+
+        for movie in movies_data:
+            job = active_jobs_map.get(movie["path"])
+            movie["active_job"] = _slim_job(job) if job else None
+
         return {
             "series": series_data,
-            "movies": movies_data
+            "movies": movies_data,
         }
+
 
 from app.services.updates_controller import updates_controller
 from pydantic import BaseModel

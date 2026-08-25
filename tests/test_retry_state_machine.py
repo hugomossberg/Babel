@@ -176,7 +176,14 @@ async def test_waiting_source_claimed_and_retried():
     # Should be claimed (QUEUED) and pipeline called
     job = get_job_by_id(job_id)
     assert job["status"] == "QUEUED"
-    mock_process.assert_called_once_with("due_source.mkv", event_source="RETRY", title="due_source.mkv", job_id=job_id)
+    mock_process.assert_called_once_with(
+        "due_source.mkv",
+        event_source="RETRY",
+        title="due_source.mkv",
+        job_id=job_id,
+        force_retranslate=False,  # v2.3.42: force_retranslate is now always passed on retry
+    )
+
 
 @pytest.mark.parametrize("initial_retries, should_fail", [
     (0, False),

@@ -153,7 +153,8 @@ async def process_one_retry_pass():
                         job.get("video_path", ""),
                         event_source="RETRY",
                         title=job.get("title", ""),
-                        job_id=job["id"]
+                        job_id=job["id"],
+                        force_retranslate=bool(job.get("force_retranslate")),
                     ))
                     break  # One claim per provider per pass — respect FIFO
 
@@ -186,7 +187,8 @@ async def process_one_retry_pass():
                             job.get("video_path", ""),
                             event_source="RETRY",
                             title=job.get("title", ""),
-                            job_id=job["id"]
+                            job_id=job["id"],
+                            force_retranslate=bool(job.get("force_retranslate")),
                         ))
             except Exception as e:
                 logging.error(f"Error checking retry for job {job.get('id')}: {e}")

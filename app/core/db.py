@@ -21,6 +21,38 @@ class DeferStage:
     PRIMARY    = "PRIMARY"
     ESCALATION = "ESCALATION"
 
+# ---------------------------------------------------------------------------
+# Central active-job status definition
+# ---------------------------------------------------------------------------
+# These statuses represent a job that is actively doing work for a video_path
+# (or is waiting for its turn).  A new job must NOT be created for the same
+# video_path while any of these statuses exists.
+#
+# Rules:
+#  • QUEUED          — waiting for a processing slot
+#  • TRANSLATING     — pipeline is actively running
+#  • RECOVERING      — stale-queue recovery retry
+#  • ESCALATING      — escalating to secondary provider
+#  • WAITING_PROVIDER— blocked on provider quota, will retry
+#  • RETRY_PENDING   — scheduled for retry
+#  • PARTIAL         — partial result, finishing up
+#  • WAITING_SOURCE  — waiting for source subtitle
+#  • DEFERRED        — daily budget exhausted; will auto-resume same job
+#
+# Terminal statuses (TRANSLATED, FAILED, CANCELLED, ALREADY EXISTS) are NOT
+# included — they do not block a new legitimate job or force-retranslate.
+ACTIVE_JOB_STATUSES: tuple = (
+    "QUEUED",
+    "TRANSLATING",
+    "RECOVERING",
+    "ESCALATING",
+    "WAITING_PROVIDER",
+    "RETRY_PENDING",
+    "PARTIAL",
+    "WAITING_SOURCE",
+    "DEFERRED",
+)
+
 logger = logging.getLogger(__name__)
 
 DB_PATH = os.getenv("BABEL_DB_PATH", "/app/data/babel.db")
@@ -170,6 +202,8 @@ def init_db():
             ("waiting_model",      "TEXT"),
             ("defer_stage",        "TEXT"),
             ("deferred_at",        "TEXT"),
+            # v2.3.42: Force-retranslate intent persistence (persists through DEFERRED/RETRY)
+            ("force_retranslate",  "INTEGER DEFAULT 0"),
         ]:
             try:
                 cursor.execute(f"ALTER TABLE jobs ADD COLUMN {_col} {_col_type}")
@@ -205,8 +239,9 @@ def init_db():
         defaults = {
             "gemini_api_key": "",
             "gemini_model": "gemini-3.5-flash-lite",
-            "batch_size": "50",
-            "max_concurrent_jobs": "1",
+            "batch_size": "150",
+            "max_concurrent_jobs": "3",
+            "batch_concurrency": "2",
             "glossary": "",
             "enable_bazarr_check": "true",
             "bazarr_url": "http://bazarr:6767",
@@ -355,6 +390,210 @@ def create_job(video_path: str, event_source: str = "MANUAL", title: Optional[st
         conn.commit()
         return cursor.lastrowid
 
+
+def get_active_job_for_video(video_path: str) -> Optional[Dict[str, Any]]:
+    """
+    Return the most recent active (non-terminal) job for *video_path*, or None.
+
+    Uses ACTIVE_JOB_STATUSES as the single source of truth.
+    Reads under a shared connection (no EXCLUSIVE lock needed — read-only).
+    """
+    norm = os.path.normpath(video_path)
+    placeholders = ",".join("?" * len(ACTIVE_JOB_STATUSES))
+    try:
+        with sqlite3.connect(DB_PATH, timeout=10.0) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                f"""SELECT * FROM jobs
+                    WHERE video_path = ? AND status IN ({placeholders})
+                    ORDER BY id DESC LIMIT 1""",
+                (norm, *ACTIVE_JOB_STATUSES),
+            ).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            if d.get("logs"):
+                try:
+                    d["logs"] = json.loads(d["logs"])
+                except Exception:
+                    d["logs"] = []
+            else:
+                d["logs"] = []
+            return d
+    except Exception as e:
+        logger.error("get_active_job_for_video error for %s: %s", video_path, e)
+        return None
+
+
+def create_job_if_no_active(
+    video_path: str,
+    event_source: str = "MANUAL",
+    title: Optional[str] = None,
+    force_retranslate: bool = False,
+) -> Dict[str, Any]:
+    """
+    Atomically create a new QUEUED job for *video_path* — BUT ONLY IF no active
+    (non-terminal) job already exists for the same path.
+
+    Uses an SQLite EXCLUSIVE transaction so that two concurrent callers cannot
+    both see "no active job" and both insert a duplicate.
+
+    Returns a dict:
+        {
+          "job_id":        int,        # ID of job (new or existing)
+          "created":       bool,       # True  = new job created
+                                       # False = existing active job returned
+          "existing_job":  dict|None,  # populated when created=False
+        }
+
+    Force semantics: if *force_retranslate* is True, the function still checks
+    for an existing active job and returns it unchanged (created=False) if one
+    is found.  Force only means "the old target subtitle may be replaced when
+    the NEW translation is ready and QA-approved" — it does NOT create a second
+    parallel active job for the same video_path.  The flag is persisted in the
+    DB row so the pipeline can honour it after DEFERRED / RETRY cycles.
+
+    Fail-closed: if the exclusive dedupe check fails due to a DB error, we do
+    NOT fall back to an unconditional create_job().  The caller receives the
+    exception and should return a retryable error to the client.
+    """
+    if not title:
+        title = os.path.basename(video_path)
+    norm = os.path.normpath(video_path)
+
+    provider = get_setting("ai_provider", "gemini").lower()
+    if provider == "openai":
+        active_model = f"OpenAI ({get_setting('openai_model', 'gpt-4o-mini')})"
+    elif provider == "deepl":
+        active_model = "DeepL Translate"
+    elif provider in ["ollama", "localai"]:
+        active_model = f"Ollama ({get_setting('ollama_model', 'llama3')})"
+    else:
+        active_model = f"Gemini ({get_setting('gemini_model', 'gemini-3.5-flash-lite')})"
+
+    now = datetime.now(timezone.utc).isoformat()
+    placeholders = ",".join("?" * len(ACTIVE_JOB_STATUSES))
+
+    # No outer try/except — we fail closed on DB errors (see docstring above).
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("BEGIN EXCLUSIVE")
+
+        # Ensure new columns exist (idempotent on old DBs)
+        for _col, _def in [
+            ("ai_model", "TEXT"),
+            ("force_retranslate", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {_col} {_def}")
+            except Exception:
+                pass
+
+        # Check for an existing active job inside the exclusive lock.
+        # Force does NOT bypass this check.
+        existing = conn.execute(
+            f"""SELECT * FROM jobs
+                WHERE video_path = ? AND status IN ({placeholders})
+                ORDER BY id DESC LIMIT 1""",
+            (norm, *ACTIVE_JOB_STATUSES),
+        ).fetchone()
+        if existing:
+            conn.execute("ROLLBACK")
+            d = dict(existing)
+            if d.get("logs"):
+                try:
+                    d["logs"] = json.loads(d["logs"])
+                except Exception:
+                    d["logs"] = []
+            else:
+                d["logs"] = []
+            return {"job_id": d["id"], "created": False, "existing_job": d}
+
+        # No active job: create a new QUEUED job, storing the force flag.
+        conn.execute(
+            """INSERT INTO jobs
+                   (video_path, title, status, event_source, ai_model,
+                    force_retranslate, created_at, updated_at, logs)
+               VALUES (?, ?, 'QUEUED', ?, ?, ?, ?, ?, ?)""",
+            (norm, title, event_source, active_model,
+             1 if force_retranslate else 0,
+             now, now,
+             json.dumps([f"Job created ({event_source}) for {os.path.basename(norm)}"]))
+        )
+        job_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute("COMMIT")
+        return {"job_id": job_id, "created": True, "existing_job": None}
+
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+
+
+def get_active_jobs_by_video_paths(video_paths: List[str]) -> Dict[str, Dict[str, Any]]:
+    """
+    Efficiently fetch active jobs for a list of video_paths.
+
+    Returns a dict mapping normalized video_path → most-recent active job dict.
+    Paths with no active job are absent from the returned dict.
+
+    Design: Instead of building WHERE video_path IN (?, ?, ..., ?) with
+    potentially thousands of paths (SQLite limit: 999 / SQLITE_MAX_VARIABLE_NUMBER),
+    we fetch ALL rows whose status is in ACTIVE_JOB_STATUSES in one tiny query
+    (active jobs are always far fewer than total library files) and then filter
+    by the requested paths in Python.
+    """
+    if not video_paths:
+        return {}
+
+    norm_paths_set = {os.path.normpath(p) for p in video_paths}
+    placeholders_status = ",".join("?" * len(ACTIVE_JOB_STATUSES))
+
+    try:
+        with sqlite3.connect(DB_PATH, timeout=10.0) as conn:
+            conn.row_factory = sqlite3.Row
+            # Small query — only filters on status index, not on path list.
+            # Returns the most recent active job per video_path (MAX id = latest).
+            rows = conn.execute(
+                f"""SELECT j.*
+                    FROM jobs j
+                    INNER JOIN (
+                        SELECT video_path, MAX(id) AS max_id
+                        FROM jobs
+                        WHERE status IN ({placeholders_status})
+                        GROUP BY video_path
+                    ) sub ON j.id = sub.max_id""",
+                ACTIVE_JOB_STATUSES,
+            ).fetchall()
+
+        result: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            d = dict(row)
+            norm = os.path.normpath(d.get("video_path", ""))
+            # Filter in Python — only include paths the caller asked about
+            if norm not in norm_paths_set:
+                continue
+            if d.get("logs"):
+                try:
+                    d["logs"] = json.loads(d["logs"])
+                except Exception:
+                    d["logs"] = []
+            else:
+                d["logs"] = []
+            result[norm] = d
+        return result
+    except Exception as e:
+        logger.error("get_active_jobs_by_video_paths error: %s", e)
+        return {}
+
 def append_job_log(job_id: int, message: str):
     now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
     formatted = f"[{now}] {message}"
@@ -453,6 +692,7 @@ def get_jobs(limit: int = 50) -> List[Dict[str, Any]]:
         return results
 
 def get_job_stats() -> Dict[str, Any]:
+    _status_placeholders = ",".join("?" * len(ACTIVE_JOB_STATUSES))
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         total = cursor.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
@@ -461,7 +701,10 @@ def get_job_stats() -> Dict[str, Any]:
         repaired = cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'REPAIRED'").fetchone()[0]
         failed = cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'FAILED'").fetchone()[0]
         deferred = cursor.execute("SELECT COUNT(*) FROM jobs WHERE status = 'DEFERRED'").fetchone()[0]
-        active = cursor.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('EXTRACTING', 'TRANSLATING', 'QUEUED', 'WAITING_PROVIDER', 'RECOVERING', 'PARTIAL', 'WAITING_SOURCE')").fetchone()[0]
+        active = cursor.execute(
+            f"SELECT COUNT(*) FROM jobs WHERE status IN ({_status_placeholders})",
+            ACTIVE_JOB_STATUSES
+        ).fetchone()[0]
         avg_dur = cursor.execute("SELECT AVG(duration_seconds) FROM jobs WHERE status IN ('TRANSLATED', 'REPAIRED', 'SUCCESS')").fetchone()[0] or 0.0
         return {
             "total": total,

@@ -83,8 +83,9 @@ async def test_675_targeted_recovery(tmp_path):
 
 @pytest.mark.asyncio
 async def test_675_worker_targeted_retry(tmp_path):
-    from app.core.db import init_db, get_job_by_id, update_job
+    from app.core.db import init_db, get_job_by_id, update_job, set_setting
     init_db()
+    set_setting("batch_size", "50")
     pipeline = SubtitlePipeline()
     video_path = tmp_path / "video2.mkv"
     video_path.touch()
@@ -97,6 +98,7 @@ async def test_675_worker_targeted_retry(tmp_path):
     def fake_get_setting(key, default=None):
         if key == "languages":
             return '[{"name": "Swedish", "code": "sv", "enabled": true}]'
+        if key == "batch_size": return "50"
         if key == "auto_repair_unhealthy": return "false"
         if key == "qa_max_unresolved_cues": return "0"
         return default

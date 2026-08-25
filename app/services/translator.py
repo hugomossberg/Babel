@@ -1842,7 +1842,7 @@ CRITICAL INSTRUCTIONS:
         self,
         subs: List[srt.Subtitle],
         target_language: str = "English",
-        batch_size: int = 50,
+        batch_size: int = 150,
         job_id: Optional[int] = None,
         show_title: Optional[str] = None
     ) -> List[srt.Subtitle]:
@@ -1899,7 +1899,7 @@ CRITICAL INSTRUCTIONS:
                 pass
 
         state_lock = asyncio.Lock()
-        concurrency = get_positive_int_setting("batch_concurrency", 3)
+        concurrency = get_positive_int_setting("batch_concurrency", 2)
         sem = asyncio.Semaphore(concurrency)
 
         async def process_batch(batch_idx, start_idx, chunk, payload):
