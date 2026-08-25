@@ -121,12 +121,15 @@ def detect_language_heuristics(text: str, expected_language: Optional[str] = Non
         # Only assist to 'sr' when POSITIVE Serbian diagnostic evidence is present (diagnostic letters ђ, ћ
         # or distinctive grammatical words је, није, ово, шта, данас, пре, сви, овај, dobrodošli/хвала/молимо)
         # AND positive Macedonian diagnostic evidence is ABSENT.
+        # Note: the Macedonian marker list must contain only words that are NOT also
+        # standard Serbian. Words like ова / овој / нема / треба / во occur naturally in
+        # Serbian and would otherwise veto the assist on genuine Serbian Cyrillic text.
         # Neutral or ambiguous Cyrillic without positive Serbian evidence stays 'mk' / unchanged.
         if expected_norm == "sr" and detected_code == "mk":
             has_cyrillic = bool(re.search(r'[\u0400-\u04FF]', cleaned))
             if has_cyrillic:
                 has_sr_evidence = bool(re.search(r'[\u0402\u0452\u040B\u045B]|\b(је|није|ово|шта|данас|пре|сви|овај|овог|овом|добродошли|хвала|молимо)\b', cleaned, re.IGNORECASE))
-                has_mk_evidence = bool(re.search(r'[\u0403\u0453\u0405\u0455\u040C\u045C]|\b(ова|оваа|овој|овие|денес|зошто|нема|сака|треба|веќе|тука|многу|додека|во)\b', cleaned, re.IGNORECASE))
+                has_mk_evidence = bool(re.search(r'[\u0403\u0453\u0405\u0455\u040C\u045C]|\b(оваа|овие|денес|зошто|сака|веќе|тука|многу|додека)\b', cleaned, re.IGNORECASE))
                 if has_sr_evidence and not has_mk_evidence:
                     detected_code = "sr"
 
