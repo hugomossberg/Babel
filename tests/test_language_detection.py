@@ -135,6 +135,28 @@ def test_short_english_rescue_unregistered_detector_noise():
     assert res_af["confidence"] >= 0.95
 
 
+def test_serbian_cyrillic_not_vetoed_by_shared_bcs_words():
+    """Issue #5: words that exist in BOTH Serbian and Macedonian must not veto the Serbian assist.
+
+    'нема', 'треба', 'овој' and 'ова' are ordinary Serbian. Previously any one of them
+    was treated as positive Macedonian evidence, so genuine Serbian Cyrillic containing
+    conclusive markers (ђ, ћ, није, шта) was still rejected as 'mk'.
+    """
+    shared_word_samples = [
+        # 'нема' - identical in Serbian and Macedonian
+        "Није било лако, али нема шта да се ради. Ђорђе је рекао да ће доћи сутра увече.",
+        # 'треба' - identical in Serbian and Macedonian
+        "Шта треба да урадимо сада? Ђаво је однео шалу, али ово није крај приче.",
+        # 'овој' - Serbian feminine locative of 'овај'
+        "У овој кући је увек било топло. Није важно шта други мисле о нама и о ђацима.",
+        # 'ова' - ordinary Serbian plural
+        "Ова деца су највише уживала. Шта је било, није важно, ђак је ћутао цело вече.",
+    ]
+    for text in shared_word_samples:
+        res = detect_language_heuristics(text, expected_language="sr")
+        assert res["lang"] == "sr", f"Serbian text falsely vetoed as {res['lang']}: {text[:40]}"
+
+
 def test_macedonian_vs_serbian_cyrillic_differentiation():
     """Genuine Macedonian with expected_language='sr' must not be falsely converted to exact Serbian."""
     # Standard Macedonian sample with common markers
