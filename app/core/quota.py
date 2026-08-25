@@ -1027,9 +1027,17 @@ def try_consume_request_budget(provider: str) -> bool:
     """
     Atomically check and increment the daily request counter for *provider*.
     Uses SQLite EXCLUSIVE transaction.
+
+    Fail semantics:
+    - budget = 0 (Unlimited): DB errors do NOT block dispatch. The budget is inactive
+      so there is no meaningful protection to enforce. Returning True avoids unnecessary outage.
+    - budget > 0 (Active limit): If the DB cannot be read/written safely, we CANNOT confirm
+      that the budget has not been exhausted. We fail CLOSED (return False) to protect the
+      user's configured cost limit. The job will be retried later when the DB recovers.
     """
     budget = get_daily_budget(provider)
     if budget is None:
+        # Unlimited: no budget enforcement needed
         return True
 
     try:
@@ -1049,7 +1057,14 @@ def try_consume_request_budget(provider: str) -> bool:
             conn.close()
     except Exception as e:
         logger.error("try_consume_request_budget error for %s: %s", provider, e)
-        return True
+        # Fail CLOSED when an active budget is configured: we cannot safely verify
+        # the budget without DB access, so we must not allow unbounded spending.
+        logger.warning(
+            "Daily request budget for '%s' is set to %d but DB is unavailable. "
+            "Blocking dispatch to protect cost limit. Will retry when DB recovers.",
+            provider, budget,
+        )
+        return False
 
 
 def is_local_budget_available(provider: str) -> bool:

@@ -310,23 +310,29 @@ Babel validates every subtitle before writing to disk using a three-tier decisio
 
 > **Timestamp Precision Note:** Babel guarantees **source-to-target timestamp preservation** (zero translation-induced timing drift). It preserves the timing relative to the selected source track. If the source subtitle track itself has pre-existing broadcast timing offsets, Babel preserves those timestamps faithful to the source.
 
----
-
 ## Sonarr & Radarr Integration
 
 Babel can process media automatically upon download or upgrade.
 
-> **Docker Networking Note:** Using `http://YOUR-SERVER-IP:PORT` is the safest default. If Babel and another service share a Docker network, Docker service names (such as `babel`, `bazarr`, `sonarr`, `radarr`, or `jellyfin`) can be used instead.
+> **Docker Networking Note:** Using `http://YOUR-SERVER-IP:PORT` is the safest option when Sonarr/Radarr and Babel are running in separate Docker stacks.
+
+If `BABEL_WEBHOOK_SECRET` is configured, add the following custom header to the Sonarr/Radarr webhook:
+
+`X-Webhook-Secret: YOUR_SECRET`
+
+Keep the webhook URL unchanged. The secret does not need to be added to the URL.
 
 ### Sonarr Configuration
-1. In Sonarr, navigate to **Settings → Connect → + (Add Webhook)**.
+1. In Sonarr, navigate to **Settings > Connect > + (Add Webhook)**.
 2. Set **URL** to: `http://YOUR-SERVER-IP:8765/webhook/sonarr`.
-3. Check triggers: **On Download** and **On Upgrade**.
+3. If using `BABEL_WEBHOOK_SECRET`, add the `X-Webhook-Secret` custom header under the webhook's advanced settings.
+4. Check triggers: **On Download** and **On Upgrade**.
 
 ### Radarr Configuration
-1. In Radarr, navigate to **Settings → Connect → + (Add Webhook)**.
+1. In Radarr, navigate to **Settings > Connect > + (Add Webhook)**.
 2. Set **URL** to: `http://YOUR-SERVER-IP:8765/webhook/radarr`.
-3. Check triggers: **On Download** and **On Upgrade**.
+3. If using `BABEL_WEBHOOK_SECRET`, add the `X-Webhook-Secret` custom header under the webhook's advanced settings.
+4. Check triggers: **On Download** and **On Upgrade**.
 
 ### Remote Path Mapping
 

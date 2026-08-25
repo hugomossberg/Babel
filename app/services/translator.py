@@ -260,6 +260,7 @@ def with_retry(func_or_provider=None, **decorator_kwargs):
                                 "input_tokens": None,
                                 "cached_input_tokens": None,
                                 "output_tokens": None,
+                                "thinking_tokens": None,
                             }
                             est_cost = calculate_estimated_cost(
                                 provider=provider,
@@ -267,6 +268,7 @@ def with_retry(func_or_provider=None, **decorator_kwargs):
                                 input_tokens=token_meta.get("input_tokens"),
                                 cached_input_tokens=token_meta.get("cached_input_tokens"),
                                 output_tokens=token_meta.get("output_tokens"),
+                                thinking_tokens=token_meta.get("thinking_tokens"),
                             )
                             complete_dispatch(
                                 request_uid=_request_uid,
@@ -274,6 +276,7 @@ def with_retry(func_or_provider=None, **decorator_kwargs):
                                 input_tokens=token_meta.get("input_tokens"),
                                 cached_input_tokens=token_meta.get("cached_input_tokens"),
                                 output_tokens=token_meta.get("output_tokens"),
+                                thinking_tokens=token_meta.get("thinking_tokens"),
                                 estimated_cost_usd=est_cost,
                             )
                         except Exception as _acc_err:
@@ -1728,24 +1731,7 @@ CRITICAL INSTRUCTIONS:
             )
 
         loop = asyncio.get_event_loop()
-        try:
-            response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_gemini(model_name))
-        except Exception as e:
-            # Automatic Fallback if Google deprecated or changed model name
-            if "404" in str(e) or "not found" in str(e).lower():
-                fallback_models = ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest"]
-                for fb in fallback_models:
-                    if fb != model_name:
-                        try:
-                            logger.warning(f"Model {model_name} failed with 404, falling back to {fb}")
-                            response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_gemini(fb))
-                            break
-                        except Exception:
-                            continue
-                else:
-                    raise e
-            else:
-                raise e
+        response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_gemini(model_name))
 
         return extract_json_safely(_capture_gemini_tokens(response).text)
 
@@ -1779,14 +1765,7 @@ CRITICAL INSTRUCTIONS:
             )
 
         loop = asyncio.get_event_loop()
-        try:
-            response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_openai(model_name))
-        except Exception as e:
-            if "404" in str(e) or "model_not_found" in str(e).lower():
-                logger.warning(f"Model {model_name} failed with 404, falling back to gpt-4o-mini")
-                response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_openai("gpt-4o-mini"))
-            else:
-                raise e
+        response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_openai(model_name))
 
         return extract_json_safely(_capture_openai_tokens(response).choices[0].message.content)
 
@@ -1802,6 +1781,7 @@ CRITICAL INSTRUCTIONS:
         url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
 
         texts = [it["text"] for it in items]
+        _mark_sdk_started(_usage_token_ctx.get(None))
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 url,
@@ -1832,6 +1812,7 @@ CRITICAL INSTRUCTIONS:
 
         prompt = f"{get_system_instruction(target_language, glossary=glossary, show_title=show_title)}\n\nTranslate the following JSON list into {target_language}:{context_section}\n{json.dumps(items, ensure_ascii=False)}"
 
+        _mark_sdk_started(_usage_token_ctx.get(None))
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
                 f"{ollama_url}/api/generate",
@@ -2219,23 +2200,7 @@ STRICT RULES:
                 )
 
             loop = asyncio.get_event_loop()
-            try:
-                response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_gemini(model_name))
-            except Exception as e:
-                if "404" in str(e) or "not found" in str(e).lower():
-                    fallback_models = ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest"]
-                    for fb in fallback_models:
-                        if fb != model_name:
-                            try:
-                                logger.warning(f"Model {model_name} failed with 404 in First-Pass Micro Repair, falling back to {fb}")
-                                response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_gemini(fb))
-                                break
-                            except Exception:
-                                continue
-                    else:
-                        raise e
-                else:
-                    raise e
+            response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_gemini(model_name))
 
             return extract_json_safely(_capture_gemini_tokens(response).text)
 
@@ -2258,13 +2223,7 @@ STRICT RULES:
                 )
 
             loop = asyncio.get_event_loop()
-            try:
-                response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_openai(model_name))
-            except Exception as e:
-                if "404" in str(e) or "model_not_found" in str(e).lower():
-                    response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_openai("gpt-4o-mini"))
-                else:
-                    raise e
+            response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_openai(model_name))
 
             return extract_json_safely(_capture_openai_tokens(response).choices[0].message.content)
 
@@ -2273,6 +2232,7 @@ STRICT RULES:
             ollama_url = get_setting("ollama_url", "http://localhost:11434").rstrip("/")
             model_name = get_setting("ollama_model", "llama3")
             full_prompt = f"{system_prompt}\n\n{prompt}"
+            _mark_sdk_started(_usage_token_ctx.get(None))
             async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(
                     f"{ollama_url}/api/generate",
@@ -2292,6 +2252,7 @@ STRICT RULES:
             target_lang_code = lang_obj.deepl_code if lang_obj else target_language.upper()[:2]
             url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
             texts = [it["target"] for it in repair_items]
+            _mark_sdk_started(_usage_token_ctx.get(None))
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
                     url,
@@ -2412,23 +2373,7 @@ IMPORTANT:
                 )
 
             loop = asyncio.get_event_loop()
-            try:
-                response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_gemini(model_name))
-            except Exception as e:
-                if "404" in str(e) or "not found" in str(e).lower():
-                    fallback_models = ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest"]
-                    for fb in fallback_models:
-                        if fb != model_name:
-                            try:
-                                logger.warning(f"Model {model_name} failed with 404 in Fast Final Rescue, falling back to {fb}")
-                                response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_gemini(fb))
-                                break
-                            except Exception:
-                                continue
-                    else:
-                        raise e
-                else:
-                    raise e
+            response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_gemini(model_name))
 
             return extract_json_safely(_capture_gemini_tokens(response).text)
 
@@ -2451,13 +2396,7 @@ IMPORTANT:
                 )
 
             loop = asyncio.get_event_loop()
-            try:
-                response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_openai(model_name))
-            except Exception as e:
-                if "404" in str(e) or "model_not_found" in str(e).lower():
-                    response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_openai("gpt-4o-mini"))
-                else:
-                    raise e
+            response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_openai(model_name))
 
             return extract_json_safely(_capture_openai_tokens(response).choices[0].message.content)
 
@@ -2466,6 +2405,7 @@ IMPORTANT:
             ollama_url = get_setting("ollama_url", "http://localhost:11434").rstrip("/")
             model_name = get_setting("ollama_model", "llama3")
             full_prompt = f"{system_prompt}\n\n{prompt}"
+            _mark_sdk_started(_usage_token_ctx.get(None))
             async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(
                     f"{ollama_url}/api/generate",
@@ -2485,6 +2425,7 @@ IMPORTANT:
             target_lang_code = lang_obj.deepl_code if lang_obj else target_language.upper()[:2]
             url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
             texts = [it["target"] for it in rescue_items]
+            _mark_sdk_started(_usage_token_ctx.get(None))
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
                     url,

@@ -120,6 +120,13 @@ async def api_delete_job(job_id: int) -> Dict[str, Any]:
 
 @router.delete("/jobs")
 async def api_clear_jobs() -> Dict[str, Any]:
+    from app.services.pipeline import pipeline
+    # Cancel all active asyncio tasks BEFORE clearing DB.
+    # If we cleared DB first, running tasks could attempt to publish results
+    # to non-existent job rows (FK violation) or create orphaned usage rows.
+    active_job_ids = list(pipeline._active_tasks.keys())
+    for job_id in active_job_ids:
+        pipeline.cancel_job(job_id)
     clear_all_jobs()
     return {"status": "cleared"}
 
