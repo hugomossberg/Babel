@@ -496,7 +496,7 @@ async def test_16_downstream_fast_final_rescue_still_works(mock_db_settings, tmp
         # Micro repair also echoes
         return [{"id": it["id"], "text": it["target"]} for it in items]
 
-    async def mock_classify(items, lang, title):
+    async def mock_classify(items, lang, title, **kwargs):
         return [{"id": item["id"], "action": "translate", "reason": "none", "text": ""} for item in items]
 
     async def mock_fast_final_rescue(items, target_language, show_title="", **kwargs):

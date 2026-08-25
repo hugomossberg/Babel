@@ -5,6 +5,22 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
+# ---------------------------------------------------------------------------
+# Defer reason constants (centralised — used by quota.py, pipeline.py, tests)
+# ---------------------------------------------------------------------------
+
+class DeferReason:
+    LOCAL_RPD                 = "LOCAL_RPD"
+    PROVIDER_QUOTA            = "PROVIDER_QUOTA"
+    QUEUE_BACKLOG             = "QUEUE_BACKLOG"
+    INSUFFICIENT_LOCAL_BUDGET = "INSUFFICIENT_LOCAL_BUDGET"
+    ESCALATION_LOCAL_RPD      = "ESCALATION_LOCAL_RPD"
+    ESCALATION_PROVIDER_QUOTA = "ESCALATION_PROVIDER_QUOTA"
+
+class DeferStage:
+    PRIMARY    = "PRIMARY"
+    ESCALATION = "ESCALATION"
+
 logger = logging.getLogger(__name__)
 
 DB_PATH = os.getenv("BABEL_DB_PATH", "/app/data/babel.db")
@@ -51,7 +67,19 @@ def init_db():
             updated_at TEXT NOT NULL,
             retry_count INTEGER DEFAULT 0,
             next_retry_at TEXT,
-            last_error TEXT
+            last_error TEXT,
+            -- Provider/model pinning (set on first real AI dispatch, immutable after)
+            primary_provider        TEXT,
+            primary_model           TEXT,
+            escalation_enabled      INTEGER DEFAULT 0,
+            escalation_provider     TEXT,
+            escalation_model        TEXT,
+            -- Deferred metadata
+            defer_reason            TEXT,
+            waiting_provider        TEXT,
+            waiting_model           TEXT,
+            defer_stage             TEXT,
+            deferred_at             TEXT
         )
         """)
 
@@ -109,6 +137,44 @@ def init_db():
             PRIMARY KEY (provider, window_date)
         )
         """)
+        # ---------------------------------------------------------------
+        # Add columns if not existing yet on old database files.
+        # IMPORTANT: This must run BEFORE the UPDATE statements below
+        # that reference these columns (e.g. error_message).
+        # ---------------------------------------------------------------
+        for _col, _col_type in [
+            ("reason",             "TEXT"),
+            ("target_languages",   "TEXT"),
+            ("ai_model",           "TEXT"),
+            ("total_lines",        "INTEGER DEFAULT 0"),
+            ("cleaned_sdh_lines",  "INTEGER DEFAULT 0"),
+            ("dropped_lines",      "INTEGER DEFAULT 0"),
+            ("sync_diff_ms",       "INTEGER DEFAULT 0"),
+            ("output_files",       "TEXT"),
+            ("error_message",      "TEXT"),
+            ("duration_seconds",   "REAL DEFAULT 0.0"),
+            ("processed_lines",    "INTEGER DEFAULT 0"),
+            ("current_batch",      "TEXT"),
+            ("retry_count",        "INTEGER DEFAULT 0"),
+            ("next_retry_at",      "TEXT"),
+            ("last_error",         "TEXT"),
+            # Provider pinning (Phase 1)
+            ("primary_provider",   "TEXT"),
+            ("primary_model",      "TEXT"),
+            ("escalation_enabled", "INTEGER DEFAULT 0"),
+            ("escalation_provider","TEXT"),
+            ("escalation_model",   "TEXT"),
+            # Deferred metadata (Phase 1)
+            ("defer_reason",       "TEXT"),
+            ("waiting_provider",   "TEXT"),
+            ("waiting_model",      "TEXT"),
+            ("defer_stage",        "TEXT"),
+            ("deferred_at",        "TEXT"),
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE jobs ADD COLUMN {_col} {_col_type}")
+            except Exception:
+                pass
 
         # Reset stuck jobs on restart
         cursor.execute("""
@@ -127,19 +193,6 @@ def init_db():
         # be picked up by the scheduler automatically after the quota resets.
         # No state change needed for DEFERRED on restart.
 
-        # Add columns if not existing yet on old database files
-        try:
-            cursor.execute("ALTER TABLE jobs ADD COLUMN retry_count INTEGER DEFAULT 0")
-        except Exception:
-            pass
-        try:
-            cursor.execute("ALTER TABLE jobs ADD COLUMN next_retry_at TEXT")
-        except Exception:
-            pass
-        try:
-            cursor.execute("ALTER TABLE jobs ADD COLUMN last_error TEXT")
-        except Exception:
-            pass
 
         # Check if notify_jellyfin already exists BEFORE defaults are inserted
         has_notify_jellyfin = cursor.execute("SELECT 1 FROM settings WHERE key = 'notify_jellyfin'").fetchone() is not None
@@ -182,6 +235,13 @@ def init_db():
             cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
         conn.commit()
+
+    # Phase 2: Initialize AI usage ledger schema (idempotent, separate connection)
+    try:
+        from app.core.usage import init_usage_schema
+        init_usage_schema()
+    except Exception as _usage_err:
+        logger.warning("Could not initialize usage ledger schema: %s", _usage_err)
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -478,3 +538,174 @@ def recover_stale_queued_jobs():
     ''', (now_iso, now_iso, threshold_iso))
     conn.commit()
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: Provider/Model Pinning
+# ---------------------------------------------------------------------------
+
+def pin_job_provider(
+    job_id: int,
+    primary_provider: str,
+    primary_model: str,
+    escalation_enabled: bool = False,
+    escalation_provider: Optional[str] = None,
+    escalation_model: Optional[str] = None,
+) -> None:
+    """
+    Persist the effective AI config for a job on first real dispatch.
+    Once pinned, provider is immutable — global setting changes do not affect this job.
+    Only writes if primary_provider is not already set (idempotent).
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        # Only pin if not already pinned
+        row = cursor.execute(
+            "SELECT primary_provider FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        if row and row[0]:
+            return  # Already pinned — do not overwrite
+        now = datetime.now(timezone.utc).isoformat()
+        cursor.execute("""
+            UPDATE jobs
+            SET primary_provider    = ?,
+                primary_model       = ?,
+                escalation_enabled  = ?,
+                escalation_provider = ?,
+                escalation_model    = ?,
+                updated_at          = ?
+            WHERE id = ?
+        """, (
+            primary_provider,
+            primary_model,
+            1 if escalation_enabled else 0,
+            escalation_provider,
+            escalation_model,
+            now,
+            job_id,
+        ))
+        conn.commit()
+
+
+def update_deferred_metadata(
+    job_id: int,
+    defer_reason: str,
+    waiting_provider: str,
+    waiting_model: Optional[str],
+    defer_stage: str = "PRIMARY",
+) -> None:
+    """
+    Persist structured deferred metadata for a job.
+    Called whenever a job transitions to DEFERRED status.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE jobs
+            SET defer_reason     = ?,
+                waiting_provider = ?,
+                waiting_model    = ?,
+                defer_stage      = ?,
+                deferred_at      = ?,
+                updated_at       = ?
+            WHERE id = ?
+        """, (defer_reason, waiting_provider, waiting_model, defer_stage, now, now, job_id))
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: FIFO per provider + atomic claim
+# ---------------------------------------------------------------------------
+
+def get_eligible_deferred_jobs_for_provider(
+    provider: str,
+    stage: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Return DEFERRED jobs that are waiting for *provider*, ordered FIFO.
+    Ordering: deferred_at ASC (oldest first), then id ASC as tie-break.
+    If deferred_at is NULL (legacy), falls back to created_at.
+    stage: if set, filter by defer_stage (e.g. 'PRIMARY' or 'ESCALATION').
+    """
+    p = (provider or "").strip().lower()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        if stage:
+            rows = cursor.execute("""
+                SELECT * FROM jobs
+                WHERE status = 'DEFERRED'
+                  AND lower(coalesce(waiting_provider, primary_provider, '')) = ?
+                  AND defer_stage = ?
+                ORDER BY coalesce(deferred_at, created_at) ASC, id ASC
+            """, (p, stage)).fetchall()
+        else:
+            rows = cursor.execute("""
+                SELECT * FROM jobs
+                WHERE status = 'DEFERRED'
+                  AND lower(coalesce(waiting_provider, primary_provider, '')) = ?
+                ORDER BY coalesce(deferred_at, created_at) ASC, id ASC
+            """, (p,)).fetchall()
+        results = []
+        for r in rows:
+            d = dict(r)
+            if d.get("logs"):
+                try: d["logs"] = json.loads(d["logs"])
+                except Exception: d["logs"] = []
+            else:
+                d["logs"] = []
+            results.append(d)
+        return results
+
+
+def claim_fifo_job_for_retry(job_id: int) -> bool:
+    """
+    Atomically claim a DEFERRED job for retry using an EXCLUSIVE transaction.
+    Returns True iff the job was successfully transitioned from DEFERRED -> QUEUED.
+    Race-safe: only one winner for each job_id.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=15.0)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("BEGIN EXCLUSIVE")
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE jobs SET status = 'QUEUED', updated_at = ? "
+                "WHERE id = ? AND status = 'DEFERRED'",
+                (datetime.now(timezone.utc).isoformat(), job_id),
+            )
+            claimed = cursor.rowcount > 0
+            conn.execute("COMMIT")
+            return claimed
+        except Exception:
+            try: conn.execute("ROLLBACK")
+            except Exception: pass
+            raise
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.error("claim_fifo_job_for_retry error for job %s: %s", job_id, exc)
+        return False
+
+
+def has_older_eligible_deferred_backlog(
+    provider: str,
+    newer_than_created_at: str,
+) -> bool:
+    """
+    Return True if there is any DEFERRED job for *provider* that is older than
+    newer_than_created_at. Used to enforce FIFO: a new job must not cut the queue.
+    """
+    p = (provider or "").strip().lower()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        row = cursor.execute("""
+            SELECT 1 FROM jobs
+            WHERE status = 'DEFERRED'
+              AND lower(coalesce(waiting_provider, primary_provider, '')) = ?
+              AND coalesce(deferred_at, created_at) < ?
+            LIMIT 1
+        """, (p, newer_than_created_at)).fetchone()
+        return row is not None

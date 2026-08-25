@@ -1198,14 +1198,103 @@ class SubtitlePipeline:
             ai_provider = get_setting("ai_provider", "gemini").lower()
             if ai_provider == "openai":
                 active_engine_name = f"OpenAI ({get_setting('openai_model', 'gpt-4o-mini')})"
+                active_model_name   = get_setting("openai_model", "gpt-4o-mini")
             elif ai_provider == "deepl":
-                active_engine_name = "DeepL Translate"
+                active_engine_name  = "DeepL Translate"
+                active_model_name   = "deepl"
             elif ai_provider in ["ollama", "localai"]:
-                active_engine_name = f"Ollama ({get_setting('ollama_model', 'llama3')})"
+                active_engine_name  = f"Ollama ({get_setting('ollama_model', 'llama3')})"
+                active_model_name   = get_setting("ollama_model", "llama3")
             else:
-                active_engine_name = f"Gemini ({get_setting('gemini_model', 'gemini-3.5-flash-lite')})"
+                active_engine_name  = f"Gemini ({get_setting('gemini_model', 'gemini-3.5-flash-lite')})"
+                active_model_name   = get_setting("gemini_model", "gemini-3.5-flash-lite")
+
+            # ------------------------------------------------------------------
+            # Phase 1: Provider/Model Pinning
+            # Lock in the effective provider config for this job on first dispatch.
+            # Subsequent retries/resumes will use the pinned values.
+            # ------------------------------------------------------------------
+            esc_enabled  = get_setting("escalate_to_pro", "false").lower() == "true"
+            esc_provider = get_setting("escalation_provider", "none").lower()
+            esc_model    = get_setting("escalation_model", "")
+            from app.core.db import pin_job_provider
+            pin_job_provider(
+                job_id,
+                primary_provider    = ai_provider,
+                primary_model       = active_model_name,
+                escalation_enabled  = esc_enabled and esc_provider != "none" and bool(esc_model),
+                escalation_provider = esc_provider if (esc_enabled and esc_provider != "none") else None,
+                escalation_model    = esc_model    if (esc_enabled and esc_provider != "none") else None,
+            )
+
+            # ------------------------------------------------------------------
+            # Phase 1: Minimum Budget Admission (new primary jobs only)
+            # Only run for fresh/new jobs — do NOT gate resumed/partial jobs.
+            # ------------------------------------------------------------------
+            from app.core.quota import check_minimum_budget_admission
+            from app.core.db import update_deferred_metadata, DeferReason, DeferStage
+
+            job_snapshot = None
+            try:
+                from app.core.db import get_job_by_id
+                job_snapshot = get_job_by_id(job_id)
+            except Exception:
+                pass
+
+            is_resumed_job = (
+                event_source == "RETRY"
+                or (job_snapshot and job_snapshot.get("retry_count", 0) > 0)
+                or (job_snapshot and job_snapshot.get("processed_lines", 0) > 0)
+            )
+
+            if not is_resumed_job:
+                admission = check_minimum_budget_admission(
+                    provider   = ai_provider,
+                    num_cues   = total_source_lines,
+                    batch_size = batch_size,
+                )
+                if not admission["admitted"]:
+                    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                    now_utc     = _dt.now(_tz.utc)
+                    next_retry  = (now_utc + _td(days=1)).replace(
+                        hour=0, minute=0, second=0, microsecond=0
+                    ).isoformat()
+                    admit_msg = (
+                        f"DEFERRED: Insufficient local RPD budget for '{ai_provider}' "
+                        f"to start translation. "
+                        f"Estimated minimum requests: {admission['estimated_minimum']} "
+                        f"(ceil({total_source_lines}/{batch_size})). "
+                        f"Available: {admission['available']}. "
+                        f"Increase daily budget or wait for reset."
+                    )
+                    append_job_log(job_id, admit_msg)
+                    update_job(
+                        job_id,
+                        status        = "DEFERRED",
+                        error_message = admit_msg,
+                        next_retry_at = next_retry,
+                        last_error    = f"INSUFFICIENT_LOCAL_BUDGET: need {admission['estimated_minimum']}, have {admission['available']}",
+                    )
+                    update_deferred_metadata(
+                        job_id,
+                        defer_reason     = DeferReason.INSUFFICIENT_LOCAL_BUDGET,
+                        waiting_provider = ai_provider,
+                        waiting_model    = active_model_name,
+                        defer_stage      = DeferStage.PRIMARY,
+                    )
+                    if os.path.exists(temp_extracted_srt):
+                        try: os.remove(temp_extracted_srt)
+                        except Exception: pass
+                    return {
+                        "status": "deferred",
+                        "error": "INSUFFICIENT_LOCAL_BUDGET",
+                        "job_id": job_id,
+                        "estimated_minimum": admission["estimated_minimum"],
+                        "available": admission["available"],
+                    }
 
             update_job(job_id, total_lines=total_source_lines, processed_lines=0, current_batch="Starting...")
+
             output_files = []
             successful_langs = []
             skipped_langs = []
@@ -1370,11 +1459,13 @@ class SubtitlePipeline:
                                                     chunk_res = await self.translator.classify_and_recover_identical(
                                                         chunk, lang_name, effective_tm_key or title or "",
                                                         source_subs=subs,
-                                                        translated_subs=translated_subs
+                                                        translated_subs=translated_subs,
+                                                        job_id=job_id
                                                     )
                                                 except TypeError:
                                                     chunk_res = await self.translator.classify_and_recover_identical(
-                                                        chunk, lang_name, effective_tm_key or title or ""
+                                                        chunk, lang_name, effective_tm_key or title or "",
+                                                        job_id=job_id
                                                     )
                                                 recovery_results.extend(chunk_res)
                                             except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
@@ -1430,7 +1521,7 @@ class SubtitlePipeline:
                                             chunk = recovery_payload[i:i + chunk_size]
                                             try:
                                                 chunk_res = await self.translator.translate_batch(
-                                                    chunk, target_language=lang_name, show_title=effective_tm_key or title or ""
+                                                    chunk, target_language=lang_name, show_title=effective_tm_key or title or "", job_id=job_id
                                                 )
                                                 recovery_results.extend(chunk_res)
                                             except (ProviderUnavailableError, ProviderConfigurationError):
@@ -1468,7 +1559,7 @@ class SubtitlePipeline:
                                 batch_payload = [{"id": idx, "text": subs[idx].content} for idx in all_unresolved]
 
                                 try:
-                                    targeted_results = await self.translator.translate_batch(batch_payload, target_language=lang_name, show_title=effective_tm_key or title or "")
+                                    targeted_results = await self.translator.translate_batch(batch_payload, target_language=lang_name, show_title=effective_tm_key or title or "", job_id=job_id)
                                     targeted_success = 0
                                     for r in targeted_results:
                                         idx = r.get("id")
@@ -1974,6 +2065,23 @@ class SubtitlePipeline:
                 next_retry_at=next_retry_at,
                 last_error=str(e),
             )
+            # Phase 1: Persist structured deferred metadata for FIFO scheduling
+            try:
+                from app.core.db import update_deferred_metadata, DeferReason, DeferStage, get_job_by_id as _gjbi
+                _snap = _gjbi(job_id)
+                _stage = DeferStage.ESCALATION if (
+                    _snap and (_snap.get("defer_stage") == DeferStage.ESCALATION
+                               or _snap.get("processed_lines", 0) > 0)
+                ) else DeferStage.PRIMARY
+                update_deferred_metadata(
+                    job_id,
+                    defer_reason     = DeferReason.PROVIDER_QUOTA,
+                    waiting_provider = e.provider.lower(),
+                    waiting_model    = None,
+                    defer_stage      = _stage,
+                )
+            except Exception:
+                pass
             return {"status": "deferred", "error": str(e), "job_id": job_id}
 
         except RequestBudgetExhaustedError as e:
@@ -2004,6 +2112,23 @@ class SubtitlePipeline:
                 next_retry_at=next_retry_at,
                 last_error=str(e),
             )
+            # Phase 1: Persist structured deferred metadata for FIFO scheduling
+            try:
+                from app.core.db import update_deferred_metadata, DeferReason, DeferStage, get_job_by_id as _gjbi2
+                _snap2 = _gjbi2(job_id)
+                _pinned_prov = (
+                    (_snap2.get("primary_provider") or e.provider) if _snap2 else e.provider
+                ).lower()
+                _pinned_model = (_snap2.get("primary_model") or "") if _snap2 else ""
+                update_deferred_metadata(
+                    job_id,
+                    defer_reason     = DeferReason.LOCAL_RPD,
+                    waiting_provider = _pinned_prov,
+                    waiting_model    = _pinned_model or None,
+                    defer_stage      = DeferStage.PRIMARY,
+                )
+            except Exception:
+                pass
             return {"status": "deferred", "error": str(e), "job_id": job_id}
 
         except ProviderConfigurationError as e:

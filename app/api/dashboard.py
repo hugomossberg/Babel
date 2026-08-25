@@ -10,7 +10,7 @@ from google import genai
 
 from app.core.db import (
     get_jobs, get_job_by_id, get_job_stats, delete_job, clear_all_jobs,
-    get_setting, set_setting, get_positive_int_setting
+    get_setting, set_setting, get_positive_int_setting, get_jobs_by_status
 )
 from app.core.security import mask_secret, is_masked_secret, resolve_secret_key
 from app.services.docker_controller import docker_controller
@@ -100,6 +100,16 @@ async def api_job_detail(job_id: int) -> Dict[str, Any]:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+@router.get("/queue/deferred")
+@router.get("/queue")
+async def api_get_deferred_queue() -> List[Dict[str, Any]]:
+    """Return all DEFERRED jobs in FIFO order."""
+    deferred_jobs = get_jobs_by_status(["DEFERRED"])
+    deferred_jobs.sort(
+        key=lambda j: (j.get("deferred_at") or j.get("created_at") or "", j.get("id") or 0)
+    )
+    return deferred_jobs
 
 @router.delete("/jobs/{job_id}")
 async def api_delete_job(job_id: int) -> Dict[str, Any]:

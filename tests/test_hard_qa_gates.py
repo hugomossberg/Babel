@@ -48,8 +48,7 @@ def test_adversarial_keep():
     res2 = validate_classifier_output(raw2, items2)
     assert res2[0]["text"] == ""
 
-def test_675_valid_cues():
-    import os
+def test_675_valid_cues(tmp_path):
     source = [srt.Subtitle(index=i, start=timedelta(seconds=i), end=timedelta(seconds=i+1), content=f"Line {i}") for i in range(1, 676)]
     target = [srt.Subtitle(index=i, start=timedelta(seconds=i), end=timedelta(seconds=i+1), content=f"Rad {i}") for i in range(1, 676)]
     
@@ -59,13 +58,11 @@ def test_675_valid_cues():
     
     from app.core.cleaner import subs_to_srt_string
     text = subs_to_srt_string(target)
-    with open("test_675.srt", "w") as f:
-        f.write(text)
+    temp_srt = tmp_path / "test_675.srt"
+    temp_srt.write_text(text, encoding="utf-8")
         
-    with open("test_675.srt", "r") as f:
-        parsed = list(srt.parse(f.read()))
+    parsed = list(srt.parse(temp_srt.read_text(encoding="utf-8")))
     assert len(parsed) == 675
-    os.remove("test_675.srt")
 
 @pytest.mark.asyncio
 async def test_retry_pending_timestamp():

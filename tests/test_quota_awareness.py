@@ -1103,3 +1103,198 @@ class TestErrorClassification:
 
         job = get_job_by_id(job_id)
         assert job["status"] == "QUEUED"
+
+
+# ===========================================================================
+# Local Daily Request Budget / DEFERRED-resume regression tests (A-F)
+# ===========================================================================
+
+class TestLocalBudgetDeferredResume:
+    """
+    Verify dynamic budget awareness for DEFERRED jobs:
+    A: budget=1, used=1 -> DEFERRED job does not retry while budget is 1.
+    B: budget changed 1 -> 2, used=1 -> job becomes retry-eligible immediately.
+    C: budget changed 1 -> 0 (Unlimited) -> job becomes retry-eligible immediately.
+    D: external circuit breaker BLOCKED + local budget raised -> job stays deferred.
+    E: retry consumes next budget slot (used goes 1 -> 2), zero dummy calls.
+    F: budget reaches 2/2 -> job defers again correctly until reset/budget change.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_job_does_not_retry_while_budget_exhausted(self, isolated_db):
+        from app.core.db import create_job, update_job, get_job_by_id, set_setting
+        from app.core.quota import try_consume_request_budget, should_retry_deferred_job
+        from app.main import process_one_retry_pass
+
+        set_setting("daily_request_budget_gemini", "1")
+        set_setting("ai_provider", "gemini")
+
+        # Consume the 1 budget slot
+        assert try_consume_request_budget("gemini") is True
+
+        # Job deferred until midnight
+        job_id = create_job("test_a.mkv", "MANUAL")
+        midnight = (datetime.now(timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        update_job(
+            job_id,
+            status="DEFERRED",
+            error_message=f"Daily request budget reached (1/1). Deferred until {midnight.isoformat()}.",
+            next_retry_at=midnight.isoformat(),
+            last_error="RequestBudgetExhaustedError: Daily request budget reached for 'gemini' (1/1 requests used today)"
+        )
+
+        job = get_job_by_id(job_id)
+        now = datetime.now(timezone.utc)
+        assert should_retry_deferred_job(job, now) is False
+
+        tasks = [t async for t in process_one_retry_pass()]
+        assert len(tasks) == 0
+
+        job_after = get_job_by_id(job_id)
+        assert job_after["status"] == "DEFERRED"
+
+    @pytest.mark.asyncio
+    async def test_b_job_retries_immediately_when_budget_increased(self, isolated_db):
+        from app.core.db import create_job, update_job, get_job_by_id, set_setting
+        from app.core.quota import try_consume_request_budget, should_retry_deferred_job
+        from app.main import process_one_retry_pass
+
+        set_setting("daily_request_budget_gemini", "1")
+        set_setting("ai_provider", "gemini")
+
+        # Consume 1 slot
+        assert try_consume_request_budget("gemini") is True
+
+        job_id = create_job("test_b.mkv", "MANUAL")
+        midnight = (datetime.now(timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        update_job(
+            job_id,
+            status="DEFERRED",
+            error_message=f"Daily request budget reached (1/1). Deferred until {midnight.isoformat()}.",
+            next_retry_at=midnight.isoformat(),
+            last_error="RequestBudgetExhaustedError: Daily request budget reached for 'gemini' (1/1 requests used today)"
+        )
+
+        # User increases budget from 1 to 2
+        set_setting("daily_request_budget_gemini", "2")
+
+        job = get_job_by_id(job_id)
+        now = datetime.now(timezone.utc)
+        assert should_retry_deferred_job(job, now) is True
+
+        with patch("app.main.pipeline.process_video_file", new_callable=AsyncMock) as mock_pipeline:
+            tasks = [t async for t in process_one_retry_pass()]
+            assert len(tasks) == 1
+            await asyncio.gather(*tasks)
+
+        job_after = get_job_by_id(job_id)
+        assert job_after["status"] == "QUEUED"
+        mock_pipeline.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_c_job_retries_immediately_when_budget_set_unlimited(self, isolated_db):
+        from app.core.db import create_job, update_job, get_job_by_id, set_setting
+        from app.core.quota import try_consume_request_budget, should_retry_deferred_job
+        from app.main import process_one_retry_pass
+
+        set_setting("daily_request_budget_gemini", "1")
+        set_setting("ai_provider", "gemini")
+
+        # Consume 1 slot
+        assert try_consume_request_budget("gemini") is True
+
+        job_id = create_job("test_c.mkv", "MANUAL")
+        midnight = (datetime.now(timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        update_job(
+            job_id,
+            status="DEFERRED",
+            error_message=f"Daily request budget reached (1/1). Deferred until {midnight.isoformat()}.",
+            next_retry_at=midnight.isoformat(),
+            last_error="RequestBudgetExhaustedError: Daily request budget reached for 'gemini' (1/1 requests used today)"
+        )
+
+        # User sets budget to Unlimited (0)
+        set_setting("daily_request_budget_gemini", "0")
+
+        job = get_job_by_id(job_id)
+        now = datetime.now(timezone.utc)
+        assert should_retry_deferred_job(job, now) is True
+
+        with patch("app.main.pipeline.process_video_file", new_callable=AsyncMock) as mock_pipeline:
+            tasks = [t async for t in process_one_retry_pass()]
+            assert len(tasks) == 1
+            await asyncio.gather(*tasks)
+
+        job_after = get_job_by_id(job_id)
+        assert job_after["status"] == "QUEUED"
+
+    @pytest.mark.asyncio
+    async def test_d_external_circuit_breaker_blocks_despite_budget_increase(self, isolated_db):
+        from app.core.db import create_job, update_job, get_job_by_id, set_setting
+        from app.core.quota import record_provider_quota_exhausted, should_retry_deferred_job
+        from app.main import process_one_retry_pass
+
+        set_setting("daily_request_budget_gemini", "1")
+        set_setting("ai_provider", "gemini")
+
+        # External provider is BLOCKED by circuit breaker
+        now = datetime(2026, 8, 24, 12, 0, 0, tzinfo=timezone.utc)
+        with patch("app.core.quota._utcnow", return_value=now):
+            record_provider_quota_exhausted("gemini", "Gemini 429 Daily Limit", retry_after_seconds=3600)
+
+        job_id = create_job("test_d.mkv", "MANUAL")
+        update_job(
+            job_id,
+            status="DEFERRED",
+            error_message="Daily provider quota reached for 'gemini'. next probe scheduled.",
+            next_retry_at=(now + timedelta(seconds=3600)).isoformat(),
+            last_error="ProviderDailyQuotaExhaustedError: Daily quota exhausted for provider 'gemini'"
+        )
+
+        # User increases local budget to 10
+        set_setting("daily_request_budget_gemini", "10")
+
+        # Must still NOT retry because external provider is blocked
+        with patch("app.core.quota._utcnow", return_value=now):
+            job = get_job_by_id(job_id)
+            assert should_retry_deferred_job(job, now) is False
+
+            tasks = [t async for t in process_one_retry_pass()]
+            assert len(tasks) == 0
+
+        job_after = get_job_by_id(job_id)
+        assert job_after["status"] == "DEFERRED"
+
+    def test_e_retry_consumes_next_budget_slot_exactly_once(self, isolated_db):
+        from app.core.db import set_setting
+        from app.core.quota import try_consume_request_budget, get_daily_requests_used, acquire_dispatch_slot
+
+        set_setting("daily_request_budget_gemini", "2")
+        set_setting("ai_provider", "gemini")
+
+        # Used = 1
+        assert try_consume_request_budget("gemini") is True
+        assert get_daily_requests_used("gemini") == 1
+
+        # Next real request acquires slot
+        allowed, info = acquire_dispatch_slot("gemini")
+        assert allowed is True
+        assert info["state"] == "ACTIVE"
+        assert get_daily_requests_used("gemini") == 2
+
+    def test_f_reaches_budget_and_defers_again(self, isolated_db):
+        from app.core.db import set_setting
+        from app.core.quota import try_consume_request_budget, get_daily_requests_used, acquire_dispatch_slot
+
+        set_setting("daily_request_budget_gemini", "2")
+        set_setting("ai_provider", "gemini")
+
+        # Consume 2 slots
+        assert try_consume_request_budget("gemini") is True
+        assert try_consume_request_budget("gemini") is True
+        assert get_daily_requests_used("gemini") == 2
+
+        # 3rd request fails budget check
+        allowed, info = acquire_dispatch_slot("gemini")
+        assert allowed is False
+        assert info["reason"] == "REQUEST_BUDGET_EXHAUSTED"

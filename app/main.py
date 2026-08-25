@@ -5,7 +5,9 @@ import base64
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import app.core.db as db_core
 from app.core.db import get_jobs_by_status
+from app.core.quota import should_retry_deferred_job
 from app.services.pipeline import pipeline
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse
@@ -16,6 +18,7 @@ from app.config import APP_NAME, VERSION, AUTH_USERNAME, AUTH_PASSWORD
 from app.core.db import init_db
 from app.api.webhooks import router as webhooks_router
 from app.api.dashboard import router as dashboard_router
+from app.api.usage import router as usage_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -85,6 +88,7 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 app.include_router(webhooks_router)
 app.include_router(dashboard_router, prefix="/api")
+app.include_router(usage_router, prefix="/api")
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
@@ -109,47 +113,83 @@ async def process_one_retry_pass():
     if updates_controller.is_locked_for_update():
         return
 
-    from app.core.db import claim_job_for_retry
-    from app.core.quota import is_provider_blocked
-    from app.core.db import get_setting
     try:
-        jobs = get_jobs_by_status(["WAITING_PROVIDER", "RETRY_PENDING", "RECOVERING", "PARTIAL", "WAITING_SOURCE", "DEFERRED"])
-        for job in jobs:
+        now = datetime.now(timezone.utc)
+
+        # ------------------------------------------------------------------
+        # Phase 1: FIFO DEFERRED resume per provider
+        # ------------------------------------------------------------------
+        # Collect all DEFERRED jobs, group by pinned provider, order FIFO.
+        # Oldest eligible job per provider is processed first.
+        # Provider backlogs are independent — OpenAI backlog ≠ Gemini backlog.
+        # ------------------------------------------------------------------
+        deferred_jobs = get_jobs_by_status(["DEFERRED"])
+
+        # Group by resolved provider, maintain FIFO order
+        from collections import defaultdict
+        provider_queues: dict = defaultdict(list)
+        for job in sorted(
+            deferred_jobs,
+            key=lambda j: (j.get("deferred_at") or j.get("created_at") or "", j.get("id") or 0)
+        ):
+            if should_retry_deferred_job(job, now):
+                p = (
+                    job.get("waiting_provider")
+                    or job.get("primary_provider")
+                    or "unknown"
+                ).strip().lower()
+                provider_queues[p].append(job)
+
+        # Yield one eligible job per provider, oldest first
+        for _provider, eligible in provider_queues.items():
+            for job in eligible:
+                if db_core.claim_fifo_job_for_retry(job["id"]):
+                    logging.info(
+                        f"FIFO resume: job {job['id']} (provider={_provider}, "
+                        f"defer_reason={job.get('defer_reason')}, "
+                        f"stage={job.get('defer_stage')}, was DEFERRED)"
+                    )
+                    yield asyncio.create_task(pipeline.process_video_file(
+                        job.get("video_path", ""),
+                        event_source="RETRY",
+                        title=job.get("title", ""),
+                        job_id=job["id"]
+                    ))
+                    break  # One claim per provider per pass — respect FIFO
+
+        # ------------------------------------------------------------------
+        # Phase 2: Non-DEFERRED retry states (RETRY_PENDING, RECOVERING, etc.)
+        # ------------------------------------------------------------------
+        other_jobs = get_jobs_by_status([
+            "WAITING_PROVIDER", "RETRY_PENDING", "RECOVERING", "PARTIAL", "WAITING_SOURCE"
+        ])
+        for job in other_jobs:
             try:
                 should_retry = False
-                now = datetime.now(timezone.utc)
-                if job["status"] in ["RETRY_PENDING", "WAITING_PROVIDER", "RECOVERING", "PARTIAL", "WAITING_SOURCE", "DEFERRED"]:
-                    if job.get("next_retry_at"):
-                        next_retry_at = datetime.fromisoformat(job["next_retry_at"])
-                        if next_retry_at.tzinfo is None:
-                            next_retry_at = next_retry_at.replace(tzinfo=timezone.utc)
-                        if now >= next_retry_at:
-                            should_retry = True
-                    else:
-                        updated_at = datetime.fromisoformat(job["updated_at"])
-                        if updated_at.tzinfo is None:
-                            updated_at = updated_at.replace(tzinfo=timezone.utc)
-                        if (now - updated_at).total_seconds() > 300: # 5 min fallback
-                            should_retry = True
-
-                # For DEFERRED jobs: also check that the provider is no longer blocked
-                if should_retry and job["status"] == "DEFERRED":
-                    active_provider = get_setting("ai_provider", "gemini").lower()
-                    if is_provider_blocked(active_provider):
-                        # Provider still blocked — keep the job deferred, don't retry yet
-                        should_retry = False
+                if job.get("next_retry_at"):
+                    next_retry_at = datetime.fromisoformat(job["next_retry_at"])
+                    if next_retry_at.tzinfo is None:
+                        next_retry_at = next_retry_at.replace(tzinfo=timezone.utc)
+                    if now >= next_retry_at:
+                        should_retry = True
+                else:
+                    updated_at = datetime.fromisoformat(job["updated_at"])
+                    if updated_at.tzinfo is None:
+                        updated_at = updated_at.replace(tzinfo=timezone.utc)
+                    if (now - updated_at).total_seconds() > 300:  # 5 min fallback
+                        should_retry = True
 
                 if should_retry:
-                    if claim_job_for_retry(job["id"]):
-                        logging.info(f"Retrying job {job['id']} (was {job['status']})")
+                    if db_core.claim_job_for_retry(job["id"]):
+                        logging.info(f"Retrying job {job['id']} (was {job.get('status')})")
                         yield asyncio.create_task(pipeline.process_video_file(
-                            job["video_path"],
+                            job.get("video_path", ""),
                             event_source="RETRY",
-                            title=job["title"],
+                            title=job.get("title", ""),
                             job_id=job["id"]
                         ))
             except Exception as e:
-                logging.error(f"Error checking retry for job {job['id']}: {e}")
+                logging.error(f"Error checking retry for job {job.get('id')}: {e}")
     except Exception as e:
         logging.error(f"Error in retry loop: {e}")
 

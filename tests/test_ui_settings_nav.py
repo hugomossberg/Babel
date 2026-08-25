@@ -8,6 +8,8 @@ def test_settings_navigation_integrity():
     # The actual settings buttons should be exactly 7
     tabs = ["'ai'", "'modules'", "'languages'", "'folders'", "'integrations'", "'webhooks'", "'system'"]
 
+    assert html.count("@click=\"settingsTab = 'usage'\"") == 0, "Usage & Queue should NOT be a settings subtab"
+
     for tab in tabs:
         # Check that there is exactly one button with @click="settingsTab = <tab>"
         counts = html.count(f"@click=\"settingsTab = {tab}\"")

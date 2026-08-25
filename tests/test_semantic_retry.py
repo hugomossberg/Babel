@@ -198,7 +198,7 @@ async def test_targeted_recovery_rejects_normalized_echo(tmp_path, monkeypatch):
                 results.append({"id": idx, "text": f"Svensk rad {idx}"})
         return results
 
-    async def mock_classify(items, lang, title):
+    async def mock_classify(items, lang, title, **kwargs):
         # Classify all as translate
         return [{"id": item["id"], "action": "translate", "reason": "none", "text": ""} for item in items]
 
@@ -270,7 +270,7 @@ async def test_pipeline_escalation_defense_in_depth(tmp_path, monkeypatch):
                 results.append({"id": idx, "text": f"Svensk rad {idx}"})
         return results
 
-    async def mock_classify(items, lang, title):
+    async def mock_classify(items, lang, title, **kwargs):
         return [{"id": item["id"], "action": "translate", "reason": "none", "text": ""} for item in items]
 
     # Mock escalation to improperly return normalized echo

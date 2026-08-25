@@ -174,6 +174,9 @@
         <button @click="currentTab = 'media'; loadMediaFiles()" :class="currentTab === 'media' ? 'bg-purple-600/20 text-purple-300 border-purple-500/30' : 'text-slate-400 hover:text-white'" class="px-2 sm:px-3.5 py-1.5 rounded-lg border border-transparent text-sm font-medium transition flex items-center gap-2">
           <i class="fa-solid fa-film"></i> <span class="hidden sm:inline">Library</span>
         </button>
+        <button @click="currentTab = 'usage'; loadUsageData()" :class="currentTab === 'usage' ? 'bg-purple-600/20 text-purple-300 border-purple-500/30' : 'text-slate-400 hover:text-white'" class="px-2 sm:px-3.5 py-1.5 rounded-lg border border-transparent text-sm font-medium transition flex items-center gap-2">
+          <i class="fa-solid fa-chart-pie"></i> <span class="hidden sm:inline">Usage & Queue</span>
+        </button>
         <button @click="currentTab = 'settings'" :class="currentTab === 'settings' ? 'bg-purple-600/20 text-purple-300 border-purple-500/30' : 'text-slate-400 hover:text-white'" class="px-2 sm:px-3.5 py-1.5 rounded-lg border border-transparent text-sm font-medium transition flex items-center gap-2">
           <i class="fa-solid fa-sliders"></i> <span class="hidden sm:inline">Settings</span>
         </button>
@@ -248,8 +251,8 @@
             <button @click="unblockProvider(settingsData.ai.ai_provider)" class="text-xs px-3 py-1.5 bg-cyan-900/50 hover:bg-cyan-800/70 border border-cyan-700/60 rounded-lg text-cyan-200 transition flex items-center gap-1.5">
               <i class="fa-solid fa-lock-open"></i> Unblock
             </button>
-            <button @click="currentTab = 'settings'; settingsTab = 'ai'" class="text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-slate-300 transition">
-              View Budget
+            <button @click="currentTab = 'settings'; settingsTab = 'usage'; loadUsageData();" class="text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-slate-300 transition">
+              View Usage & Queue
             </button>
           </div>
         </div>
@@ -598,7 +601,304 @@
       </div>
     </section>
 
-    <!-- 3. SETTINGS TAB -->
+    <!-- 3. USAGE & QUEUE TAB -->
+    <section x-show="currentTab === 'usage'" x-cloak>
+      <div class="flex items-center justify-between mb-6">
+        <div>
+          <h2 class="text-2xl font-bold text-white flex items-center gap-3">
+            <i class="fa-solid fa-chart-pie text-purple-400"></i> AI Usage & Queue
+          </h2>
+          <p class="text-sm text-slate-400 mt-1">Monitor daily AI request limits, token accounting, estimated costs, and deferred translation queues.</p>
+        </div>
+        <button @click="loadUsageData(true)" :disabled="loadingUsage" class="text-xs px-3.5 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-60 text-slate-300 border border-slate-700 rounded-xl transition flex items-center gap-2 shadow-sm">
+          <i class="fa-solid fa-rotate" :class="loadingUsage ? 'fa-spin text-purple-400' : ''"></i>
+          <span x-text="loadingUsage ? 'Refreshing...' : 'Refresh'"></span>
+        </button>
+      </div>
+
+      <div class="space-y-6">
+
+        <!-- 1. Top Summary Cards (Active saved state) -->
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <!-- Card 1: Requests Today -->
+          <div class="p-5 bg-slate-900/60 border border-slate-800 rounded-2xl backdrop-blur space-y-1">
+            <div class="flex items-center justify-between text-slate-400">
+              <span class="text-xs font-semibold uppercase tracking-wider">Requests Today</span>
+              <i class="fa-solid fa-chart-line text-purple-400 text-sm"></i>
+            </div>
+            <div class="text-3xl font-bold font-mono text-slate-100" x-text="todayUsage.total ? (todayUsage.total.calls_today || 0) : (getActiveProviderQuota().requests_today || 0)"></div>
+            <div class="text-[10px] text-slate-500">UTC Day Window (00:00 reset)</div>
+          </div>
+
+          <!-- Card 2: Daily Request Limit -->
+          <div class="p-5 bg-slate-900/60 border border-slate-800 rounded-2xl backdrop-blur space-y-1">
+            <div class="flex items-center justify-between text-slate-400">
+              <span class="text-xs font-semibold uppercase tracking-wider">Daily Request Limit</span>
+              <i class="fa-solid fa-gauge-high text-indigo-400 text-sm"></i>
+            </div>
+            <div class="text-3xl font-bold font-mono" :class="getActiveProviderQuota().budget ? 'text-purple-300' : 'text-emerald-400'" x-text="getActiveProviderQuota().budget ? getActiveProviderQuota().budget + ' req/day' : 'Unlimited'"></div>
+            <div class="text-[10px] text-slate-500">
+              Active: <span class="uppercase font-mono font-semibold" x-text="settingsData.ai.ai_provider"></span>
+            </div>
+          </div>
+
+          <!-- Card 3: Remaining -->
+          <div class="p-5 bg-slate-900/60 border border-slate-800 rounded-2xl backdrop-blur space-y-1">
+            <div class="flex items-center justify-between text-slate-400">
+              <span class="text-xs font-semibold uppercase tracking-wider">Remaining</span>
+              <i class="fa-regular fa-clock text-cyan-400 text-sm"></i>
+            </div>
+            <div class="text-3xl font-bold font-mono" :class="getActiveProviderQuota().requests_remaining !== null ? (getActiveProviderQuota().requests_remaining <= 0 ? 'text-rose-400' : 'text-cyan-300') : 'text-emerald-400'" x-text="getActiveProviderQuota().requests_remaining !== null ? getActiveProviderQuota().requests_remaining : 'Unlimited'"></div>
+            <div class="text-[10px] text-slate-500" x-text="getActiveProviderQuota().requests_remaining !== null ? 'Before auto-deferral' : 'No daily throttle'"></div>
+          </div>
+
+          <!-- Card 4: Estimated Cost Today -->
+          <div class="p-5 bg-slate-900/60 border border-slate-800 rounded-2xl backdrop-blur space-y-1">
+            <div class="flex items-center justify-between text-slate-400">
+              <span class="text-xs font-semibold uppercase tracking-wider">Estimated Cost Today</span>
+              <i class="fa-solid fa-dollar-sign text-emerald-400 text-sm"></i>
+            </div>
+            <div class="text-3xl font-bold font-mono text-emerald-400" x-text="formatCost(todayUsage.total ? todayUsage.total.estimated_cost_today : null)"></div>
+            <div class="text-[10px] text-slate-500">Estimated Token Cost</div>
+          </div>
+        </div>
+
+        <!-- 2. Provider Quota & Circuit Breaker Status -->
+        <div class="p-5 bg-slate-900/60 border border-slate-800 rounded-2xl backdrop-blur space-y-3">
+          <div class="flex items-center justify-between flex-wrap gap-2">
+            <div class="flex items-center gap-2">
+              <i class="fa-solid fa-shield-halved text-purple-400"></i>
+              <span class="text-sm font-semibold text-slate-200">Provider Status</span>
+              <span class="text-xs uppercase font-mono px-2.5 py-0.5 rounded bg-slate-800 text-purple-300 font-bold" x-text="settingsData.ai.ai_provider"></span>
+            </div>
+            <div class="flex items-center gap-2">
+              <template x-if="getActiveProviderQuota().state === 'HALF_OPEN'">
+                <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-cyan-950 text-cyan-300 border border-cyan-700/60 animate-pulse">
+                  <i class="fa-solid fa-spinner animate-spin text-[10px]"></i> Probing Availability...
+                </span>
+              </template>
+              <template x-if="getActiveProviderQuota().state === 'BLOCKED' || getActiveProviderQuota().blocked">
+                <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-rose-950 text-rose-400 border border-rose-800/60 animate-pulse">
+                  <i class="fa-solid fa-ban text-[10px]"></i> Daily Quota Reached
+                </span>
+              </template>
+              <template x-if="getActiveProviderQuota().state === 'ACTIVE' && !getActiveProviderQuota().blocked">
+                <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800/60">
+                  <i class="fa-solid fa-circle-check text-[10px]"></i> Active (Normal)
+                </span>
+              </template>
+            </div>
+          </div>
+
+          <!-- Block details & Unblock button if blocked or probing -->
+          <template x-if="getActiveProviderQuota().blocked || getActiveProviderQuota().state === 'HALF_OPEN'">
+            <div class="p-3 bg-rose-950/40 border border-rose-900/50 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+              <div class="space-y-1">
+                <div class="font-semibold text-rose-300 flex items-center gap-1.5">
+                  <i class="fa-solid fa-triangle-exclamation"></i>
+                  <span x-text="getActiveProviderQuota().state === 'HALF_OPEN' ? 'Provider in HALF-OPEN state: single-flight probe active' : 'Provider quota exhausted: new jobs are DEFERRED and will resume automatically'"></span>
+                </div>
+                <div class="text-slate-300 text-[11px]" x-show="getActiveProviderQuota().blocked_until">
+                  <template x-if="getActiveProviderQuota().reset_type === 'exact'">
+                    <span class="inline-flex items-center gap-1">
+                      <span class="font-semibold text-emerald-400">Exact Reset Time (Provider reported):</span>
+                      <span class="text-slate-100 font-mono" x-text="getActiveProviderQuota().blocked_until"></span>
+                    </span>
+                  </template>
+                  <template x-if="getActiveProviderQuota().reset_type !== 'exact'">
+                    <span class="inline-flex items-center gap-1">
+                      <span class="font-semibold text-amber-400">Next Recheck:</span>
+                      <span class="text-slate-100 font-mono" x-text="getActiveProviderQuota().blocked_until"></span>
+                      <span class="text-slate-400">(Adaptive probe attempt <span x-text="getActiveProviderQuota().probe_attempt || 0"></span>)</span>
+                    </span>
+                  </template>
+                </div>
+                <div class="text-slate-400 text-[11px] truncate max-w-xl" x-show="getActiveProviderQuota().reason" :title="getActiveProviderQuota().reason" x-text="'Reason: ' + getActiveProviderQuota().reason"></div>
+              </div>
+              <button @click="unblockProvider(settingsData.ai.ai_provider)" class="px-3.5 py-1.5 bg-rose-900/60 hover:bg-rose-800 text-rose-200 border border-rose-700/60 rounded-lg font-medium transition text-xs flex items-center gap-1.5 self-start sm:self-auto shrink-0">
+                <i class="fa-solid fa-lock-open"></i> Unblock / Reset Quota
+              </button>
+            </div>
+          </template>
+        </div>
+
+        <!-- 3. Daily AI Request Limit Configuration Card -->
+        <div class="p-5 bg-slate-900/60 border border-slate-800 rounded-2xl backdrop-blur space-y-4">
+          <div>
+            <h4 class="font-bold text-sm text-white flex items-center gap-2">
+              <i class="fa-solid fa-sliders text-indigo-400"></i> Daily Request Limit
+            </h4>
+            <p class="text-xs text-slate-400 mt-1">
+              Optional safety limit for AI requests per day. Set to 0 for unlimited.
+            </p>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
+            <div>
+              <label class="block text-xs font-medium text-slate-400 mb-1.5">
+                Daily Limit for <span class="uppercase font-mono text-purple-300 font-semibold" x-text="settingsData.ai.ai_provider"></span> (Requests/Day)
+              </label>
+              <div class="relative">
+                <input type="number"
+                       x-model.number="settingsData.ai['daily_request_budget_' + settingsData.ai.ai_provider]"
+                       min="0"
+                       class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm font-mono">
+                <div class="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none"
+                     x-show="settingsData.ai['daily_request_budget_' + settingsData.ai.ai_provider] == 0">
+                  <span class="text-xs font-semibold text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded border border-emerald-400/20">Unlimited</span>
+                </div>
+              </div>
+              <span class="text-[11px] text-slate-500 mt-1 block">Set 0 for unlimited. Babel gracefully defers jobs when limit is reached.</span>
+            </div>
+
+            <div class="flex justify-end">
+              <button @click="saveAISettings()" class="px-5 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium shadow-lg shadow-purple-600/30 transition text-sm flex items-center gap-2">
+                <i class="fa-solid fa-floppy-disk text-xs"></i> Save Limit
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. Today's Provider Usage Breakdown & Smart Capacity -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+          <!-- Today's Usage Breakdown -->
+          <div class="bg-slate-900/60 border border-slate-800 rounded-2xl backdrop-blur p-5 space-y-4">
+            <div class="flex items-center justify-between">
+              <h4 class="text-sm font-bold text-white flex items-center gap-2">
+                <i class="fa-solid fa-chart-pie text-purple-400"></i> Today's Usage by Provider
+              </h4>
+              <span class="text-[11px] font-mono text-slate-500" x-text="todayUsage.date_utc ? todayUsage.date_utc + ' UTC' : ''"></span>
+            </div>
+
+            <template x-if="!todayUsage.providers || Object.keys(todayUsage.providers).length === 0">
+              <div class="p-6 text-center text-slate-500 text-xs">
+                <i class="fa-solid fa-inbox text-2xl mb-2 block text-slate-600"></i>
+                No AI requests made today.
+              </div>
+            </template>
+
+            <div class="space-y-2.5" x-show="todayUsage.providers && Object.keys(todayUsage.providers).length > 0">
+              <template x-for="(pData, pName) in todayUsage.providers" :key="pName">
+                <div class="p-3.5 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
+                  <div class="space-y-1">
+                    <div class="font-bold text-slate-100 capitalize text-sm" x-text="pName"></div>
+                    <div class="text-[11px] text-slate-400 font-mono flex items-center gap-2 flex-wrap">
+                      <span x-text="formatTokens(pData.input_tokens_today) + ' in'"></span>
+                      <span x-show="pData.cached_input_tokens_today > 0" class="text-purple-300" x-text="'(' + formatTokens(pData.cached_input_tokens_today) + ' cached)'"></span>
+                      <span>•</span>
+                      <span x-text="formatTokens(pData.output_tokens_today) + ' out'"></span>
+                    </div>
+                  </div>
+                  <div class="text-right space-y-1 font-mono">
+                    <div class="font-bold text-slate-200" x-text="pData.calls_today + (pData.calls_today === 1 ? ' call' : ' calls')"></div>
+                    <div class="text-xs text-emerald-400 font-semibold" x-text="formatCost(pData.estimated_cost_today)"></div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- Smart Capacity Estimate -->
+          <div class="bg-slate-900/60 border border-slate-800 rounded-2xl backdrop-blur p-5 space-y-4">
+            <div class="flex items-center justify-between">
+              <h4 class="text-sm font-bold text-white flex items-center gap-2">
+                <i class="fa-solid fa-calculator text-cyan-400"></i> Capacity Estimate
+              </h4>
+              <span class="text-[11px] text-slate-500">Based on historical averages</span>
+            </div>
+
+            <template x-if="!usageStats.has_sufficient_history">
+              <div class="p-6 text-center text-slate-500 text-xs space-y-1">
+                <i class="fa-solid fa-chart-simple text-2xl mb-2 block text-slate-600"></i>
+                <div class="font-semibold text-slate-400">Not enough history</div>
+                <div class="text-[11px] text-slate-500">
+                  Requires at least 3 completed AI translations to estimate capacity (currently <span class="font-mono text-purple-300" x-text="usageStats.completed_jobs_with_ai || 0"></span> completed).
+                </div>
+              </div>
+            </template>
+
+            <div class="space-y-3" x-show="usageStats.has_sufficient_history">
+              <div class="grid grid-cols-2 gap-3 text-xs">
+                <div class="p-3 bg-slate-950 rounded-xl border border-slate-800">
+                  <div class="text-[11px] text-slate-400">Avg AI calls / episode</div>
+                  <div class="text-lg font-bold font-mono text-purple-300 mt-0.5" x-text="usageStats.average_calls_per_job ? usageStats.average_calls_per_job.toFixed(1) : '—'"></div>
+                </div>
+                <div class="p-3 bg-slate-950 rounded-xl border border-slate-800">
+                  <div class="text-[11px] text-slate-400">Avg cost / episode</div>
+                  <div class="text-lg font-bold font-mono text-emerald-400 mt-0.5" x-text="formatCost(usageStats.average_estimated_cost_per_job)"></div>
+                </div>
+              </div>
+
+              <div class="p-3 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
+                <div>
+                  <div class="font-semibold text-slate-200">Estimated episodes remaining today</div>
+                  <div class="text-[11px] text-slate-500">Based on remaining request capacity</div>
+                </div>
+                <div class="text-right font-mono font-bold text-base" :class="getActiveProviderQuota().requests_remaining !== null ? 'text-cyan-300' : 'text-emerald-400'">
+                  <span x-show="getActiveProviderQuota().requests_remaining === null">Unlimited</span>
+                  <span x-show="getActiveProviderQuota().requests_remaining !== null" x-text="'~' + (usageStats.average_calls_per_job > 0 ? Math.max(0, Math.floor((getActiveProviderQuota().requests_remaining || 0) / usageStats.average_calls_per_job)) : 0)"></span>
+                </div>
+              </div>
+
+              <div class="text-[10px] text-slate-500 text-right">
+                Sample: <span class="font-mono text-slate-400" x-text="usageStats.completed_jobs_with_ai"></span> translated jobs (<span class="font-mono text-slate-400" x-text="usageStats.total_calls_all_time"></span> total calls)
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- 5. Deferred Jobs Queue (FIFO) -->
+        <div class="bg-slate-900/60 border border-slate-800 rounded-2xl backdrop-blur p-5 space-y-4">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <h4 class="text-sm font-bold text-white flex items-center gap-2">
+                <i class="fa-regular fa-hourglass-half text-amber-400"></i> Deferred Jobs Queue
+              </h4>
+              <span class="text-xs px-2.5 py-0.5 rounded-full font-mono font-semibold" :class="deferredQueue.length > 0 ? 'bg-amber-950 text-amber-300 border border-amber-800/60' : 'bg-slate-800 text-slate-400'" x-text="deferredQueue.length + (deferredQueue.length === 1 ? ' job' : ' jobs')"></span>
+            </div>
+            <span class="text-[11px] text-slate-500">Processed in FIFO order as capacity becomes available</span>
+          </div>
+
+          <template x-if="deferredQueue.length === 0">
+            <div class="p-8 text-center text-slate-500 text-xs">
+              <i class="fa-solid fa-inbox text-3xl mb-2 block text-slate-600"></i>
+              <div class="font-semibold text-slate-400">Queue is empty</div>
+              <div class="text-[11px] text-slate-500 mt-0.5">No translation jobs are currently waiting for quota or capacity.</div>
+            </div>
+          </template>
+
+          <div class="space-y-2.5" x-show="deferredQueue.length > 0">
+            <template x-for="(job, idx) in deferredQueue" :key="job.id">
+              <div class="p-3.5 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between text-xs hover:border-slate-700 transition">
+                <div class="flex items-center space-x-3 min-w-0">
+                  <div class="w-7 h-7 rounded-lg bg-amber-950/70 border border-amber-800/50 text-amber-400 flex items-center justify-center font-mono font-bold text-xs shrink-0" x-text="'#' + (idx + 1)"></div>
+                  <div class="min-w-0 space-y-0.5">
+                    <div class="font-semibold text-slate-100 truncate" x-text="job.title || job.video_path"></div>
+                    <div class="text-[11px] text-slate-400 font-mono flex items-center gap-1.5 flex-wrap">
+                      <span class="capitalize" x-text="job.waiting_provider || job.primary_provider || 'AI'"></span>
+                      <span>•</span>
+                      <span x-text="job.waiting_model || job.primary_model || 'default'"></span>
+                      <span>•</span>
+                      <span class="text-purple-300" x-text="getStageLabel(job.defer_stage || 'PRIMARY')"></span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="text-right shrink-0 space-y-0.5 pl-3">
+                  <div class="text-amber-400 font-medium" x-text="getDeferReasonText(job.defer_reason)"></div>
+                  <div class="text-[10px] text-slate-500" x-text="'Deferred ' + formatRelativeTime(job.deferred_at || job.created_at)"></div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- 4. SETTINGS TAB -->
     <section x-show="currentTab === 'settings'" x-cloak>
       <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
         
@@ -633,55 +933,62 @@
             <h3 class="text-lg font-bold text-white mb-1">AI Translation Engine</h3>
             <p class="text-xs text-slate-400 mb-6">Choose your AI provider (Google Gemini or OpenAI) and configure parameters.</p>
 
-            <div class="space-y-5">
-              <!-- Provider Selection -->
-              <div class="grid grid-cols-2 gap-4">
-                <div>
-                  <label class="block text-sm font-medium text-slate-300 mb-1.5">Translation Service</label>
-                  <select x-model="settingsData.ai.ai_provider" @change="aiTestResult = ''; aiTestSuccess = false;" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
-                    <option value="gemini">Google Gemini (Recommended)</option>
-                    <option value="openai">OpenAI (ChatGPT)</option>
-                    <option value="deepl">DeepL Translate</option>
-                    <option value="ollama">LocalAI / Ollama</option>
-                  </select>
+            <div class="space-y-6">
+              <!-- Primary Provider -->
+              <div>
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">AI Provider</label>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <button type="button" @click="settingsData.ai.ai_provider = 'gemini'; aiTestResult = ''; aiTestSuccess = false;" :class="settingsData.ai.ai_provider === 'gemini' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
+                    <i class="fa-brands fa-google text-lg text-purple-400"></i>
+                    <span class="text-xs font-semibold">Google Gemini</span>
+                  </button>
+                  <button type="button" @click="settingsData.ai.ai_provider = 'openai'; aiTestResult = ''; aiTestSuccess = false;" :class="settingsData.ai.ai_provider === 'openai' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
+                    <i class="fa-solid fa-bolt text-lg text-emerald-400"></i>
+                    <span class="text-xs font-semibold">OpenAI</span>
+                  </button>
+                  <button type="button" @click="settingsData.ai.ai_provider = 'deepl'; aiTestResult = ''; aiTestSuccess = false;" :class="settingsData.ai.ai_provider === 'deepl' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
+                    <i class="fa-solid fa-language text-lg text-blue-400"></i>
+                    <span class="text-xs font-semibold">DeepL</span>
+                  </button>
+                  <button type="button" @click="settingsData.ai.ai_provider = 'ollama'; aiTestResult = ''; aiTestSuccess = false;" :class="settingsData.ai.ai_provider === 'ollama' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
+                    <i class="fa-solid fa-server text-lg text-indigo-400"></i>
+                    <span class="text-xs font-semibold">Ollama</span>
+                  </button>
                 </div>
+              </div>
 
-                <!-- Model Selection (Gemini) Pure Select Dropdown -->
+              <!-- Primary Model Selection -->
+              <div>
+                <!-- Gemini Models -->
                 <div x-show="settingsData.ai.ai_provider === 'gemini'">
-                  <div class="flex items-center justify-between mb-1.5">
-                    <label class="block text-sm font-medium text-slate-300">Gemini Model</label>
-                    <span x-show="aiTestSuccess && settingsData.ai.ai_provider === 'gemini'" class="text-[11px] text-emerald-400 font-semibold flex items-center gap-1">
-                      <i class="fa-solid fa-circle-check"></i> Verified
-                    </span>
+                  <label class="block text-sm font-medium text-slate-300 mb-1.5">Gemini Model</label>
+                  <div class="relative">
+                    <select x-model="settingsData.ai.gemini_model" @change="aiTestResult = ''; aiTestSuccess = false;" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                      <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (The Holy Grail - 110% Perfect)</option>
+                      <option value="gemini-3.5-flash">gemini-3.5-flash</option>
+                      <option value="gemini-3.6-flash">gemini-3.6-flash</option>
+                      <option value="gemini-3.7-flash">gemini-3.7-flash (Hybrid Reasoning / Thinking)</option>
+                    </select>
                   </div>
-                  <select x-model="settingsData.ai.gemini_model" @change="aiTestResult = ''; aiTestSuccess = false;" :class="aiTestSuccess && settingsData.ai.ai_provider === 'gemini' ? 'border-emerald-500/70 text-emerald-300 ring-1 ring-emerald-500/30' : 'border-slate-700 text-slate-200'" class="w-full px-4 py-2.5 bg-slate-950 border rounded-xl focus:outline-none focus:border-purple-500 transition text-sm">
-                    <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Recommended for Primary)</option>
-                    <option value="gemini-3.5-flash">gemini-3.5-flash</option>
-                    <option value="gemini-3.6-flash">gemini-3.6-flash</option>
-                    <option value="gemini-3.7-flash">gemini-3.7-flash (Recommended for Escalation)</option>
-                    <option value="gemini-3.5-pro">gemini-3.5-pro</option>
-                    <option value="gemini-4.0-flash">gemini-4.0-flash</option>
-                  </select>
                 </div>
 
-                <!-- Model Selection (OpenAI) Pure Select Dropdown -->
+                <!-- OpenAI Models -->
                 <div x-show="settingsData.ai.ai_provider === 'openai'">
-                  <div class="flex items-center justify-between mb-1.5">
-                    <label class="block text-sm font-medium text-slate-300">OpenAI Model</label>
-                    <span x-show="aiTestSuccess && settingsData.ai.ai_provider === 'openai'" class="text-[11px] text-emerald-400 font-semibold flex items-center gap-1">
-                      <i class="fa-solid fa-circle-check"></i> Verified
-                    </span>
-                  </div>
-                  <select x-model="settingsData.ai.openai_model" @change="aiTestResult = ''; aiTestSuccess = false;" :class="aiTestSuccess && settingsData.ai.ai_provider === 'openai' ? 'border-emerald-500/70 text-emerald-300 ring-1 ring-emerald-500/30' : 'border-slate-700 text-slate-200'" class="w-full px-4 py-2.5 bg-slate-950 border rounded-xl focus:outline-none focus:border-purple-500 transition text-sm">
-                    <option value="gpt-4o-mini">gpt-4o-mini (Recommended for Primary)</option>
-                    <option value="gpt-4o">gpt-4o (Recommended for Escalation)</option>
-                    <option value="gpt-5.6-turbo">gpt-5.6-turbo</option>
+                  <label class="block text-sm font-medium text-slate-300 mb-1.5">OpenAI Model</label>
+                  <select x-model="settingsData.ai.openai_model" @change="aiTestResult = ''; aiTestSuccess = false;" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                    <option value="gpt-4o-mini">gpt-4o-mini (Recommended)</option>
+                    <option value="gpt-4o">gpt-4o</option>
                     <option value="o1-mini">o1-mini</option>
                     <option value="gpt-4-turbo">gpt-4-turbo</option>
                   </select>
                 </div>
 
-                <!-- Model Selection (Ollama) -->
+                <!-- DeepL note -->
+                <div x-show="settingsData.ai.ai_provider === 'deepl'" class="p-4 bg-slate-950/70 border border-slate-800 rounded-xl text-xs text-slate-400">
+                  <i class="fa-solid fa-circle-info text-blue-400 mr-1.5"></i> DeepL API uses official neural translation engine with formality support.
+                </div>
+
+                <!-- Ollama Models -->
                 <div x-show="settingsData.ai.ai_provider === 'ollama'">
                   <label class="block text-sm font-medium text-slate-300 mb-1.5">Ollama Model</label>
                   <input type="text" x-model="settingsData.ai.ollama_model" @input="aiTestResult = ''; aiTestSuccess = false;" placeholder="llama3, mistral, qwen..." class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
@@ -689,7 +996,7 @@
               </div>
 
               <!-- Gemini API Key -->
-              <div x-show="settingsData.ai.ai_provider === 'gemini' || settingsData.ai.escalation_provider === 'gemini'">
+              <div x-show="settingsData.ai.ai_provider === 'gemini' || (settingsData.ai.escalate_to_pro && settingsData.ai.escalation_provider === 'gemini')">
                 <label class="block text-sm font-medium text-slate-300 mb-1.5">Google Gemini API Key</label>
                 <div class="flex gap-2">
                   <input type="password" x-model="settingsData.ai.gemini_api_key" placeholder="Paste your Gemini API Key here..." class="flex-1 px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition">
@@ -701,7 +1008,7 @@
               </div>
 
               <!-- OpenAI API Key -->
-              <div x-show="settingsData.ai.ai_provider === 'openai' || settingsData.ai.escalation_provider === 'openai'">
+              <div x-show="settingsData.ai.ai_provider === 'openai' || (settingsData.ai.escalate_to_pro && settingsData.ai.escalation_provider === 'openai')">
                 <label class="block text-sm font-medium text-slate-300 mb-1.5">OpenAI API Key</label>
                 <div class="flex gap-2">
                   <input type="password" x-model="settingsData.ai.openai_api_key" placeholder="sk-proj-..." class="flex-1 px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition">
@@ -767,8 +1074,6 @@
                       <option value="gemini-3.5-flash">gemini-3.5-flash</option>
                       <option value="gemini-3.6-flash">gemini-3.6-flash</option>
                       <option value="gemini-3.7-flash">gemini-3.7-flash (Recommended for Escalation)</option>
-                      <option value="gemini-3.5-pro">gemini-3.5-pro</option>
-                      <option value="gemini-4.0-flash">gemini-4.0-flash</option>
                     </select>
                   </div>
                   <div class="space-y-2" x-show="settingsData.ai.escalation_provider === 'openai'">
@@ -776,8 +1081,8 @@
                     <select x-model="settingsData.ai.escalation_model" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
                       <option value="gpt-4o-mini">gpt-4o-mini (Recommended for Primary)</option>
                       <option value="gpt-4o">gpt-4o (Recommended for Escalation)</option>
-                      <option value="gpt-5.6-turbo">gpt-5.6-turbo</option>
                       <option value="o1-mini">o1-mini</option>
+                      <option value="gpt-4-turbo">gpt-4-turbo</option>
                     </select>
                   </div>
                 </div>
@@ -789,7 +1094,7 @@
                   <i class="fa-solid fa-gauge-high text-blue-400"></i> Speed & Batch Parameters
                 </h4>
               </div>
-              <div class="grid grid-cols-3 gap-4">
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
                   <label class="block text-sm font-medium text-slate-300 mb-1.5">Batch Size (Lines)</label>
                   <input type="number" x-model.number="settingsData.ai.batch_size" min="1" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
@@ -804,96 +1109,6 @@
                   <label class="block text-sm font-medium text-slate-300 mb-1.5">Simultaneous Videos</label>
                   <input type="number" x-model.number="settingsData.ai.max_concurrent_jobs" min="1" max="10" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
                   <span class="text-xs text-slate-500 mt-1 block">Videos that can translate at the same time.</span>
-                </div>
-                <div>
-                  <label class="block text-sm font-medium text-slate-300 mb-1.5">Daily Request Budget (RPD)</label>
-                  <div class="relative">
-                    <input type="number"
-                           x-model.number="settingsData.ai['daily_request_budget_' + settingsData.ai.ai_provider]"
-                           min="0" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
-                    <div class="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none"
-                         x-show="settingsData.ai['daily_request_budget_' + settingsData.ai.ai_provider] == 0">
-                      <span class="text-xs font-semibold text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded border border-emerald-400/20">Unlimited</span>
-                    </div>
-                  </div>
-                  <span class="text-xs text-slate-500 mt-1 block">Max AI requests per day (0 = Unlimited). Babel will DEFER jobs when quota is met.</span>
-                </div>
-
-                <!-- Daily Request Budget & Live Quota Status Card -->
-                <div class="col-span-1 md:col-span-2 p-4 bg-slate-950/90 rounded-2xl border border-slate-800 space-y-3">
-                  <div class="flex items-center justify-between">
-                    <div class="flex items-center gap-2">
-                      <i class="fa-solid fa-gauge-high text-purple-400"></i>
-                      <span class="text-sm font-semibold text-slate-200">Daily Quota & Budget Status</span>
-                      <span class="text-xs uppercase font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-400" x-text="settingsData.ai.ai_provider"></span>
-                    </div>
-                    <div>
-                      <template x-if="quotaData.providers && quotaData.providers[settingsData.ai.ai_provider] && quotaData.providers[settingsData.ai.ai_provider].state === 'HALF_OPEN'">
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-cyan-950 text-cyan-300 border border-cyan-700/60 animate-pulse">
-                          <i class="fa-solid fa-spinner animate-spin text-[10px]"></i> Probing Availability...
-                        </span>
-                      </template>
-                      <template x-if="quotaData.providers && quotaData.providers[settingsData.ai.ai_provider] && quotaData.providers[settingsData.ai.ai_provider].state === 'BLOCKED'">
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-rose-950 text-rose-400 border border-rose-800/60 animate-pulse">
-                          <i class="fa-solid fa-ban text-[10px]"></i> Daily Quota Reached
-                        </span>
-                      </template>
-                      <template x-if="!quotaData.providers || !quotaData.providers[settingsData.ai.ai_provider] || quotaData.providers[settingsData.ai.ai_provider].state === 'ACTIVE' || (!quotaData.providers[settingsData.ai.ai_provider].blocked && quotaData.providers[settingsData.ai.ai_provider].state !== 'HALF_OPEN')">
-                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-950 text-emerald-400 border border-emerald-800/60">
-                          <i class="fa-solid fa-circle-check text-[10px]"></i> Active (Normal)
-                        </span>
-                      </template>
-                    </div>
-                  </div>
-
-                  <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
-                    <div class="p-3 bg-slate-900/80 rounded-xl border border-slate-800/70">
-                      <div class="text-[11px] text-slate-400 uppercase font-medium">Requests Today</div>
-                      <div class="text-lg font-bold text-slate-100 font-mono mt-0.5" x-text="(quotaData.providers && quotaData.providers[settingsData.ai.ai_provider]) ? quotaData.providers[settingsData.ai.ai_provider].requests_today : 0"></div>
-                      <div class="text-[10px] text-slate-500">UTC Day Window (00:00 UTC reset)</div>
-                    </div>
-                    <div class="p-3 bg-slate-900/80 rounded-xl border border-slate-800/70">
-                      <div class="text-[11px] text-slate-400 uppercase font-medium">Daily Limit / Budget</div>
-                      <div class="text-lg font-bold font-mono mt-0.5" :class="settingsData.ai['daily_request_budget_' + settingsData.ai.ai_provider] > 0 ? 'text-purple-300' : 'text-emerald-400'" x-text="settingsData.ai['daily_request_budget_' + settingsData.ai.ai_provider] > 0 ? settingsData.ai['daily_request_budget_' + settingsData.ai.ai_provider] + ' req/day' : 'Unlimited'"></div>
-                      <div class="text-[10px] text-slate-500" x-text="settingsData.ai['daily_request_budget_' + settingsData.ai.ai_provider] > 0 ? 'Configured Max RPD' : 'No local throttle'"></div>
-                    </div>
-                    <div class="p-3 bg-slate-900/80 rounded-xl border border-slate-800/70">
-                      <div class="text-[11px] text-slate-400 uppercase font-medium">Remaining Today</div>
-                      <div class="text-lg font-bold font-mono mt-0.5" :class="quotaData.providers && quotaData.providers[settingsData.ai.ai_provider] && quotaData.providers[settingsData.ai.ai_provider].requests_remaining !== null ? (quotaData.providers[settingsData.ai.ai_provider].requests_remaining <= 0 ? 'text-rose-400' : 'text-cyan-300') : 'text-slate-300'" x-text="(quotaData.providers && quotaData.providers[settingsData.ai.ai_provider] && quotaData.providers[settingsData.ai.ai_provider].requests_remaining !== null) ? quotaData.providers[settingsData.ai.ai_provider].requests_remaining : 'Unlimited'"></div>
-                      <div class="text-[10px] text-slate-500" x-text="quotaData.providers && quotaData.providers[settingsData.ai.ai_provider] && quotaData.providers[settingsData.ai.ai_provider].requests_remaining !== null ? 'Before auto-deferral' : 'Unlimited budget'"></div>
-                    </div>
-                  </div>
-
-                  <!-- Provider Block details & Manual Reset button if blocked or probing -->
-                  <template x-if="quotaData.providers && quotaData.providers[settingsData.ai.ai_provider] && (quotaData.providers[settingsData.ai.ai_provider].blocked || quotaData.providers[settingsData.ai.ai_provider].state === 'HALF_OPEN')">
-                    <div class="p-3 bg-rose-950/40 border border-rose-900/50 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-                      <div class="space-y-1">
-                        <div class="font-semibold text-rose-300 flex items-center gap-1.5">
-                          <i class="fa-solid fa-triangle-exclamation"></i>
-                          <span x-text="quotaData.providers[settingsData.ai.ai_provider].state === 'HALF_OPEN' ? 'Provider in HALF-OPEN state: single-flight probe active' : 'Provider blocked: AI jobs are DEFERRED and will resume automatically'"></span>
-                        </div>
-                        <div class="text-slate-300 text-[11px]" x-show="quotaData.providers[settingsData.ai.ai_provider].blocked_until">
-                          <template x-if="quotaData.providers[settingsData.ai.ai_provider].reset_type === 'exact'">
-                            <span class="inline-flex items-center gap-1">
-                              <span class="font-semibold text-emerald-400">Exact Reset Time (Provider reported):</span>
-                              <span class="text-slate-100 font-mono" x-text="quotaData.providers[settingsData.ai.ai_provider].blocked_until"></span>
-                            </span>
-                          </template>
-                          <template x-if="quotaData.providers[settingsData.ai.ai_provider].reset_type !== 'exact'">
-                            <span class="inline-flex items-center gap-1">
-                              <span class="font-semibold text-amber-400">Next Recheck:</span>
-                              <span class="text-slate-100 font-mono" x-text="quotaData.providers[settingsData.ai.ai_provider].blocked_until"></span>
-                              <span class="text-slate-400">(Adaptive probe attempt <span x-text="quotaData.providers[settingsData.ai.ai_provider].probe_attempt || 0"></span>)</span>
-                            </span>
-                          </template>
-                        </div>
-                        <div class="text-slate-400 text-[11px] truncate max-w-xl" x-show="quotaData.providers[settingsData.ai.ai_provider].reason" :title="quotaData.providers[settingsData.ai.ai_provider].reason" x-text="'Reason: ' + quotaData.providers[settingsData.ai.ai_provider].reason"></div>
-                      </div>
-                      <button @click="unblockProvider(settingsData.ai.ai_provider)" class="px-3 py-1.5 bg-rose-900/60 hover:bg-rose-800 text-rose-200 border border-rose-700/60 rounded-lg font-medium transition text-xs flex items-center gap-1.5 self-start sm:self-auto shrink-0">
-                        <i class="fa-solid fa-lock-open"></i> Unblock / Reset Quota
-                      </button>
-                    </div>
-                  </template>
                 </div>
               </div>
 
@@ -1499,7 +1714,7 @@ docker compose up -d babel</pre>
                 <span x-text="selectedJob.ai_model || 'AI Engine'"></span>
               </span>
             </div>
-            <div class="bg-slate-950 rounded-xl p-4 font-mono text-xs text-slate-300 max-h-64 overflow-y-auto space-y-1.5 border border-slate-800 shadow-inner">
+            <div class="bg-slate-950 rounded-xl p-4 font-mono text-xs text-slate-300 max-h-48 overflow-y-auto space-y-1.5 border border-slate-800 shadow-inner">
               <template x-if="!selectedJob.logs || selectedJob.logs.length === 0">
                 <div class="text-slate-600">No detailed logs recorded for this job.</div>
               </template>
@@ -1510,6 +1725,75 @@ docker compose up -d babel</pre>
                 </div>
               </template>
             </div>
+          </div>
+
+          <!-- AI Usage & Cost Section -->
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                <i class="fa-solid fa-chart-pie text-purple-400"></i> AI Usage
+              </h4>
+              <template x-if="jobUsage && jobUsage.total_calls > 0">
+                <span class="text-xs font-mono font-semibold text-emerald-400" x-text="'Estimated Cost: ' + formatCost(jobUsage.total_estimated_cost_usd)"></span>
+              </template>
+            </div>
+
+            <!-- Loading State -->
+            <template x-if="loadingJobUsage">
+              <div class="p-3 bg-slate-950 rounded-xl text-center text-xs text-slate-500 border border-slate-800">
+                <i class="fa-solid fa-circle-notch fa-spin text-purple-400 mr-1.5"></i> Loading AI usage...
+              </div>
+            </template>
+
+            <!-- Empty / No AI Usage State -->
+            <template x-if="!loadingJobUsage && (!jobUsage || jobUsage.total_calls === 0)">
+              <div class="p-3 bg-slate-950 rounded-xl text-center text-xs text-slate-500 border border-slate-800">
+                <i class="fa-solid fa-circle-info text-slate-600 mr-1.5"></i> No AI usage recorded
+              </div>
+            </template>
+
+            <!-- Usage Detail & Token Summary -->
+            <template x-if="!loadingJobUsage && jobUsage && jobUsage.total_calls > 0">
+              <div class="space-y-2.5">
+                <!-- Breakdown by Stage / Model -->
+                <div class="space-y-1.5 max-h-40 overflow-y-auto">
+                  <template x-for="item in (jobUsage.breakdown ? jobUsage.breakdown.detail : [])" :key="item.stage + '-' + item.provider + '-' + item.model">
+                    <div class="p-2.5 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
+                      <div class="space-y-0.5">
+                        <div class="font-semibold text-slate-200" x-text="getStageLabel(item.stage)"></div>
+                        <div class="text-[11px] text-slate-400 font-mono">
+                          <span class="capitalize" x-text="item.provider"></span> · <span x-text="item.model"></span>
+                        </div>
+                      </div>
+                      <div class="text-right space-y-0.5 font-mono">
+                        <div class="font-bold text-slate-200" x-text="item.calls + (item.calls === 1 ? ' call' : ' calls')"></div>
+                        <div class="text-[11px] text-emerald-400 font-semibold" x-text="formatCost(item.estimated_cost_usd)"></div>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+
+                <!-- Token Grid -->
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-xs">
+                  <div class="p-2 bg-slate-950/90 rounded-lg border border-slate-800">
+                    <span class="text-[10px] text-slate-500 uppercase block">Calls</span>
+                    <span class="font-bold font-mono text-slate-200 text-sm" x-text="jobUsage.total_calls || 0"></span>
+                  </div>
+                  <div class="p-2 bg-slate-950/90 rounded-lg border border-slate-800">
+                    <span class="text-[10px] text-slate-500 uppercase block">Input</span>
+                    <span class="font-bold font-mono text-slate-200 text-sm" x-text="formatTokens(jobUsage.total_input_tokens)"></span>
+                  </div>
+                  <div class="p-2 bg-slate-950/90 rounded-lg border border-slate-800">
+                    <span class="text-[10px] text-slate-500 uppercase block">Cached</span>
+                    <span class="font-bold font-mono text-slate-200 text-sm" x-text="formatTokens(jobUsage.total_cached_input_tokens)"></span>
+                  </div>
+                  <div class="p-2 bg-slate-950/90 rounded-lg border border-slate-800">
+                    <span class="text-[10px] text-slate-500 uppercase block">Output</span>
+                    <span class="font-bold font-mono text-slate-200 text-sm" x-text="formatTokens(jobUsage.total_output_tokens)"></span>
+                  </div>
+                </div>
+              </div>
+            </template>
           </div>
         </div>
 
@@ -1612,6 +1896,12 @@ docker compose up -d babel</pre>
         showUpdateNotes: false,
         updateLogs: '',
         quotaData: { active_provider: 'gemini', providers: {} },
+        todayUsage: { providers: {}, total: { calls_today: 0, input_tokens_today: null, cached_input_tokens_today: null, output_tokens_today: null, estimated_cost_today: null } },
+        usageStats: { completed_jobs_with_ai: 0, average_calls_per_job: null, average_estimated_cost_per_job: null, total_calls_all_time: 0, total_estimated_cost_all_time: null, has_sufficient_history: false, min_sample_threshold: 3 },
+        deferredQueue: [],
+        jobUsage: null,
+        loadingJobUsage: false,
+        loadingUsage: false,
 
         mediaData: { series: [], movies: [] },
         modalOpen: false,
@@ -1719,6 +2009,9 @@ docker compose up -d babel</pre>
           await this.loadJobs();
           await this.loadAllSettings();
           await this.loadQuotaStatus();
+          await this.loadTodayUsage();
+          await this.loadUsageStats();
+          await this.loadDeferredQueue();
           await this.loadMediaFiles();
 
           this.pollTimer = setInterval(() => {
@@ -1726,6 +2019,14 @@ docker compose up -d babel</pre>
               this.loadStats();
               this.loadJobs();
               this.loadQuotaStatus();
+              if (this.modalOpen && this.selectedJob && this.selectedJob.id && ['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING'].includes(this.selectedJob.status)) {
+                this.loadJobUsage(this.selectedJob.id);
+              }
+            } else if (this.currentTab === 'usage') {
+              this.loadQuotaStatus();
+              this.loadTodayUsage();
+              this.loadUsageStats();
+              this.loadDeferredQueue();
             } else if (this.currentTab === 'settings' && this.settingsTab === 'ai') {
               this.loadQuotaStatus();
             }
@@ -1828,7 +2129,11 @@ docker compose up -d babel</pre>
 
         openJobModal(job) {
           this.selectedJob = job;
+          this.jobUsage = null;
           this.modalOpen = true;
+          if (job && job.id) {
+            this.loadJobUsage(job.id);
+          }
         },
 
         async deleteJob(id) {
@@ -1974,6 +2279,8 @@ docker compose up -d babel</pre>
             this.showToast('AI Settings saved!');
             await this.loadAllSettings();
             await this.loadQuotaStatus();
+            await this.loadTodayUsage();
+            await this.loadDeferredQueue();
           } catch(e) {
             this.showToast('Error: ' + e.message, 'error');
           }
@@ -2001,6 +2308,139 @@ docker compose up -d babel</pre>
             }
           } catch(e) {
             this.showToast('Failed to unblock: ' + e, 'error');
+          }
+        },
+
+        formatCost(val) {
+          if (val === null || val === undefined) return '—';
+          if (val === 0) return '$0.00';
+          if (val < 0.001) return '< $0.001';
+          if (val < 0.01) return '~$' + val.toFixed(3);
+          return '~$' + val.toFixed(2);
+        },
+
+        formatTokens(n) {
+          if (n === null || n === undefined) return '—';
+          return Number(n).toLocaleString('en-US');
+        },
+
+        getStageLabel(stage) {
+          const map = {
+            'PRIMARY': 'Primary translation',
+            'MICRO_REPAIR': 'Micro repair',
+            'RECOVERY': 'Recovery',
+            'ESCALATION': 'Contextual escalation',
+            'CLASSIFIER': 'Language classifier',
+            'ENTITY_VERIFY': 'Entity verification'
+          };
+          if (!stage) return 'Primary translation';
+          return map[stage.toUpperCase()] || stage.replace(/_/g, ' ');
+        },
+
+        getDeferReasonText(reason) {
+          const map = {
+            'INSUFFICIENT_LOCAL_BUDGET': 'Waiting for daily request capacity',
+            'LOCAL_RPD': 'Daily request limit reached',
+            'PROVIDER_QUOTA': 'Provider daily quota reached',
+            'PROVIDER_BLOCKED': 'Provider temporarily blocked',
+            'QUEUE_BACKLOG': 'Queued behind provider backlog',
+            'ESCALATION_EXHAUSTED': 'Escalation provider quota reached'
+          };
+          if (!reason) return 'Waiting for daily request capacity';
+          return map[reason.toUpperCase()] || reason.replace(/_/g, ' ');
+        },
+
+        formatRelativeTime(isoStr) {
+          if (!isoStr) return '-';
+          try {
+            const date = new Date(isoStr);
+            const now = new Date();
+            const diffSec = Math.floor((now - date) / 1000);
+            if (diffSec < 60) return 'Just now';
+            const diffMin = Math.floor(diffSec / 60);
+            if (diffMin < 60) return diffMin + ' min ago';
+            const diffHours = Math.floor(diffMin / 60);
+            if (diffHours < 24) return diffHours + (diffHours === 1 ? ' hour ago' : ' hours ago');
+            const diffDays = Math.floor(diffHours / 24);
+            return diffDays + (diffDays === 1 ? ' day ago' : ' days ago');
+          } catch(e) {
+            return isoStr;
+          }
+        },
+
+        getActiveProviderQuota() {
+          const p = (this.settingsData && this.settingsData.ai && this.settingsData.ai.ai_provider) || 'gemini';
+          if (this.quotaData && this.quotaData.providers && this.quotaData.providers[p]) {
+            return this.quotaData.providers[p];
+          }
+          return {
+            provider: p,
+            state: 'ACTIVE',
+            blocked: false,
+            budget: null,
+            requests_today: 0,
+            requests_remaining: null
+          };
+        },
+
+        async loadTodayUsage() {
+          try {
+            const res = await fetch('/api/usage/today');
+            if (res.ok) {
+              this.todayUsage = await res.json();
+            }
+          } catch(e) {}
+        },
+
+        async loadUsageStats() {
+          try {
+            const res = await fetch('/api/usage/stats');
+            if (res.ok) {
+              this.usageStats = await res.json();
+            }
+          } catch(e) {}
+        },
+
+        async loadDeferredQueue() {
+          try {
+            const res = await fetch('/api/queue/deferred');
+            if (res.ok) {
+              this.deferredQueue = await res.json();
+            }
+          } catch(e) {}
+        },
+
+        async loadJobUsage(jobId) {
+          if (!jobId) return;
+          this.loadingJobUsage = true;
+          try {
+            const res = await fetch('/api/usage/job/' + jobId);
+            if (res.ok) {
+              this.jobUsage = await res.json();
+            } else {
+              this.jobUsage = null;
+            }
+          } catch(e) {
+            this.jobUsage = null;
+          } finally {
+            this.loadingJobUsage = false;
+          }
+        },
+
+        async loadUsageData(manual = false) {
+          if (manual) this.loadingUsage = true;
+          try {
+            await Promise.all([
+              this.loadQuotaStatus(),
+              this.loadTodayUsage(),
+              this.loadUsageStats(),
+              this.loadDeferredQueue()
+            ]);
+            if (manual) this.showToast('Usage & Quota refreshed', 'info');
+          } finally {
+            if (manual) {
+              setTimeout(() => { this.loadingUsage = false; }, 300);
+            }
           }
         },
 

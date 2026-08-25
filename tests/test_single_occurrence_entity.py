@@ -203,7 +203,7 @@ async def test_morgan_production_case_e2e(tmp_path):
 
     # Primary classifier proposes keep proper_noun
     # SubtitleTranslator.verify_single_occurrence_entities verifies Morgan as PERSON_NAME HIGH confidence
-    async def mock_classify_identical(items, target_lang, show_title="", source_subs=None, translated_subs=None):
+    async def mock_classify_identical(items, target_lang, show_title="", source_subs=None, translated_subs=None, **kwargs):
         return [{"id": 3, "action": "keep", "reason": "context_verified_proper_noun", "text": "Morgan?"}]
 
     with patch("app.services.pipeline.find_external_subtitle", return_value=en_srt_path), \

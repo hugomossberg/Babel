@@ -79,7 +79,7 @@ async def test_first_execution_success(mock_db_settings, tmp_path, monkeypatch):
                     results.append({"id": idx, "text": item["text"]}) # identical
         return results
 
-    async def mock_classify(items, lang, title):
+    async def mock_classify(items, lang, title, **kwargs):
         call_counts["classify"] += 1
         results = []
         for item in items:

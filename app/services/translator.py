@@ -4,9 +4,83 @@ import logging
 import functools
 import unicodedata
 import re
+import contextvars
 from typing import List, Optional, Dict, Any
 
+import threading
+
 logger = logging.getLogger("babel.translator")
+
+# ---------------------------------------------------------------------------
+# Phase 2: Token metadata propagation from threadpool workers to asyncio tasks.
+#
+# Problem: translate_batch_gemini uses loop.run_in_executor → threadpool.
+# asyncio ContextVars are task-local; mutations in thread copies do NOT
+# propagate back to the asyncio task that spawned them.
+#
+# Solution: Two-tier approach:
+#   1. _usage_token_ctx (ContextVar[str|None]): holds the current request_uid.
+#      with_retry sets this in asyncio-task context. Threads see a snapshot of
+#      this value (via run_in_executor's context copy) — but READS ONLY.
+#   2. _USAGE_TOKEN_STORE (dict): a module-level thread-safe store mapping
+#      request_uid → token metadata dict. Threads WRITE here after SDK call.
+#      with_retry READS here after await func() completes.
+#
+# This ensures:
+#   - Each retry attempt starts with a fresh request_uid → no stale data.
+#   - Concurrent asyncio tasks use different uids → no cross-task contamination.
+#   - Thread writes are visible to the asyncio task (shared mutable dict).
+#   - Entries are removed immediately after read to avoid unbounded growth.
+# ---------------------------------------------------------------------------
+
+_usage_token_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "_usage_token_ctx", default=None
+)
+_USAGE_TOKEN_STORE: Dict[str, Dict[str, Optional[int]]] = {}
+_USAGE_TOKEN_STORE_LOCK = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# SDK dispatch-started signal.
+# Threads set _mark_sdk_started(uid) IMMEDIATELY BEFORE the provider SDK call.
+# with_retry checks _pop_sdk_started(uid) to determine whether the exception
+# happened before or after the actual provider network attempt:
+#   - _pop_sdk_started returns True  → actual SDK invocation → create FAILED row
+#   - _pop_sdk_started returns False → pre-SDK failure (config/setup) → zero rows
+# ---------------------------------------------------------------------------
+_SDK_DISPATCH_STARTED: Dict[str, bool] = {}
+_SDK_DISPATCH_STARTED_LOCK = threading.Lock()
+
+
+def _mark_sdk_started(request_uid: Optional[str]) -> None:
+    """Thread-safe signal: actual provider SDK call is about to begin."""
+    if not request_uid:
+        return
+    with _SDK_DISPATCH_STARTED_LOCK:
+        _SDK_DISPATCH_STARTED[request_uid] = True
+
+
+def _pop_sdk_started(request_uid: Optional[str]) -> bool:
+    """Thread-safe read + delete. Returns True if SDK was invoked, False otherwise."""
+    if not request_uid:
+        return False
+    with _SDK_DISPATCH_STARTED_LOCK:
+        return _SDK_DISPATCH_STARTED.pop(request_uid, False)
+
+
+def _store_token_meta(request_uid: Optional[str], meta: Dict[str, Optional[int]]) -> None:
+    """Thread-safe write of token metadata keyed by request_uid."""
+    if not request_uid:
+        return
+    with _USAGE_TOKEN_STORE_LOCK:
+        _USAGE_TOKEN_STORE[request_uid] = meta
+
+
+def _pop_token_meta(request_uid: Optional[str]) -> Optional[Dict[str, Optional[int]]]:
+    """Thread-safe read + delete of token metadata. Returns None if not found."""
+    if not request_uid:
+        return None
+    with _USAGE_TOKEN_STORE_LOCK:
+        return _USAGE_TOKEN_STORE.pop(request_uid, None)
 
 from app.core.quota import QuotaError, DailyQuotaExhaustedError, RequestBudgetExhaustedError
 
@@ -77,6 +151,21 @@ def with_retry(func_or_provider=None, **decorator_kwargs):
                     provider = "gemini"
 
             model_name = kwargs.get("model_name") or kwargs.get("model") or decorator_kwargs.get("model")
+            # Fallback: if model_name not in kwargs (e.g. passed as positional arg),
+            # read from settings based on inferred provider for usage accounting purposes.
+            if not model_name:
+                try:
+                    from app.core.db import get_setting as _gs
+                    if provider == "gemini":
+                        model_name = _gs("gemini_model", "gemini-3.5-flash-lite")
+                    elif provider == "openai":
+                        model_name = _gs("openai_model", "gpt-4o-mini")
+                    elif provider == "ollama":
+                        model_name = _gs("ollama_model", "llama3")
+                    elif provider == "deepl":
+                        model_name = "deepl"
+                except Exception:
+                    pass
             job_id = kwargs.get("job_id")
 
             retries = 3
@@ -84,6 +173,7 @@ def with_retry(func_or_provider=None, **decorator_kwargs):
 
             for attempt in range(retries + 1):
                 # 1. Single-Flight Quota & Circuit Breaker Gate
+                # BLOCKED → zero usage rows (Phase 2 accounting invariant)
                 allowed, dispatch_info = acquire_dispatch_slot(
                     provider=provider,
                     model=model_name,
@@ -104,29 +194,139 @@ def with_retry(func_or_provider=None, **decorator_kwargs):
                             raw_message=f"Provider '{provider}' circuit breaker {dispatch_info.get('state', 'BLOCKED')} (blocked until {blocked_until}, reset_type={reset_type}). Reason: {reason}",
                         )
 
+                # ---------------------------------------------------------------
+                # PHASE 2 USAGE ACCOUNTING — authoritative dispatch boundary.
+                # acquire_dispatch_slot returned True → the SDK call WILL be made.
+                # Insert PENDING row BEFORE the call so failed attempts are also recorded.
+                # Invariants:
+                #   - _request_uid is set ONLY when a fresh PENDING row was inserted.
+                #   - If record_dispatch returns False (duplicate uid or DB error), we
+                #     clear _request_uid so complete_dispatch is never called on a stale row.
+                #   - acquire_dispatch_slot does NOT consume quota if it returns False.
+                #   - The usage ledger does NOT affect quota counting.
+                # ---------------------------------------------------------------
+                _request_uid = None
+                _model_for_usage = model_name or ""
+                _stage_for_usage = _infer_usage_stage(func.__name__, kwargs)
                 try:
+                    from app.core.usage import (
+                        generate_request_uid, record_dispatch, complete_dispatch,
+                        cancel_dispatch, calculate_estimated_cost, UsageStatus,
+                    )
+                    _candidate_uid = generate_request_uid()
+                    _inserted = record_dispatch(
+                        request_uid=_candidate_uid,
+                        provider=provider,
+                        model=_model_for_usage,
+                        stage=_stage_for_usage,
+                        job_id=job_id,
+                    )
+                    if _inserted:
+                        # Row created — bind _request_uid only on confirmed insert
+                        _request_uid = _candidate_uid
+                    else:
+                        # INSERT OR IGNORE rejected (duplicate uid is theoretically impossible
+                        # with uuid4, but we handle it defensively). Do not set _request_uid,
+                        # which means complete_dispatch will NOT be called below.
+                        logger.warning(
+                            "Usage ledger: record_dispatch returned False for uid=%s "
+                            "(idempotency guard or DB error). Accounting row skipped for this attempt.",
+                            _candidate_uid,
+                        )
+                except Exception as _acc_err:
+                    logger.warning("Usage ledger: pre-dispatch record failed (non-fatal): %s", _acc_err)
+                    # _request_uid remains None → complete_dispatch never called.
+
+                try:
+                    # Publish current request_uid to ContextVar so threads can look up
+                    # the store key. Also clears any stale entries from a previous attempt.
+                    _usage_token_ctx.set(_request_uid)
+                    if _request_uid:
+                        _pop_token_meta(_request_uid)  # Discard any stale entry for this uid
+                        _pop_sdk_started(_request_uid)  # Discard any stale sdk-started flag
+
                     result = await func(*args, **kwargs)
                     # 2. SUCCESS: Reset circuit breaker to ACTIVE
                     record_provider_success(provider=provider, model=model_name)
+
+                    # Clean up sdk-started flag (set by _mark_sdk_started inside provider thread)
+                    _pop_sdk_started(_request_uid)
+
+                    # Usage accounting: read token metadata from shared store
+                    # (written by _capture_gemini_tokens / _capture_openai_tokens in the thread)
+                    if _request_uid:
+                        try:
+                            token_meta = _pop_token_meta(_request_uid) or {
+                                "input_tokens": None,
+                                "cached_input_tokens": None,
+                                "output_tokens": None,
+                            }
+                            est_cost = calculate_estimated_cost(
+                                provider=provider,
+                                model=_model_for_usage,
+                                input_tokens=token_meta.get("input_tokens"),
+                                cached_input_tokens=token_meta.get("cached_input_tokens"),
+                                output_tokens=token_meta.get("output_tokens"),
+                            )
+                            complete_dispatch(
+                                request_uid=_request_uid,
+                                status=UsageStatus.SUCCESS,
+                                input_tokens=token_meta.get("input_tokens"),
+                                cached_input_tokens=token_meta.get("cached_input_tokens"),
+                                output_tokens=token_meta.get("output_tokens"),
+                                estimated_cost_usd=est_cost,
+                            )
+                        except Exception as _acc_err:
+                            logger.warning("Usage ledger: post-dispatch accounting failed: %s", _acc_err)
+
                     return result
                 except Exception as e:
+                    # Determine if the actual SDK call was attempted.
+                    # _mark_sdk_started() is called inside provider threads immediately
+                    # BEFORE client.models.generate_content / client.chat.completions.create.
+                    # If SDK was NOT reached (pre-SDK exception: missing API key, client init,
+                    # prompt build failure), cancel the PENDING row → zero usage rows.
+                    _sdk_was_called = _pop_sdk_started(_request_uid)
+
+                    def _cancel_or_fail(err_type: str) -> None:
+                        """Cancel PENDING row if pre-SDK, else mark FAILED."""
+                        if not _request_uid:
+                            return
+                        try:
+                            if _sdk_was_called:
+                                complete_dispatch(
+                                    request_uid=_request_uid,
+                                    status=UsageStatus.FAILED,
+                                    error_type=err_type,
+                                )
+                            else:
+                                cancel_dispatch(_request_uid)
+                        except Exception as _acc_err:
+                            logger.warning(
+                                "Usage ledger: accounting error (non-fatal): %s", _acc_err
+                            )
+
                     # Re-raise quota/budget errors immediately — never retry
                     if isinstance(e, (DailyQuotaExhaustedError, RequestBudgetExhaustedError)):
+                        _cancel_or_fail(type(e).__name__)
                         raise
 
                     # Re-raise already-classified errors immediately
                     if isinstance(e, (ProviderConfigurationError, ProviderUnavailableError)):
+                        _cancel_or_fail(type(e).__name__)
                         raise
 
                     retry_after = extract_retry_after_from_exception(e)
                     signal = classify_provider_error(e, provider, model=model_name, retry_after_seconds=retry_after)
 
                     if signal == "AUTH_ERROR":
+                        _cancel_or_fail("AUTH_ERROR")
                         raise ProviderConfigurationError(
                             f"Permanent provider configuration error in {func.__name__}: {str(e)}"
                         )
 
                     if signal == "DAILY_QUOTA_EXHAUSTED":
+                        _cancel_or_fail("DAILY_QUOTA_EXHAUSTED")
                         # Record failure and transition circuit breaker to BLOCKED
                         record_provider_quota_exhausted(
                             provider=provider,
@@ -143,6 +343,7 @@ def with_retry(func_or_provider=None, **decorator_kwargs):
                         )
 
                     if signal == "PERMANENT_REQUEST_ERROR":
+                        _cancel_or_fail("PERMANENT_REQUEST_ERROR")
                         raise ProviderConfigurationError(
                             f"Permanent request error in {func.__name__}: {str(e)}"
                         )
@@ -150,11 +351,16 @@ def with_retry(func_or_provider=None, **decorator_kwargs):
                     # TRANSIENT_RPM or PROVIDER_UNAVAILABLE: short backoff + retry
                     recoverable = signal in ("TRANSIENT_RPM", "PROVIDER_UNAVAILABLE")
                     if not recoverable or attempt == retries:
+                        _cancel_or_fail(str(signal) if signal else type(e).__name__)
                         if recoverable:
                             raise ProviderUnavailableError(
                                 f"Provider unavailable after {retries} retries: {str(e)}"
                             )
                         raise e
+
+                    # Transient failure on this attempt — cancel/fail and let loop create a NEW row on retry
+                    _cancel_or_fail(str(signal) if signal else type(e).__name__)
+                    _request_uid = None  # Reset: next iteration generates a new request_uid
 
                     wait_time = backoffs[attempt]
                     logger.warning(
@@ -177,6 +383,85 @@ import httpx
 import srt
 
 from app.core.db import DB_PATH, get_setting, update_job, append_job_log, save_translation_memory, get_translation_memory, get_positive_int_setting
+
+def _infer_usage_stage(func_name: str, kwargs: dict) -> str:
+    """
+    Infer the UsageStage for a with_retry-decorated dispatch based on the function name.
+    Stage describes WHY the request was made, not which provider handled it.
+
+    Explicit override: pass _usage_stage in kwargs to override (not used in current code
+    but available for future callers without requiring function signature changes).
+
+    Mapping:
+      translate_batch_gemini / _openai / _deepl / _ollama → PRIMARY
+      first_pass_micro_repair_batch                       → MICRO_REPAIR
+      fast_final_rescue_batch                             → RECOVERY
+      classify_and_recover_identical                      → RECOVERY
+      _execute_single_escalation_call                     → ESCALATION
+      verify_single_occurrence_entities                   → ENTITY_VERIFY
+      (any other)                                         → PRIMARY (safe default)
+    """
+    from app.core.usage import UsageStage
+
+    # Allow explicit kwarg override
+    explicit = kwargs.get("_usage_stage")
+    if explicit:
+        return str(explicit)
+
+    fn = func_name.lower()
+    if "translate_batch" in fn:
+        return UsageStage.PRIMARY
+    if "micro_repair" in fn:
+        return UsageStage.MICRO_REPAIR
+    if "rescue" in fn:
+        return UsageStage.RECOVERY
+    if "recover" in fn:
+        return UsageStage.RECOVERY
+    if "escalation" in fn or "escalate" in fn:
+        return UsageStage.ESCALATION
+    if "entity" in fn or "verify" in fn:
+        return UsageStage.ENTITY_VERIFY
+    if "classif" in fn:
+        return UsageStage.CLASSIFIER
+    # Default: treat as primary translation attempt
+    return UsageStage.PRIMARY
+
+
+def _capture_gemini_tokens(response: Any) -> Any:
+    """
+    Extract token usage from a Gemini GenerateContentResponse and write to the
+    module-level token store keyed by the current request_uid (from ContextVar).
+    Called inside provider functions (which run in threadpool) before returning.
+    Returns the response unchanged.
+    """
+    try:
+        from app.core.usage import extract_gemini_usage
+        request_uid = _usage_token_ctx.get(None)  # Thread sees asyncio-task snapshot
+        if request_uid:
+            token_meta = extract_gemini_usage(response)
+            _store_token_meta(request_uid, token_meta)
+    except Exception:
+        pass
+    return response
+
+
+def _capture_openai_tokens(response: Any) -> Any:
+    """
+    Extract token usage from an OpenAI ChatCompletion response and write to the
+    module-level token store keyed by the current request_uid (from ContextVar).
+    Called inside provider functions (which run in threadpool) before returning.
+    Returns the response unchanged.
+    """
+    try:
+        from app.core.usage import extract_openai_usage
+        request_uid = _usage_token_ctx.get(None)  # Thread sees asyncio-task snapshot
+        if request_uid:
+            token_meta = extract_openai_usage(response)
+            _store_token_meta(request_uid, token_meta)
+    except Exception:
+        pass
+    return response
+
 
 def is_safe_keep_prefilter(text: str) -> bool:
     """
@@ -841,7 +1126,8 @@ class SubtitleTranslator:
         target_language: str,
         show_title: str,
         source_subs: Optional[list] = None,
-        translated_subs: Optional[list] = None
+        translated_subs: Optional[list] = None,
+        job_id: Optional[int] = None
     ) -> list:
         provider = get_setting("ai_provider", "gemini").lower()
         if provider == "deepl":
@@ -890,6 +1176,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             client = genai.Client(api_key=api_key)
 
             def do_gemini():
+                _mark_sdk_started(_usage_token_ctx.get(None))
                 return client.models.generate_content(
                     model=model_name,
                     contents=[prompt],
@@ -901,7 +1188,8 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     )
                 )
             loop = asyncio.get_event_loop()
-            resp = await loop.run_in_executor(None, do_gemini)
+            resp = await loop.run_in_executor(None, contextvars.copy_context().run, do_gemini)
+            _capture_gemini_tokens(resp)
             raw_resp = resp.text
 
         elif provider == "openai":
@@ -911,6 +1199,7 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
             client = openai.Client(api_key=api_key)
 
             def do_openai():
+                _mark_sdk_started(_usage_token_ctx.get(None))
                 return client.chat.completions.create(
                     model=model_name,
                     messages=[
@@ -921,8 +1210,9 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                     temperature=0.1
                 )
             loop = asyncio.get_event_loop()
-            resp = await loop.run_in_executor(None, do_openai)
+            resp = await loop.run_in_executor(None, contextvars.copy_context().run, do_openai)
             try:
+                _capture_openai_tokens(resp)
                 raw_resp = resp.choices[0].message.content
             except Exception:
                 raw_resp = ""
@@ -985,7 +1275,8 @@ Valid reasons for KEEP: proper_noun, brand, acronym, number, symbol, non_verbal.
                 verified_ids = await self.verify_single_occurrence_entities(
                     context_candidates,
                     target_language,
-                    show_title=show_title
+                    show_title=show_title,
+                    job_id=job_id
                 )
                 for r in validated_results:
                     rid = r["id"]
@@ -1096,6 +1387,7 @@ CRITICAL INSTRUCTIONS:
             client = genai.Client(api_key=api_key)
 
             def do_gemini():
+                _mark_sdk_started(_usage_token_ctx.get(None))
                 return client.models.generate_content(
                     model=model_name,
                     contents=[prompt],
@@ -1107,7 +1399,8 @@ CRITICAL INSTRUCTIONS:
                     )
                 )
             loop = asyncio.get_event_loop()
-            resp = await loop.run_in_executor(None, do_gemini)
+            resp = await loop.run_in_executor(None, contextvars.copy_context().run, do_gemini)
+            _capture_gemini_tokens(resp)
             return validate_entity_verification_output(resp.text, candidates, show_title=show_title)
 
         elif provider == "openai":
@@ -1117,6 +1410,7 @@ CRITICAL INSTRUCTIONS:
             client = openai.Client(api_key=api_key)
 
             def do_openai():
+                _mark_sdk_started(_usage_token_ctx.get(None))
                 return client.chat.completions.create(
                     model=model_name,
                     messages=[
@@ -1127,8 +1421,9 @@ CRITICAL INSTRUCTIONS:
                     temperature=0.0
                 )
             loop = asyncio.get_event_loop()
-            resp = await loop.run_in_executor(None, do_openai)
+            resp = await loop.run_in_executor(None, contextvars.copy_context().run, do_openai)
             try:
+                _capture_openai_tokens(resp)
                 content = resp.choices[0].message.content
                 return validate_entity_verification_output(content, candidates, show_title=show_title)
             except Exception:
@@ -1187,6 +1482,7 @@ CRITICAL INSTRUCTIONS:
         schema: dict,
         target_language: str,
         target_text: str,
+        job_id: Optional[int] = None,
     ) -> Optional[str]:
         if provider == "gemini":
             from google import genai
@@ -1202,10 +1498,12 @@ CRITICAL INSTRUCTIONS:
             loop = asyncio.get_event_loop()
             resp = await loop.run_in_executor(
                 None,
-                lambda: client.models.generate_content(
+                contextvars.copy_context().run,
+                lambda: (_mark_sdk_started(_usage_token_ctx.get(None)), client.models.generate_content(
                     model=model_name, contents=prompt, config=config
-                ),
+                ))[-1],
             )
+            _capture_gemini_tokens(resp)
             return resp.text
 
         elif provider == "openai":
@@ -1215,7 +1513,8 @@ CRITICAL INSTRUCTIONS:
             loop = asyncio.get_event_loop()
             resp = await loop.run_in_executor(
                 None,
-                lambda: client.chat.completions.create(
+                contextvars.copy_context().run,
+                lambda: (_mark_sdk_started(_usage_token_ctx.get(None)), client.chat.completions.create(
                     model=model_name,
                     messages=[
                         {"role": "system", "content": system_prompt},
@@ -1226,8 +1525,9 @@ CRITICAL INSTRUCTIONS:
                         "type": "json_schema",
                         "json_schema": {"name": "esc", "schema": schema, "strict": True},
                     },
-                ),
+                ))[-1],
             )
+            _capture_openai_tokens(resp)
             return resp.choices[0].message.content
 
         elif provider == "deepl":
@@ -1358,6 +1658,7 @@ CRITICAL INSTRUCTIONS:
                     schema=schema,
                     target_language=target_language,
                     target_text=target_text,
+                    job_id=job_id,
                 )
                 res = _safe_parse(raw_out)
                 if res:
@@ -1378,7 +1679,7 @@ CRITICAL INSTRUCTIONS:
         return None
 
     @with_retry
-    async def translate_batch_gemini(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
+    async def translate_batch_gemini(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
         client = self.get_gemini_client()
 
         context_section = ""
@@ -1419,6 +1720,7 @@ CRITICAL INSTRUCTIONS:
         )
 
         def call_gemini(model_to_use):
+            _mark_sdk_started(_usage_token_ctx.get(None))
             return client.models.generate_content(
                 model=model_to_use,
                 contents=prompt,
@@ -1427,7 +1729,7 @@ CRITICAL INSTRUCTIONS:
 
         loop = asyncio.get_event_loop()
         try:
-            response = await loop.run_in_executor(None, lambda: call_gemini(model_name))
+            response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_gemini(model_name))
         except Exception as e:
             # Automatic Fallback if Google deprecated or changed model name
             if "404" in str(e) or "not found" in str(e).lower():
@@ -1436,7 +1738,7 @@ CRITICAL INSTRUCTIONS:
                     if fb != model_name:
                         try:
                             logger.warning(f"Model {model_name} failed with 404, falling back to {fb}")
-                            response = await loop.run_in_executor(None, lambda: call_gemini(fb))
+                            response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_gemini(fb))
                             break
                         except Exception:
                             continue
@@ -1445,10 +1747,10 @@ CRITICAL INSTRUCTIONS:
             else:
                 raise e
 
-        return extract_json_safely(response.text)
+        return extract_json_safely(_capture_gemini_tokens(response).text)
 
     @with_retry
-    async def translate_batch_openai(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
+    async def translate_batch_openai(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
         client = self.get_openai_client()
 
         context_section = ""
@@ -1465,6 +1767,7 @@ CRITICAL INSTRUCTIONS:
         glossary = get_setting("glossary", "")
 
         def call_openai(model_to_use):
+            _mark_sdk_started(_usage_token_ctx.get(None))
             return client.chat.completions.create(
                 model=model_to_use,
                 messages=[
@@ -1477,18 +1780,18 @@ CRITICAL INSTRUCTIONS:
 
         loop = asyncio.get_event_loop()
         try:
-            response = await loop.run_in_executor(None, lambda: call_openai(model_name))
+            response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_openai(model_name))
         except Exception as e:
             if "404" in str(e) or "model_not_found" in str(e).lower():
                 logger.warning(f"Model {model_name} failed with 404, falling back to gpt-4o-mini")
-                response = await loop.run_in_executor(None, lambda: call_openai("gpt-4o-mini"))
+                response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_openai("gpt-4o-mini"))
             else:
                 raise e
 
-        return extract_json_safely(response.choices[0].message.content)
+        return extract_json_safely(_capture_openai_tokens(response).choices[0].message.content)
 
     @with_retry
-    async def translate_batch_deepl(self, items: List[dict], target_language: str, context_lines: List[dict] = None) -> List[dict]:
+    async def translate_batch_deepl(self, items: List[dict], target_language: str, context_lines: List[dict] = None, job_id: Optional[int] = None) -> List[dict]:
         api_key = get_setting("deepl_api_key", "")
         if not api_key:
             raise ValueError("DeepL API Key is not configured.")
@@ -1513,7 +1816,7 @@ CRITICAL INSTRUCTIONS:
             return [{"id": items[i]["id"], "text": translations[i]["text"]} for i in range(len(items))]
 
     @with_retry
-    async def translate_batch_ollama(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
+    async def translate_batch_ollama(self, items: List[dict], target_language: str, model_name: str, context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
         ollama_url = get_setting("ollama_url", "http://localhost:11434").rstrip("/")
 
         context_section = ""
@@ -1538,20 +1841,20 @@ CRITICAL INSTRUCTIONS:
             data = resp.json()
             return extract_json_safely(data.get("response", "{}"))
 
-    async def translate_batch(self, items: List[dict], target_language: str = "English", context_lines: List[dict] = None, show_title: str = "") -> List[dict]:
+    async def translate_batch(self, items: List[dict], target_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
         provider = get_setting("ai_provider", "gemini").lower()
 
         if provider == "openai":
             model = get_setting("openai_model", "gpt-4o-mini")
-            return await self.translate_batch_openai(items, target_language, model, context_lines=context_lines, show_title=show_title)
+            return await self.translate_batch_openai(items, target_language, model, context_lines=context_lines, show_title=show_title, job_id=job_id)
         elif provider == "deepl":
-            return await self.translate_batch_deepl(items, target_language, context_lines=context_lines)
+            return await self.translate_batch_deepl(items, target_language, context_lines=context_lines, job_id=job_id)
         elif provider in ["ollama", "localai"]:
             model = get_setting("ollama_model", "llama3")
-            return await self.translate_batch_ollama(items, target_language, model, context_lines=context_lines, show_title=show_title)
+            return await self.translate_batch_ollama(items, target_language, model, context_lines=context_lines, show_title=show_title, job_id=job_id)
         else:
             model = get_setting("gemini_model", "gemini-3.5-flash-lite")
-            return await self.translate_batch_gemini(items, target_language, model, context_lines=context_lines, show_title=show_title)
+            return await self.translate_batch_gemini(items, target_language, model, context_lines=context_lines, show_title=show_title, job_id=job_id)
 
 
     async def translate_srt_content(
@@ -1677,7 +1980,8 @@ CRITICAL INSTRUCTIONS:
                         missing_payload,
                         target_language=target_language,
                         context_lines=batch_context if batch_context else None,
-                        show_title=show_title or ""
+                        show_title=show_title or "",
+                        job_id=job_id
                     )
 
                     # 2. Immediate deterministic validation (Fail-closed against echoes, empty, unmeaningful)
@@ -1907,6 +2211,7 @@ STRICT RULES:
             )
 
             def call_gemini(model_to_use):
+                _mark_sdk_started(_usage_token_ctx.get(None))
                 return client.models.generate_content(
                     model=model_to_use,
                     contents=prompt,
@@ -1915,7 +2220,7 @@ STRICT RULES:
 
             loop = asyncio.get_event_loop()
             try:
-                response = await loop.run_in_executor(None, lambda: call_gemini(model_name))
+                response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_gemini(model_name))
             except Exception as e:
                 if "404" in str(e) or "not found" in str(e).lower():
                     fallback_models = ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest"]
@@ -1923,7 +2228,7 @@ STRICT RULES:
                         if fb != model_name:
                             try:
                                 logger.warning(f"Model {model_name} failed with 404 in First-Pass Micro Repair, falling back to {fb}")
-                                response = await loop.run_in_executor(None, lambda: call_gemini(fb))
+                                response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_gemini(fb))
                                 break
                             except Exception:
                                 continue
@@ -1932,7 +2237,7 @@ STRICT RULES:
                 else:
                     raise e
 
-            return extract_json_safely(response.text)
+            return extract_json_safely(_capture_gemini_tokens(response).text)
 
         elif provider == "openai":
             import openai
@@ -1941,6 +2246,7 @@ STRICT RULES:
             client = openai.OpenAI(api_key=api_key)
 
             def call_openai(model_to_use):
+                _mark_sdk_started(_usage_token_ctx.get(None))
                 return client.chat.completions.create(
                     model=model_to_use,
                     messages=[
@@ -1953,14 +2259,14 @@ STRICT RULES:
 
             loop = asyncio.get_event_loop()
             try:
-                response = await loop.run_in_executor(None, lambda: call_openai(model_name))
+                response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_openai(model_name))
             except Exception as e:
                 if "404" in str(e) or "model_not_found" in str(e).lower():
-                    response = await loop.run_in_executor(None, lambda: call_openai("gpt-4o-mini"))
+                    response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_openai("gpt-4o-mini"))
                 else:
                     raise e
 
-            return extract_json_safely(response.choices[0].message.content)
+            return extract_json_safely(_capture_openai_tokens(response).choices[0].message.content)
 
         elif provider in ["ollama", "localai"]:
             import httpx
@@ -2098,6 +2404,7 @@ IMPORTANT:
             )
 
             def call_gemini(model_to_use):
+                _mark_sdk_started(_usage_token_ctx.get(None))
                 return client.models.generate_content(
                     model=model_to_use,
                     contents=prompt,
@@ -2106,7 +2413,7 @@ IMPORTANT:
 
             loop = asyncio.get_event_loop()
             try:
-                response = await loop.run_in_executor(None, lambda: call_gemini(model_name))
+                response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_gemini(model_name))
             except Exception as e:
                 if "404" in str(e) or "not found" in str(e).lower():
                     fallback_models = ["gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-flash-latest"]
@@ -2114,7 +2421,7 @@ IMPORTANT:
                         if fb != model_name:
                             try:
                                 logger.warning(f"Model {model_name} failed with 404 in Fast Final Rescue, falling back to {fb}")
-                                response = await loop.run_in_executor(None, lambda: call_gemini(fb))
+                                response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_gemini(fb))
                                 break
                             except Exception:
                                 continue
@@ -2123,7 +2430,7 @@ IMPORTANT:
                 else:
                     raise e
 
-            return extract_json_safely(response.text)
+            return extract_json_safely(_capture_gemini_tokens(response).text)
 
         elif provider == "openai":
             import openai
@@ -2132,6 +2439,7 @@ IMPORTANT:
             client = openai.OpenAI(api_key=api_key)
 
             def call_openai(model_to_use):
+                _mark_sdk_started(_usage_token_ctx.get(None))
                 return client.chat.completions.create(
                     model=model_to_use,
                     messages=[
@@ -2144,14 +2452,14 @@ IMPORTANT:
 
             loop = asyncio.get_event_loop()
             try:
-                response = await loop.run_in_executor(None, lambda: call_openai(model_name))
+                response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_openai(model_name))
             except Exception as e:
                 if "404" in str(e) or "model_not_found" in str(e).lower():
-                    response = await loop.run_in_executor(None, lambda: call_openai("gpt-4o-mini"))
+                    response = await loop.run_in_executor(None, contextvars.copy_context().run, lambda: call_openai("gpt-4o-mini"))
                 else:
                     raise e
 
-            return extract_json_safely(response.choices[0].message.content)
+            return extract_json_safely(_capture_openai_tokens(response).choices[0].message.content)
 
         elif provider in ["ollama", "localai"]:
             import httpx

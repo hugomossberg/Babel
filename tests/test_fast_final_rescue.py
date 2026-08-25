@@ -67,7 +67,7 @@ async def test_1_batch_rescue_success(mock_db_settings, tmp_path, monkeypatch):
         return [{"id": item["id"], "text": item["text"]} for item in items]
 
     # Classifier classifies them as translate
-    async def mock_classify(items, lang, title):
+    async def mock_classify(items, lang, title, **kwargs):
         return [{"id": item["id"], "action": "translate", "reason": "none", "text": ""} for item in items]
 
     rescue_call_counts = 0
@@ -311,7 +311,7 @@ async def test_6_safe_keep_unaffected(mock_db_settings, tmp_path, monkeypatch):
     async def mock_translate_batch(items, *args, **kwargs):
         return [{"id": i["id"], "text": i["text"]} for i in items]
 
-    async def mock_classify(items, lang, title):
+    async def mock_classify(items, lang, title, **kwargs):
         results = []
         for it in items:
             t = it["text"]

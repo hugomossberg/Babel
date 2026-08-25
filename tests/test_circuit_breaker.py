@@ -909,6 +909,13 @@ async def test_5_two_contenders_single_flight_probe_winner():
     Blocked contenders:
     -> ZERO external provider requests
     -> ZERO budget consumption.
+
+    Root-cause note (confirmed 2026-08-24):
+    get_daily_requests_used() calls _today_window() which calls _utcnow().
+    The budget row is written with the PATCHED date (2026-08-24).
+    If we query outside the patch context, _utcnow() returns real-today (2026-08-25)
+    and the lookup finds 0 rows -> returns 0. Bug was in the test, not in production.
+    Fix: assert inside the same patch context so window_date matches what was written.
     """
     from app.core.quota import get_daily_requests_used
     set_setting("daily_request_budget_openrouter", "10")
@@ -919,17 +926,19 @@ async def test_5_two_contenders_single_flight_probe_winner():
 
     future = now + timedelta(seconds=910)
     with patch("app.core.quota._utcnow", return_value=future):
-        # Contender 1
+        # Contender 1 — probe winner
         allowed1, info1 = acquire_dispatch_slot("openrouter", model="claude", credential="key-a", scope_type="model", job_id="job_1")
-        # Contender 2
+        # Contender 2 — lease loser
         allowed2, info2 = acquire_dispatch_slot("openrouter", model="claude", credential="key-a", scope_type="model", job_id="job_2")
 
-    assert allowed1 is True
-    assert info1["is_probe"] is True
-    assert allowed2 is False
-    assert info2["reason"] == "Probe request currently in flight"
+        assert allowed1 is True
+        assert info1["is_probe"] is True
+        assert allowed2 is False
+        assert info2["reason"] == "Probe request currently in flight"
 
-    # Exactly 1 budget slot consumed by winner, 0 by blocked contender
-    assert get_daily_requests_used("openrouter") == 1
+        # Exactly 1 budget slot consumed by winner, 0 by blocked contender.
+        # Query inside same patch context: _today_window() returns "2026-08-24"
+        # which matches the window_date written when the probe lease was acquired.
+        assert get_daily_requests_used("openrouter") == 1
 
 

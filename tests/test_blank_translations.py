@@ -56,7 +56,7 @@ async def test_blank_recovery_regression(setup_teardown_db):
         import copy
         return copy.deepcopy(first_pass_subs)
 
-    async def mock_classify_and_recover_identical(items, target_language, show_title):
+    async def mock_classify_and_recover_identical(items, target_language, show_title, **kwargs):
         # Return blank translation
         return [
             {"id": 1, "action": "translate", "text": "   "}

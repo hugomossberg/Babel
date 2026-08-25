@@ -1052,6 +1052,157 @@ def try_consume_request_budget(provider: str) -> bool:
         return True
 
 
+def is_local_budget_available(provider: str) -> bool:
+    """Return True if local request budget allows requests (unlimited or used < budget)."""
+    budget = get_daily_budget(provider)
+    if budget is None:
+        return True
+    used = get_daily_requests_used(provider)
+    return used < budget
+
+
+def should_retry_deferred_job(job: dict, now: Optional[datetime] = None) -> bool:
+    """
+    Determine if a DEFERRED job is eligible for retry in the scheduler pass.
+
+    Rules:
+    1. Use the job's PINNED provider (waiting_provider -> primary_provider -> global fallback).
+       This prevents re-assignment when global settings change.
+    2. If the pinned provider is currently blocked by external daily quota / circuit breaker:
+       -> Do NOT retry yet (respect circuit breaker).
+    3. If job has structured defer_reason == LOCAL_RPD or INSUFFICIENT_LOCAL_BUDGET,
+       OR legacy text-pattern match:
+       -> If local budget is currently available (user raised budget, set unlimited,
+          or day rolled over), retry immediately without waiting for old midnight next_retry_at.
+       -> If local budget is still exhausted, respect next_retry_at (midnight reset).
+    4. For other DEFERRED jobs (e.g. external quota reset):
+       -> Retry once now >= next_retry_at.
+    """
+    if job.get("status") != "DEFERRED":
+        return False
+
+    # Resolve pinned provider — job's own config, not global setting
+    pinned_provider = (
+        job.get("waiting_provider")
+        or job.get("primary_provider")
+        or None
+    )
+    if pinned_provider:
+        pinned_provider = pinned_provider.strip().lower()
+    else:
+        # Legacy fallback: no pinned provider yet — use global setting conservatively
+        from app.core.db import get_setting
+        pinned_provider = get_setting("ai_provider", "gemini").lower()
+
+    if is_provider_blocked(pinned_provider):
+        return False
+
+    if now is None:
+        now = _utcnow()
+
+    # Structured defer reason (new jobs) takes priority
+    defer_reason = (job.get("defer_reason") or "").strip()
+    LOCAL_BUDGET_REASONS = {"LOCAL_RPD", "INSUFFICIENT_LOCAL_BUDGET"}
+
+    if defer_reason in LOCAL_BUDGET_REASONS:
+        if is_local_budget_available(pinned_provider):
+            return True
+        if job.get("next_retry_at"):
+            try:
+                nra = datetime.fromisoformat(job["next_retry_at"])
+                if nra.tzinfo is None:
+                    nra = nra.replace(tzinfo=timezone.utc)
+                return now >= nra
+            except Exception:
+                return False
+        return False
+
+    if not defer_reason:
+        # Legacy text-pattern fallback for old jobs without defer_reason column
+        err_text = f"{job.get('last_error', '')} {job.get('error_message', '')}".lower()
+        is_local_budget_deferral = ("budget" in err_text or "requestbudgetexhausted" in err_text)
+        if is_local_budget_deferral:
+            if is_local_budget_available(pinned_provider):
+                return True
+            if job.get("next_retry_at"):
+                try:
+                    nra = datetime.fromisoformat(job["next_retry_at"])
+                    if nra.tzinfo is None:
+                        nra = nra.replace(tzinfo=timezone.utc)
+                    return now >= nra
+                except Exception:
+                    return False
+            return False
+
+    # External quota / PROVIDER_QUOTA / QUEUE_BACKLOG / ESCALATION deferrals:
+    # require now >= next_retry_at
+    if job.get("next_retry_at"):
+        try:
+            nra = datetime.fromisoformat(job["next_retry_at"])
+            if nra.tzinfo is None:
+                nra = nra.replace(tzinfo=timezone.utc)
+            return now >= nra
+        except Exception:
+            return False
+
+    return False
+
+
+def check_minimum_budget_admission(
+    provider: str,
+    num_cues: int,
+    batch_size: int,
+) -> dict:
+    """
+    Pre-flight check for a NEW primary translation job.
+    Computes the minimum number of primary batch requests required (ceil(cues/batch))
+    and checks whether the current remaining local budget can cover them.
+
+    Returns a dict:
+      {
+        "admitted": bool,         # True = may proceed, False = must defer
+        "estimated_minimum": int, # ceil(num_cues / batch_size)
+        "available": int|None,    # remaining budget (None = unlimited)
+        "reason": str,            # DeferReason constant if not admitted
+      }
+
+    Notes:
+    - This is ONLY for primary translation. QA/repair/escalation are NOT estimated.
+    - For resumed/partial jobs, callers should NOT use this (they know remaining work).
+    - Budget 0 = Unlimited => always admitted.
+    """
+    import math
+    budget = get_daily_budget(provider)
+    estimated_minimum = math.ceil(num_cues / batch_size) if batch_size > 0 else num_cues
+
+    if budget is None:
+        # Unlimited
+        return {
+            "admitted": True,
+            "estimated_minimum": estimated_minimum,
+            "available": None,
+            "reason": "",
+        }
+
+    used = get_daily_requests_used(provider)
+    available = max(0, budget - used)
+
+    if available < estimated_minimum:
+        return {
+            "admitted": False,
+            "estimated_minimum": estimated_minimum,
+            "available": available,
+            "reason": "INSUFFICIENT_LOCAL_BUDGET",
+        }
+
+    return {
+        "admitted": True,
+        "estimated_minimum": estimated_minimum,
+        "available": available,
+        "reason": "",
+    }
+
+
 def get_quota_status_for_provider(provider: str, model: Optional[str] = None) -> dict:
     """
     Return a unified quota status dict for API/UI consumption.
