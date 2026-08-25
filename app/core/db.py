@@ -219,7 +219,6 @@ def init_db():
             "jellyfin_api_key": "",
             "media_series_path": "/tv",
             "media_movies_path": "/movies",
-            "webhook_secret": os.getenv("BABEL_WEBHOOK_SECRET", ""),
             "qa_max_unresolved_cues": "3",
             "qa_max_unresolved_ratio": "0.01",
             "languages": json.dumps([
@@ -233,6 +232,26 @@ def init_db():
         }
         for k, v in defaults.items():
             cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+
+        # Webhook secret canonical resolution:
+        # BABEL_WEBHOOK_SECRET env var (non-empty) always wins over any persisted DB value.
+        # This ensures Docker users can change the secret in .env + container restart
+        # without a stale DB value remaining active.
+        # Semantics:
+        #   - BABEL_WEBHOOK_SECRET non-empty → persist and use env value (UPDATE OR INSERT)
+        #   - BABEL_WEBHOOK_SECRET empty/absent → keep whatever is in DB (INSERT OR IGNORE with "")
+        _env_secret = os.getenv("BABEL_WEBHOOK_SECRET", "")
+        if _env_secret:
+            # Env explicitly set: overwrite DB regardless of existing value
+            cursor.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('webhook_secret', ?)",
+                (_env_secret,)
+            )
+        else:
+            # Env absent/empty: preserve existing DB value; insert empty string only if no row exists
+            cursor.execute(
+                "INSERT OR IGNORE INTO settings (key, value) VALUES ('webhook_secret', '')"
+            )
 
         conn.commit()
 
@@ -376,6 +395,12 @@ def delete_job(job_id: int):
 def clear_all_jobs():
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
+        # Delete usage ledger rows first to avoid orphaned FK references.
+        # Both tables cleared in the same transaction for consistency.
+        try:
+            cursor.execute("DELETE FROM ai_usage_ledger")
+        except Exception:
+            pass  # Table may not exist yet (schema migration pending)
         cursor.execute("DELETE FROM jobs")
         conn.commit()
 

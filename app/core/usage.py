@@ -22,9 +22,11 @@ Token semantics (Gemini and OpenAI):
 - input_tokens = TOTAL prompt tokens INCLUDING cached subset.
 - cached_input_tokens = cached subset of input_tokens (billed at lower rate).
 - uncached_input = max(input_tokens - cached_input_tokens, 0)
-- cost = uncached_input * input_rate + cached * cached_rate + output * output_rate
-- Gemini: candidates_token_count includes thinking tokens (billed at output rate).
-- OpenAI: completion_tokens includes reasoning tokens (billed at output rate).
+- output_tokens = candidate/completion output tokens EXCLUDING thinking tokens.
+- thinking_tokens = reasoning/thinking tokens (Gemini: thoughts_token_count;
+  OpenAI: stored separately if applicable). NULL = provider does not report thinking.
+- billable_output = output_tokens + thinking_tokens (both billed at output rate).
+- cost = uncached_input * input_rate + cached * cached_rate + billable_output * output_rate
 - No double-counting: cached tokens NOT also billed at full input_rate.
 """
 
@@ -67,6 +69,7 @@ def _migrate_usage_schema(conn):
         input_tokens         INTEGER,
         cached_input_tokens  INTEGER,
         output_tokens        INTEGER,
+        thinking_tokens      INTEGER,
         estimated_cost_usd   REAL,
         error_type           TEXT,
         created_at           TEXT    NOT NULL,
@@ -74,6 +77,11 @@ def _migrate_usage_schema(conn):
         FOREIGN KEY (job_id) REFERENCES jobs(id)
     )
     """)
+    # Idempotent migration: add thinking_tokens column to existing databases
+    try:
+        conn.execute("ALTER TABLE ai_usage_ledger ADD COLUMN thinking_tokens INTEGER")
+    except Exception:
+        pass  # Column already exists
     conn.execute("""
     CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_usage_request_uid
         ON ai_usage_ledger (request_uid)
@@ -271,25 +279,27 @@ def get_pricing(provider, model, at_date=None):
     return None
 
 
-def calculate_estimated_cost(provider, model, input_tokens, cached_input_tokens, output_tokens, at_date=None):
+def calculate_estimated_cost(provider, model, input_tokens, cached_input_tokens, output_tokens,
+                              thinking_tokens=None, at_date=None):
     """
     Calculate estimated cost in USD.
 
     Returns None if provider/model unknown or all tokens None.
 
     Cost formula:
-      uncached_input = max(input_tokens - cached_input_tokens, 0)
-      cost = uncached * input_rate + cached * cached_rate + output * output_rate
+      uncached_input  = max(input_tokens - cached_input_tokens, 0)
+      billable_output = output_tokens + thinking_tokens  (both billed at output_rate)
+      cost = uncached_input * input_rate + cached * cached_rate + billable_output * output_rate
 
-    Gemini: candidates_token_count INCLUDES thinking tokens (billed at output rate).
-    OpenAI: completion_tokens INCLUDES reasoning tokens (billed at output rate).
+    output_tokens:   candidate/completion output EXCLUDING thinking tokens.
+    thinking_tokens: reasoning tokens (Gemini: thoughts_token_count). NULL = 0 for billing.
     No double-counting: cached tokens NOT also billed at full input_rate.
     """
     pricing = get_pricing(provider, model, at_date=at_date)
     if pricing is None:
         return None
 
-    if input_tokens is None and output_tokens is None:
+    if input_tokens is None and output_tokens is None and thinking_tokens is None:
         return None
 
     input_rate = pricing.get("input_per_1m")
@@ -306,8 +316,12 @@ def calculate_estimated_cost(provider, model, input_tokens, cached_input_tokens,
         else:
             total_cost += (input_tokens / 1_000_000.0) * input_rate
 
-    if output_tokens is not None and output_rate is not None:
-        total_cost += (output_tokens / 1_000_000.0) * output_rate
+    # billable_output = output_tokens + thinking_tokens (both at output rate)
+    billable_output = (output_tokens or 0) + (thinking_tokens or 0)
+    if billable_output > 0 and output_rate is not None:
+        total_cost += (billable_output / 1_000_000.0) * output_rate
+    elif output_tokens is None and thinking_tokens is None:
+        pass  # no output tokens at all — don't add zero cost
 
     return total_cost
 
@@ -316,13 +330,20 @@ def extract_gemini_usage(response):
     """
     Extract token usage from Gemini SDK GenerateContentResponse.
 
-    prompt_token_count: total prompt tokens (includes cached subset)
-    cached_content_token_count: cached subset (billed at lower rate)
-    candidates_token_count: output tokens INCLUDING thinking tokens
+    Token semantics:
+      prompt_token_count:           total prompt tokens (includes cached subset)
+      cached_content_token_count:   cached subset (billed at lower rate)
+      candidates_token_count:       candidate output tokens EXCLUDING thinking tokens
+      thoughts_token_count:         thinking/reasoning tokens (Gemini thinking models only)
+                                    NULL/absent if model does not use thinking.
+
+    billable_output = candidates_token_count + thoughts_token_count
+    Both are billed at the same output_per_1m rate.
 
     cached_input_tokens=None if cached_content_token_count <= 0 (no caching used).
+    thinking_tokens=None if thoughts_token_count is absent or zero (model has no thinking).
     """
-    result = {"input_tokens": None, "cached_input_tokens": None, "output_tokens": None}
+    result = {"input_tokens": None, "cached_input_tokens": None, "output_tokens": None, "thinking_tokens": None}
     try:
         um = getattr(response, "usage_metadata", None)
         if um is None:
@@ -336,6 +357,14 @@ def extract_gemini_usage(response):
         ct = getattr(um, "candidates_token_count", None)
         if ct is not None:
             result["output_tokens"] = int(ct)
+        # thoughts_token_count is available in Gemini thinking models
+        # (e.g. gemini-3.7-flash with thinking enabled). Absent in non-thinking models.
+        tt = getattr(um, "thoughts_token_count", None)
+        if tt is None:
+            # Try camelCase variant used in some SDK versions
+            tt = getattr(um, "thoughtsTokenCount", None)
+        if tt is not None and int(tt) > 0:
+            result["thinking_tokens"] = int(tt)
     except Exception as e:
         logger.debug("extract_gemini_usage: parse error: %s", e)
     return result
@@ -350,8 +379,9 @@ def extract_openai_usage(response):
     prompt_tokens_details.cached_tokens: cached subset
 
     cached_input_tokens=None if cached_tokens <= 0 (no caching used).
+    thinking_tokens: always None for OpenAI (reasoning is included in completion_tokens).
     """
-    result = {"input_tokens": None, "cached_input_tokens": None, "output_tokens": None}
+    result = {"input_tokens": None, "cached_input_tokens": None, "output_tokens": None, "thinking_tokens": None}
     try:
         usage = getattr(response, "usage", None)
         if usage is None:
@@ -380,7 +410,7 @@ def extract_usage_from_response(provider, response):
     elif p == "openai":
         return extract_openai_usage(response)
     else:
-        return {"input_tokens": None, "cached_input_tokens": None, "output_tokens": None}
+        return {"input_tokens": None, "cached_input_tokens": None, "output_tokens": None, "thinking_tokens": None}
 
 
 def generate_request_uid():
@@ -415,8 +445,12 @@ def record_dispatch(request_uid, provider, model, stage, job_id=None, created_at
 
 
 def complete_dispatch(request_uid, status, input_tokens=None, cached_input_tokens=None,
-                      output_tokens=None, estimated_cost_usd=None, error_type=None):
-    """Update PENDING row with final outcome and token metadata."""
+                      output_tokens=None, thinking_tokens=None, estimated_cost_usd=None, error_type=None):
+    """Update PENDING row with final outcome and token metadata.
+
+    thinking_tokens: reasoning/thinking token count (Gemini only); NULL if not applicable.
+    estimated_cost_usd: computed from billable_output = output_tokens + thinking_tokens.
+    """
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
         with sqlite3.connect(DB_PATH, timeout=15.0) as conn:
@@ -424,10 +458,10 @@ def complete_dispatch(request_uid, status, input_tokens=None, cached_input_token
             cursor = conn.execute(
                 """UPDATE ai_usage_ledger
                    SET status=?, input_tokens=?, cached_input_tokens=?, output_tokens=?,
-                       estimated_cost_usd=?, error_type=?, completed_at=?
+                       thinking_tokens=?, estimated_cost_usd=?, error_type=?, completed_at=?
                    WHERE request_uid=?""",
                 (status, input_tokens, cached_input_tokens, output_tokens,
-                 estimated_cost_usd, error_type, now_iso, request_uid),
+                 thinking_tokens, estimated_cost_usd, error_type, now_iso, request_uid),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -465,7 +499,7 @@ def get_job_usage_summary(job_id):
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """SELECT stage, provider, model, status,
-                          input_tokens, cached_input_tokens, output_tokens, estimated_cost_usd
+                          input_tokens, cached_input_tokens, output_tokens, thinking_tokens, estimated_cost_usd
                    FROM ai_usage_ledger
                    WHERE job_id=? AND status!='PENDING'
                    ORDER BY id""",
@@ -479,7 +513,7 @@ def get_job_usage_summary(job_id):
         return _empty_job_summary(job_id)
 
     total_calls = len(rows)
-    total_input = total_cached = total_output = total_cost = None
+    total_input = total_cached = total_output = total_thinking = total_cost = None
     by_stage = {}
     by_provider = {}
     by_provider_model = {}
@@ -500,6 +534,7 @@ def get_job_usage_summary(job_id):
             b["input_tokens"] = _nullable_add(b["input_tokens"], row["input_tokens"])
             b["cached_input_tokens"] = _nullable_add(b["cached_input_tokens"], row["cached_input_tokens"])
             b["output_tokens"] = _nullable_add(b["output_tokens"], row["output_tokens"])
+            b["thinking_tokens"] = _nullable_add(b["thinking_tokens"], row["thinking_tokens"])
             b["estimated_cost_usd"] = _nullable_add(b["estimated_cost_usd"], row["estimated_cost_usd"])
 
         if detail_key not in detail_dict:
@@ -509,11 +544,13 @@ def get_job_usage_summary(job_id):
         d["input_tokens"] = _nullable_add(d["input_tokens"], row["input_tokens"])
         d["cached_input_tokens"] = _nullable_add(d["cached_input_tokens"], row["cached_input_tokens"])
         d["output_tokens"] = _nullable_add(d["output_tokens"], row["output_tokens"])
+        d["thinking_tokens"] = _nullable_add(d["thinking_tokens"], row["thinking_tokens"])
         d["estimated_cost_usd"] = _nullable_add(d["estimated_cost_usd"], row["estimated_cost_usd"])
 
         total_input = _nullable_add(total_input, row["input_tokens"])
         total_cached = _nullable_add(total_cached, row["cached_input_tokens"])
         total_output = _nullable_add(total_output, row["output_tokens"])
+        total_thinking = _nullable_add(total_thinking, row["thinking_tokens"])
         total_cost = _nullable_add(total_cost, row["estimated_cost_usd"])
 
     return {
@@ -522,6 +559,7 @@ def get_job_usage_summary(job_id):
         "total_input_tokens": total_input,
         "total_cached_input_tokens": total_cached,
         "total_output_tokens": total_output,
+        "total_thinking_tokens": total_thinking,
         "total_estimated_cost_usd": total_cost,
         "breakdown": {
             "by_stage": by_stage,
@@ -594,22 +632,42 @@ MIN_SAMPLE_THRESHOLD = 3
 
 def get_historical_stats():
     """
-    Historical usage statistics for AI-processed completed jobs.
+    Historical usage statistics.
 
-    Denominator = distinct TRANSLATED jobs with >=1 real usage row.
-    Numerator = total real usage rows across those jobs.
-    average_calls_per_job = numerator / denominator.
+    Two separate concepts:
+    A) ALL-TIME PROVIDER USAGE — all completed provider requests (SUCCESS + FAILED).
+       These are what actually cost money.
+       Excludes PENDING rows only (not yet completed).
+       Fields: total_calls_all_time, total_estimated_cost_all_time
 
-    NULL-job_id rows excluded (INNER JOIN ensures only attributed rows count).
+    B) TRANSLATED JOB STATISTICS — only jobs with status=TRANSLATED.
+       Used for per-job averages (calls per translated job, cost per translated job).
+       Fields: completed_jobs_with_ai, average_calls_per_job, average_estimated_cost_per_job
+
+    NULL-job_id rows are included in all-time totals (non-attributed requests still cost money).
     """
     try:
         with sqlite3.connect(DB_PATH, timeout=10.0) as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute(
+
+            # A) All-time provider usage: ALL completed rows (excluding PENDING)
+            all_time_row = conn.execute(
+                """SELECT
+                       COUNT(id)              AS total_calls,
+                       SUM(estimated_cost_usd) AS total_cost
+                   FROM ai_usage_ledger
+                   WHERE status != 'PENDING'"""
+            ).fetchone()
+
+            all_time_calls = (all_time_row["total_calls"] or 0) if all_time_row else 0
+            all_time_cost = (all_time_row["total_cost"]) if all_time_row else None
+
+            # B) Translated-job statistics: rows attributed to TRANSLATED jobs only
+            translated_row = conn.execute(
                 """SELECT
                        COUNT(DISTINCT u.job_id) AS completed_jobs_with_ai,
-                       COUNT(u.id)              AS total_calls,
-                       SUM(u.estimated_cost_usd) AS total_cost
+                       COUNT(u.id)              AS translated_calls,
+                       SUM(u.estimated_cost_usd) AS translated_cost
                    FROM ai_usage_ledger u
                    INNER JOIN jobs j ON j.id = u.job_id
                    WHERE j.status = 'TRANSLATED'
@@ -617,7 +675,11 @@ def get_historical_stats():
                      AND u.job_id IS NOT NULL"""
             ).fetchone()
 
-            if not row or (row["completed_jobs_with_ai"] or 0) == 0:
+            n = (translated_row["completed_jobs_with_ai"] or 0) if translated_row else 0
+            tc = (translated_row["translated_calls"] or 0) if translated_row else 0
+            cost = (translated_row["translated_cost"]) if translated_row else None
+
+            if n == 0 and all_time_calls == 0:
                 return {
                     "completed_jobs_with_ai": 0,
                     "average_calls_per_job": None,
@@ -628,16 +690,12 @@ def get_historical_stats():
                     "min_sample_threshold": MIN_SAMPLE_THRESHOLD,
                 }
 
-            n = row["completed_jobs_with_ai"]
-            tc = row["total_calls"] or 0
-            cost = row["total_cost"]
-
             return {
                 "completed_jobs_with_ai": n,
                 "average_calls_per_job": tc / n if n > 0 else None,
                 "average_estimated_cost_per_job": (cost / n) if (cost is not None and n > 0) else None,
-                "total_calls_all_time": tc,
-                "total_estimated_cost_all_time": cost,
+                "total_calls_all_time": all_time_calls,
+                "total_estimated_cost_all_time": all_time_cost,
                 "has_sufficient_history": n >= MIN_SAMPLE_THRESHOLD,
                 "min_sample_threshold": MIN_SAMPLE_THRESHOLD,
             }
@@ -662,7 +720,7 @@ def _nullable_add(a, b):
 
 
 def _empty_bucket():
-    return {"calls": 0, "input_tokens": None, "cached_input_tokens": None, "output_tokens": None, "estimated_cost_usd": None}
+    return {"calls": 0, "input_tokens": None, "cached_input_tokens": None, "output_tokens": None, "thinking_tokens": None, "estimated_cost_usd": None}
 
 
 def _empty_job_summary(job_id):
@@ -672,6 +730,7 @@ def _empty_job_summary(job_id):
         "total_input_tokens": None,
         "total_cached_input_tokens": None,
         "total_output_tokens": None,
+        "total_thinking_tokens": None,
         "total_estimated_cost_usd": None,
         "breakdown": {"by_stage": {}, "by_provider": {}, "by_provider_model": {}, "detail": []},
         "raw_rows": 0,
