@@ -5,6 +5,7 @@ from app.services.plex_notifier import (
     notify_plex_library_refresh,
     _map_to_plex_path,
     _match_section,
+    _path_is_within,
 )
 
 SECTIONS_XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -58,6 +59,46 @@ def test_path_mapping_translates_babel_path_to_plex_path():
                side_effect=_settings(plex_path_babel_prefix="/data/media",
                                      plex_path_plex_prefix="/mnt/data/media")):
         assert _map_to_plex_path("/data/media/tv/S.srt") == "/mnt/data/media/tv/S.srt"
+
+
+def test_path_mapping_does_not_match_sibling_prefix():
+    """A /tv mapping must not fire on /tv4k (review feedback on #8)."""
+    with patch("app.services.plex_notifier.get_setting",
+               side_effect=_settings(plex_path_babel_prefix="/tv",
+                                     plex_path_plex_prefix="/mnt/data/media/tv")):
+        # sibling directory must be left untouched
+        assert _map_to_plex_path("/tv4k/Show/ep.sr.srt") == "/tv4k/Show/ep.sr.srt"
+        # the real prefix still maps
+        assert _map_to_plex_path("/tv/Show/ep.sr.srt") == "/mnt/data/media/tv/Show/ep.sr.srt"
+
+
+def test_path_mapping_prefers_longest_overlapping_prefix():
+    """With overlapping mappings the most specific one wins, whatever the order."""
+    with patch("app.services.plex_notifier.get_setting",
+               side_effect=_settings(plex_path_babel_prefix="/data,/data/media/tv4k",
+                                     plex_path_plex_prefix="/mnt/data,/library/uhd")):
+        assert _map_to_plex_path("/data/media/tv4k/Show/ep.sr.srt") == "/library/uhd/Show/ep.sr.srt"
+        assert _map_to_plex_path("/data/media/tv/Show/ep.sr.srt") == "/mnt/data/media/tv/Show/ep.sr.srt"
+
+    # reversed configuration order must give the same result
+    with patch("app.services.plex_notifier.get_setting",
+               side_effect=_settings(plex_path_babel_prefix="/data/media/tv4k,/data",
+                                     plex_path_plex_prefix="/library/uhd,/mnt/data")):
+        assert _map_to_plex_path("/data/media/tv4k/Show/ep.sr.srt") == "/library/uhd/Show/ep.sr.srt"
+
+
+def test_path_mapping_handles_trailing_slashes():
+    with patch("app.services.plex_notifier.get_setting",
+               side_effect=_settings(plex_path_babel_prefix="/data/media/",
+                                     plex_path_plex_prefix="/mnt/data/media/")):
+        assert _map_to_plex_path("/data/media/tv/ep.srt") == "/mnt/data/media/tv/ep.srt"
+
+
+def test_path_is_within_boundary_rules():
+    assert _path_is_within("/media/tv/Show/ep.srt", "/media/tv")
+    assert _path_is_within("/media/tv", "/media/tv")
+    assert not _path_is_within("/media/tv4k/Show/ep.srt", "/media/tv")
+    assert not _path_is_within("/media/tv/ep.srt", "")
 
 
 def test_path_mapping_is_identity_when_unconfigured():

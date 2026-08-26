@@ -11,6 +11,19 @@ from app.core.db import get_setting
 logger = logging.getLogger("babel.plex")
 
 
+def _path_is_within(path: str, prefix: str) -> bool:
+    """
+    True when path is prefix itself or sits underneath it.
+
+    A bare startswith() would treat /media/tv as a prefix of /media/tv4k, so the
+    match must land on a separator boundary.
+    """
+    prefix = prefix.rstrip("/")
+    if not prefix:
+        return False
+    return path == prefix or path.startswith(prefix + os.sep)
+
+
 def _map_to_plex_path(local_path: str) -> str:
     """
     Translates a path as Babel sees it into the path Plex sees.
@@ -27,11 +40,21 @@ def _map_to_plex_path(local_path: str) -> str:
 
     b_prefs = [p.strip() for p in babel_prefix.split(",")]
     p_prefs = [p.strip() for p in plex_prefix.split(",")]
+
+    # Prefer the longest (most specific) matching prefix so overlapping mappings
+    # resolve predictably regardless of the order they were configured in.
+    best_i = -1
+    best_len = -1
     for i, b_pref in enumerate(b_prefs):
-        p_pref = p_prefs[i] if i < len(p_prefs) else ""
-        if b_pref and local_path.startswith(b_pref):
-            return local_path.replace(b_pref, p_pref, 1)
-    return local_path
+        if _path_is_within(local_path, b_pref) and len(b_pref.rstrip("/")) > best_len:
+            best_i, best_len = i, len(b_pref.rstrip("/"))
+
+    if best_i < 0:
+        return local_path
+
+    b_pref = b_prefs[best_i].rstrip("/")
+    p_pref = (p_prefs[best_i] if best_i < len(p_prefs) else "").rstrip("/")
+    return p_pref + local_path[len(b_pref):]
 
 
 async def _get_sections(client: httpx.AsyncClient, url: str, token: str) -> List[Tuple[str, List[str]]]:
@@ -65,8 +88,8 @@ def _match_section(sections: List[Tuple[str, List[str]]], plex_path: str) -> Opt
     best_len = -1
     for key, locations in sections:
         for loc in locations:
-            if plex_path.startswith(loc.rstrip("/") + os.sep) and len(loc) > best_len:
-                best_key, best_len = key, len(loc)
+            if _path_is_within(plex_path, loc) and len(loc.rstrip("/")) > best_len:
+                best_key, best_len = key, len(loc.rstrip("/"))
     return best_key
 
 
