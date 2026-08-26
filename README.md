@@ -22,44 +22,44 @@ It automatically finds the best available subtitle source, translates missing la
 ---
 ## Screenshots
 
-See Babel in action — from automated Sonarr/Radarr jobs to a fully unattended subtitle pipeline for sourcing, translation, recovery, QA, and publishing.
+See Babel in action — from subtitle discovery to translation, QA, and publishing.
 
 ### Activity Dashboard
 
-Monitor subtitle jobs in real time, including source, status, cue count, processing time, and whether Babel translated the subtitle or found a match through Bazarr.
+Monitor automated jobs, processing status, Bazarr matches, cue counts, and translation times.
 
 <p align="center">
-  <img src="docs/screenshots/activity-dashboard.png" alt="Babel Activity Dashboard" width="900">
+  <img src="docs/screenshots/activity-dashboard.png" alt="Babel Activity Dashboard" width="850">
 </p>
+
+<br>
 
 ### Connect-and-Forget Pipeline
 
-Connect your media stack once and let Babel handle the fallback flow. In Hybrid Mode, Bazarr gets the first chance to find a human-made subtitle while Babel prepares the AI fallback in parallel. If Bazarr succeeds, AI is skipped. If not, Babel continues automatically.
+Configure Babel once and let it automatically choose between Bazarr and AI translation.
 
 <p align="center">
-  <img src="docs/screenshots/pipeline-settings.png" alt="Babel Connect-and-Forget Pipeline" width="900">
+  <img src="docs/screenshots/pipeline-settings.png" alt="Babel Pipeline Settings" width="850">
 </p>
+
+<br>
 
 ### Verified Output
 
-Babel does not publish a subtitle simply because an AI provider returned a result. Every completed translation must pass the QA gate first.
-
-This real-world job processed **1,498 / 1,498 cues** with **0 dropped cues**, **0 ms sync drift**, **0 unresolved dialogue**, and a final **PASS score of 100/100**.
+Every generated subtitle passes Babel's QA gate before it can be published.
 
 <p align="center">
-  <img src="docs/screenshots/qa-job-result.png" alt="Babel QA Verified Output" width="900">
+  <img src="docs/screenshots/qa-job-result.png" alt="Babel QA Verified Output" width="850">
 </p>
+
+<br>
 
 ### AI Usage & Queue
 
-Track AI usage across providers, estimated costs, request limits, and deferred jobs from one place.
+Monitor provider usage, estimated cost, request limits, and deferred translation jobs.
 
 <p align="center">
-  <img src="docs/screenshots/ai-usage.png" alt="Babel AI Usage and Queue" width="900">
-</p>
-
-<p align="center">
-  <strong>Import → Source Resolution → Translate → Recover → QA → Publish</strong>
+  <img src="docs/screenshots/ai-usage.png" alt="Babel AI Usage and Queue" width="850">
 </p>
 ---
 
