@@ -65,15 +65,6 @@ Every generated subtitle passes Babel's QA gate before it can be published.
     >
   </a>
 </p>
-### Verified Output
-
-Every generated subtitle passes Babel's QA gate before it can be published.
-
-<p align="center">
-  <img src="docs/screenshots/qa-job-result.png" alt="Babel QA Verified Output" width="700">
-</p>
-
-<br>
 
 ### AI Usage & Queue
 
