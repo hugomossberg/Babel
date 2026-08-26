@@ -91,12 +91,6 @@ Babel treats AI providers as **untrusted components**. Every generated subtitle 
 
 ---
 
-## Status: Public Beta
-
-Babel is currently in **Public Beta**. The core pipeline, AI translation engines, and automated recovery loops are actively tested against diverse real-world media libraries.
-
----
-
 ## Features
 
 ### Subtitle Resolution & Extraction
@@ -397,16 +391,6 @@ Configuration is mostly handled in the web interface and stored in `/app/data/ba
 | `BABEL_UPDATER_SECRET` | *(auto-generated)* | (Optional override) Secret for inner-container auth for updates |
 | `TV_PATH` | `/path/to/tv` | Host path mounted to `/tv` inside Babel |
 | `MOVIES_PATH` | `/path/to/movies` | Host path mounted to `/movies` inside Babel |
-
-### One-Click In-App Updates Details
-
-Babel supports seamless in-app updates directly from the web dashboard. The repository's `docker-compose.yml` includes the lightweight `babel-updater` sidecar container by default.
-
-- **Automated Discovery:** Babel checks for new releases on web page load and continues checking periodically in the background.
-- **Safety & Rollback:** When "Update now" is triggered, the updater pulls the target image, performs container replacement, and verifies container health. If health checks fail, it automatically rolls back to the previous container.
-- **Zero-Configuration Security:** The `babel` and `babel-updater` containers automatically generate and share a secure inner-container token on first start. No host ports are exposed on the updater, `docker.sock` is only mounted to the updater, and the token is never exposed to the browser.
-
-Advanced users who prefer manual updates can remove the `babel-updater` service and updater auth volume from their Compose configuration.
 
 ### Upgrading an Existing Installation to One-Click Updates
 
