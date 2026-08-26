@@ -17,6 +17,7 @@ from app.services.docker_controller import docker_controller
 from app.services.bazarr_controller import bazarr_controller
 from app.services.scanner import scan_library_folders
 from app.services.jellyfin_notifier import notify_jellyfin_library_refresh
+from app.services.plex_notifier import notify_plex_library_refresh
 
 router = APIRouter()
 
@@ -77,6 +78,11 @@ class IntegrationsSettingsRequest(BaseModel):
     notify_jellyfin: bool
     jellyfin_url: str
     jellyfin_api_key: str
+    notify_plex: Optional[bool] = False
+    plex_url: Optional[str] = ""
+    plex_token: Optional[str] = ""
+    plex_path_babel_prefix: Optional[str] = ""
+    plex_path_plex_prefix: Optional[str] = ""
 
 class ContainerActionRequest(BaseModel):
     container_name: str
@@ -223,6 +229,8 @@ async def api_delete_subtitles(req: DeleteSubRequest):
         conn.commit()
 
     await notify_jellyfin_library_refresh()
+    if get_setting("notify_plex", "false").lower() == "true":
+        await notify_plex_library_refresh(req.video_path)
     return {"status": "deleted", "deleted_files": deleted_files}
 
 @router.get("/settings/all")
@@ -294,7 +302,12 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "wait_time_seconds": int(get_setting("wait_time_seconds", "15")),
             "notify_jellyfin": get_setting("notify_jellyfin", "true").lower() == "true",
             "jellyfin_url": get_setting("jellyfin_url", "http://jellyfin:8096"),
-            "jellyfin_api_key": mask_secret(get_setting("jellyfin_api_key", ""))
+            "jellyfin_api_key": mask_secret(get_setting("jellyfin_api_key", "")),
+            "notify_plex": get_setting("notify_plex", "false").lower() == "true",
+            "plex_url": get_setting("plex_url", ""),
+            "plex_token": mask_secret(get_setting("plex_token", "")),
+            "plex_path_babel_prefix": get_setting("plex_path_babel_prefix", ""),
+            "plex_path_plex_prefix": get_setting("plex_path_plex_prefix", "")
         }
     }
 
@@ -499,6 +512,12 @@ async def api_save_integrations(req: IntegrationsSettingsRequest):
     set_setting("jellyfin_url", req.jellyfin_url)
     if not is_masked_secret(req.jellyfin_api_key):
         set_setting("jellyfin_api_key", req.jellyfin_api_key.strip() if req.jellyfin_api_key else "")
+    set_setting("notify_plex", "true" if req.notify_plex else "false")
+    set_setting("plex_url", (req.plex_url or "").strip())
+    if not is_masked_secret(req.plex_token):
+        set_setting("plex_token", req.plex_token.strip() if req.plex_token else "")
+    set_setting("plex_path_babel_prefix", (req.plex_path_babel_prefix or "").strip())
+    set_setting("plex_path_plex_prefix", (req.plex_path_plex_prefix or "").strip())
     return {"status": "saved"}
 
 _scan_lock = asyncio.Lock()

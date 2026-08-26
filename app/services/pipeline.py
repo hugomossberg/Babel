@@ -28,6 +28,7 @@ from app.core.quota import (
     block_provider, is_provider_blocked,
 )
 from app.services.jellyfin_notifier import notify_jellyfin_library_refresh
+from app.services.plex_notifier import notify_plex_library_refresh
 
 
 logger = logging.getLogger("babel.pipeline")
@@ -881,6 +882,16 @@ class SubtitlePipeline:
         if get_setting("notify_jellyfin", "true").lower() == "true":
             await notify_jellyfin_library_refresh()
 
+    async def _maybe_notify_plex(self, published_path: Optional[str] = None):
+        """Only notify Plex if the setting is enabled."""
+        if get_setting("notify_plex", "false").lower() == "true":
+            await notify_plex_library_refresh(published_path)
+
+    async def _notify_media_servers(self, published_path: Optional[str] = None):
+        """Notifies every configured media server that new subtitles are available."""
+        await self._maybe_notify_jellyfin()
+        await self._maybe_notify_plex(published_path)
+
     async def _run_pipeline_logic(
         self,
         job_id: int,
@@ -1186,7 +1197,7 @@ class SubtitlePipeline:
                     if os.path.exists(temp_extracted_srt):
                         try: os.remove(temp_extracted_srt)
                         except Exception: pass
-                    await self._maybe_notify_jellyfin()
+                    await self._notify_media_servers(video_path)
                     return {"status": "skipped", "reason": "bazarr_downloaded", "job_id": job_id}
                 else:
                     append_job_log(job_id, f"Hybrid preparation completed in {prep_duration_ms}ms {perf_breakdown}. Bazarr result: miss. Starting AI immediately (fixed grace delay avoided).")
@@ -2012,7 +2023,7 @@ class SubtitlePipeline:
 
             update_job(job_id, **update_args)
 
-            await self._maybe_notify_jellyfin()
+            await self._notify_media_servers(video_path)
 
             return {
                 "status": final_status.lower(),
