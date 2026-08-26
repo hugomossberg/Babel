@@ -29,7 +29,7 @@ See Babel in action — from subtitle discovery to translation, QA, and publishi
 Monitor automated jobs, processing status, Bazarr matches, cue counts, and translation times.
 
 <p align="center">
-  <img src="docs/screenshots/activity-dashboard.png" alt="Babel Activity Dashboard" width="850">
+  <img src="docs/screenshots/activity-dashboard.png" alt="Babel Activity Dashboard" width="700">
 </p>
 
 <br>
@@ -39,7 +39,7 @@ Monitor automated jobs, processing status, Bazarr matches, cue counts, and trans
 Configure Babel once and let it automatically choose between Bazarr and AI translation.
 
 <p align="center">
-  <img src="docs/screenshots/pipeline-settings.png" alt="Babel Pipeline Settings" width="850">
+  <img src="docs/screenshots/pipeline-settings.png" alt="Babel Pipeline Settings" width="700">
 </p>
 
 <br>
@@ -49,7 +49,7 @@ Configure Babel once and let it automatically choose between Bazarr and AI trans
 Every generated subtitle passes Babel's QA gate before it can be published.
 
 <p align="center">
-  <img src="docs/screenshots/qa-job-result.png" alt="Babel QA Verified Output" width="850">
+  <img src="docs/screenshots/qa-job-result.png" alt="Babel QA Verified Output" width="700">
 </p>
 
 <br>
@@ -59,7 +59,7 @@ Every generated subtitle passes Babel's QA gate before it can be published.
 Monitor provider usage, estimated cost, request limits, and deferred translation jobs.
 
 <p align="center">
-  <img src="docs/screenshots/ai-usage.png" alt="Babel AI Usage and Queue" width="850">
+  <img src="docs/screenshots/ai-usage.png" alt="Babel AI Usage and Queue" width="700">
 </p>
 ---
 
