@@ -22,28 +22,49 @@ It automatically finds the best available subtitle source, translates missing la
 ---
 ## Screenshots
 
-See Babel in action — from subtitle discovery to translation, QA, and publishing.
+See Babel in action — from subtitle discovery and translation to QA, usage tracking, and publishing.
 
 ### Activity Dashboard
 
 Monitor automated jobs, processing status, Bazarr matches, cue counts, and translation times.
 
 <p align="center">
-  <img src="docs/screenshots/activity-dashboard.png" alt="Babel Activity Dashboard" width="700">
+  <a href="docs/screenshots/activity-dashboard.png">
+    <img
+      src="docs/screenshots/activity-dashboard.png"
+      alt="Babel Activity Dashboard"
+      width="700"
+    >
+  </a>
 </p>
-
-<br>
 
 ### Connect-and-Forget Pipeline
 
 Configure Babel once and let it automatically choose between Bazarr and AI translation.
 
 <p align="center">
-  <img src="docs/screenshots/pipeline-settings.png" alt="Babel Pipeline Settings" width="700">
+  <a href="docs/screenshots/pipeline-settings.png">
+    <img
+      src="docs/screenshots/pipeline-settings.png"
+      alt="Babel Connect-and-Forget Pipeline"
+      width="700"
+    >
+  </a>
 </p>
 
-<br>
+### Verified Output
 
+Every generated subtitle passes Babel's QA gate before it can be published.
+
+<p align="center">
+  <a href="docs/screenshots/qa-job-result.png">
+    <img
+      src="docs/screenshots/qa-job-result.png"
+      alt="Babel QA Verified Output"
+      width="700"
+    >
+  </a>
+</p>
 ### Verified Output
 
 Every generated subtitle passes Babel's QA gate before it can be published.
