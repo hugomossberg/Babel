@@ -84,7 +84,7 @@ async def test_escalation_normalized_echo(monkeypatch):
         exhausted_strategies=exhausted
     )
 
-    assert call_count == 2
+    assert call_count == 3
     assert result == "Hej!"
     # The first attempt was exhausted
     assert len(exhausted) == 1
@@ -92,7 +92,7 @@ async def test_escalation_normalized_echo(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_escalation_all_normalized_echoes_exhaust(monkeypatch):
-    """Test 3: Escalation exhausts all attempts when all return normalized echoes."""
+    """Test 3: Escalation exhausts all attempts and fails closed when unverified."""
     translator = SubtitleTranslator()
 
     monkeypatch.setattr(app.services.translator, "get_setting", lambda k, d="": "gemini" if k == "ai_provider" else "false")
@@ -106,12 +106,7 @@ async def test_escalation_all_normalized_echoes_exhaust(monkeypatch):
     def mock_generate_content(*args, **kwargs):
         nonlocal call_count
         call_count += 1
-        if call_count == 1:
-            return MockResponse('{"translation": "Hello!"}')
-        elif call_count == 2:
-            return MockResponse('{"translation": "<i>Hello.</i>"}')
-        else:
-            return MockResponse('{"translation": "HELLO?"}')
+        return MockResponse('{"translation": "Hello!"}')
 
     class MockModels:
         def generate_content(self, *args, **kwargs):
@@ -136,9 +131,8 @@ async def test_escalation_all_normalized_echoes_exhaust(monkeypatch):
         exhausted_strategies=exhausted
     )
 
-    assert call_count == 3
+    assert call_count == 4
     assert result is None
-    # All 3 strategies must be recorded as exhausted
     assert len(exhausted) == 3
 
 
@@ -202,11 +196,16 @@ async def test_targeted_recovery_rejects_normalized_echo(tmp_path, monkeypatch):
         # Classify all as translate
         return [{"id": item["id"], "action": "translate", "reason": "none", "text": ""} for item in items]
 
+    # Recovery returns normalized echo
+    async def mock_rescue_batch(items, **kwargs):
+        return [{"id": it["id"], "text": "Hello!"} for it in items]
+
     # Escalation eventually recovers with real Swedish
     async def mock_escalate_single_line(self, target_idx, target_text, prev_text, next_text, target_language, show_title, is_real_untranslated=False, job_id=None, exhausted_strategies=None, **kwargs):
         return "Hej?"
 
     monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
+    monkeypatch.setattr(pipeline.translator, "fast_final_rescue_batch", mock_rescue_batch)
     monkeypatch.setattr(pipeline.translator, "classify_and_recover_identical", mock_classify)
     monkeypatch.setattr(SubtitleTranslator, "escalate_single_line", mock_escalate_single_line)
     monkeypatch.setattr(SubtitleTranslator, "first_pass_micro_repair_batch", AsyncMock(return_value=[]))
@@ -270,6 +269,9 @@ async def test_pipeline_escalation_defense_in_depth(tmp_path, monkeypatch):
                 results.append({"id": idx, "text": f"Svensk rad {idx}"})
         return results
 
+    async def mock_rescue_batch2(items, **kwargs):
+        return [{"id": it["id"], "text": "Hello?"} for it in items]
+
     async def mock_classify(items, lang, title, **kwargs):
         return [{"id": item["id"], "action": "translate", "reason": "none", "text": ""} for item in items]
 
@@ -278,6 +280,7 @@ async def test_pipeline_escalation_defense_in_depth(tmp_path, monkeypatch):
         return "Hello!"
 
     monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
+    monkeypatch.setattr(pipeline.translator, "fast_final_rescue_batch", mock_rescue_batch2)
     monkeypatch.setattr(pipeline.translator, "classify_and_recover_identical", mock_classify)
     monkeypatch.setattr(SubtitleTranslator, "escalate_single_line", mock_escalate_single_line)
     monkeypatch.setattr(SubtitleTranslator, "first_pass_micro_repair_batch", AsyncMock(return_value=[]))

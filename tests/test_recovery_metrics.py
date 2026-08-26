@@ -40,12 +40,17 @@ async def test_recovery_metrics_count(tmp_path):
                 res.append({"id": item["id"], "text": "Värld"})
         return res
 
+    async def mock_rescue_batch(items, **kwargs):
+        return [{"id": it["id"], "text": "Värld"} for it in items]
+
     with patch("app.services.pipeline.find_external_subtitle", side_effect=lambda vp, lang: str(en_srt_path) if lang == "en" else None), \
          patch("app.services.pipeline.extract_embedded_srt", return_value=False), \
          patch("app.services.pipeline.get_setting", side_effect=lambda k, d=None: {"extract_source_embedded": "false", "languages": '[{"name": "Swedish", "code": "sv", "enabled": true}]', "qa_threshold_dropped": "0", "qa_threshold_sync": "100"}.get(k, d)), \
          patch("app.services.pipeline.SubtitlePipeline.trigger_bazarr_search", new_callable=AsyncMock), \
          patch("app.services.pipeline.SubtitlePipeline._get_semaphore", return_value=asyncio.Semaphore(1)), \
          patch("app.services.translator.SubtitleTranslator.translate_batch", side_effect=mock_translate_batch), \
+         patch("app.services.translator.SubtitleTranslator.first_pass_micro_repair_batch", return_value=[]), \
+         patch("app.services.translator.SubtitleTranslator.fast_final_rescue_batch", side_effect=mock_rescue_batch), \
          patch("asyncio.sleep", new_callable=AsyncMock):
          
          await pipeline.process_video_file(str(video_path), job_id=job_id)

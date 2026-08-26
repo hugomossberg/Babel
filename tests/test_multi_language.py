@@ -66,6 +66,7 @@ async def test_multi_language_partial_e2e(tmp_path):
                   patch.object(pipeline.translator, "translate_srt_content", side_effect=fake_translate), \
                   patch.object(pipeline.translator, "escalate_single_line", return_value="Escalated"), \
                   patch.object(pipeline.translator, "classify_and_recover_identical", return_value=[{"id": 1, "action": "translate", "text": "Recovered text"}]), \
+                  patch.object(pipeline.translator, "fast_final_rescue_batch", return_value=[]), \
                   patch.object(pipeline.translator, "translate_batch", return_value=[]), \
                   patch("app.services.pipeline.qa_gate", side_effect=fake_qa_gate):
               

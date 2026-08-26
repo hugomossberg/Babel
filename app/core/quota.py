@@ -266,6 +266,14 @@ _DAILY_QUOTA_PATTERNS = [
     r"exceeded.*daily.*limit",
     r"exceeded.*day.*quota",
     r"quota.*day",
+    r"insufficient_quota",
+    r"out_of_credits",
+    r"insufficient_credits",
+    r"credit_balance_too_low",
+    r"insufficient_balance",
+    r"payment_required",
+    r"\b402\b",
+    r"balance_exhausted",
 ]
 
 _DAILY_QUOTA_COMPILED = [re.compile(p, re.IGNORECASE) for p in _DAILY_QUOTA_PATTERNS]

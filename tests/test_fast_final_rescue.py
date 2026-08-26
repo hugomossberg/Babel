@@ -73,7 +73,7 @@ async def test_1_batch_rescue_success(mock_db_settings, tmp_path, monkeypatch):
     rescue_call_counts = 0
     rescue_batches = []
 
-    async def mock_rescue_batch(items, target_language, show_title="", attempt=1, job_id=None):
+    async def mock_rescue_batch(items, target_language, source_language="English", show_title="", attempt=1, job_id=None):
         nonlocal rescue_call_counts
         rescue_call_counts += 1
         rescue_batches.append((attempt, [it["id"] for it in items]))
@@ -133,7 +133,7 @@ async def test_2_normalized_echoes_rejected(mock_db_settings, tmp_path, monkeypa
     async def mock_classify(items, *args, **kwargs):
         return [{"id": i["id"], "action": "translate", "reason": "none", "text": ""} for i in items]
 
-    async def mock_rescue_batch(items, target_language, show_title="", attempt=1, job_id=None):
+    async def mock_rescue_batch(items, target_language, source_language="English", show_title="", attempt=1, job_id=None):
         # Always return normalized echoes
         echoes = {0: "Hello, how are you!", 1: "<i>Come on, let's go!</i>", 2: "what did you say?"}
         return [{"id": it["id"], "text": echoes.get(it["id"], it["text"])} for it in items]
@@ -174,7 +174,7 @@ async def test_3_second_batch_only_contains_failures(mock_db_settings, tmp_path,
 
     rescue_batches = []
 
-    async def mock_rescue_batch(items, target_language, show_title="", attempt=1, job_id=None):
+    async def mock_rescue_batch(items, target_language, source_language="English", show_title="", attempt=1, job_id=None):
         item_ids = [it["id"] for it in items]
         rescue_batches.append((attempt, item_ids))
         if attempt == 1:
@@ -232,7 +232,7 @@ async def test_4_max_two_rescue_calls(mock_db_settings, tmp_path, monkeypatch):
 
     rescue_calls_per_loop = []
 
-    async def mock_rescue_batch(items, target_language, show_title="", attempt=1, job_id=None):
+    async def mock_rescue_batch(items, target_language, source_language="English", show_title="", attempt=1, job_id=None):
         rescue_calls_per_loop.append(attempt)
         # Always echo
         return [{"id": it["id"], "text": it["text"]} for it in items]
@@ -272,7 +272,7 @@ async def test_5_final_qa_still_blocks(mock_db_settings, tmp_path, monkeypatch):
     async def mock_classify(items, *args, **kwargs):
         return [{"id": i["id"], "action": "translate", "reason": "none", "text": ""} for i in items]
 
-    async def mock_rescue_batch(items, target_language, show_title="", attempt=1, job_id=None):
+    async def mock_rescue_batch(items, target_language, source_language="English", show_title="", attempt=1, job_id=None):
         # Rescues id 0 ("Hej, hur mår du idag?"), but fails id 1 ("Goodbye, my dear friend.")
         return [
             {"id": 0, "text": "Hej, hur mår du idag?"},
@@ -327,7 +327,7 @@ async def test_6_safe_keep_unaffected(mock_db_settings, tmp_path, monkeypatch):
 
     rescued_ids = []
 
-    async def mock_rescue_batch(items, target_language, show_title="", attempt=1, job_id=None):
+    async def mock_rescue_batch(items, target_language, source_language="English", show_title="", attempt=1, job_id=None):
         for it in items:
             rescued_ids.append(it["id"])
         return [{"id": 3, "text": "Hej?"}]
@@ -412,7 +412,7 @@ async def test_8_malformed_missing_results(mock_db_settings, tmp_path, monkeypat
     async def mock_classify(items, *args, **kwargs):
         return [{"id": i["id"], "action": "translate", "reason": "none", "text": ""} for i in items]
 
-    async def mock_rescue_batch(items, target_language, show_title="", attempt=1, job_id=None):
+    async def mock_rescue_batch(items, target_language, source_language="English", show_title="", attempt=1, job_id=None):
         # Returns invalid results: non-existent id 999, corrupt entry, missing id 1
         return [
             {"id": 999, "text": "Hittepå"},
@@ -455,7 +455,7 @@ async def test_9_batch_performance_behavior(mock_db_settings, tmp_path, monkeypa
     api_batch_call_count = 0
     batch_sizes = []
 
-    async def mock_rescue_batch(items, target_language, show_title="", attempt=1, job_id=None):
+    async def mock_rescue_batch(items, target_language, source_language="English", show_title="", attempt=1, job_id=None):
         nonlocal api_batch_call_count
         api_batch_call_count += 1
         batch_sizes.append(len(items))

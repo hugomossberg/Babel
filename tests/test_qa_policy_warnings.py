@@ -60,7 +60,7 @@ def test_qa_gate_single_unresolved_in_large_sub_pass_with_warnings():
     assert res["real_untranslated_ids"] == [453]
     assert res["preserved_untranslated_ids"] == [453]
     assert len(res["warnings"]) == 1
-    assert "1 unresolved English line" in res["warnings"][0]
+    assert "1 unresolved source line" in res["warnings"][0]
     assert res["policy_details"]["structural_passed"] is True
 
 
@@ -408,7 +408,7 @@ async def test_pipeline_679_cues_with_1_deadlocked_cue_publishes_with_warnings(t
         assert f"Semantic deadlock detected for cue {deadlock_idx + 1}" in log_text
         assert "QA fallback: preserving original source text" in log_text
         assert "QA Gate PASSED_WITH_WARNINGS" in log_text
-        assert "1 unresolved English line" in log_text
+        assert "1 unresolved" in log_text  # source language name (e.g. "English") is dynamic
         assert "1 source-preserved fallback" in log_text
         assert "Result: PASS_WITH_WARNINGS" in log_text
         assert "Published" in log_text
@@ -454,8 +454,8 @@ async def test_pipeline_recovery_success_path_publishes_clean_pass(tmp_path):
         return out
 
     # Targeted recovery succeeds
-    async def fake_translate_batch(payload, *args, **kwargs):
-        return [{"id": p["id"], "text": f"Återställd svensk rad {p['id'] + 1}"} for p in payload]
+    async def fake_rescue_batch(items, *args, **kwargs):
+        return [{"id": it["id"], "text": f"Återställd svensk rad {it['id'] + 1}"} for it in items]
 
     with patch("app.services.pipeline.get_setting", side_effect=fake_get_setting), \
          patch("app.services.pipeline.append_job_log"), \
@@ -464,7 +464,7 @@ async def test_pipeline_recovery_success_path_publishes_clean_pass(tmp_path):
          patch.object(pipeline, "trigger_bazarr_search"), \
          patch.object(pipeline.translator, "translate_srt_content", side_effect=fake_translate), \
          patch.object(pipeline.translator, "classify_and_recover_identical", return_value=[]), \
-         patch.object(pipeline.translator, "translate_batch", side_effect=fake_translate_batch):
+         patch.object(pipeline.translator, "fast_final_rescue_batch", side_effect=fake_rescue_batch):
 
         res = await pipeline._run_pipeline_logic(2, str(video_path), wait_seconds=0)
 

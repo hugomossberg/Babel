@@ -12,13 +12,22 @@ logger = logging.getLogger("babel.scanner")
 
 VIDEO_EXTS = (".mkv", ".mp4", ".m4v", ".avi")
 
+_SUB_LINE_CACHE: Dict[str, tuple[float, int, int]] = {}
+
 def _fast_count_subtitle_lines(path: str) -> int:
-    """Cheaply estimate subtitle line count by counting '-->' without parsing."""
+    """Cheaply estimate subtitle line count with mtime/size caching."""
     try:
+        st = os.stat(path)
+        cached = _SUB_LINE_CACHE.get(path)
+        if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+            return cached[2]
+
         count = 0
         with open(path, "rb") as f:
             for chunk in iter(lambda: f.read(65536), b""):
                 count += chunk.count(b"-->")
+
+        _SUB_LINE_CACHE[path] = (st.st_mtime, st.st_size, count)
         return count
     except Exception:
         return 0
@@ -110,42 +119,44 @@ def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[
 
                 show_episodes = []
                 for root, _, files in os.walk(show_dir):
-                    for file in sorted(files):
-                        if file.lower().endswith(VIDEO_EXTS):
-                            video_full_path = os.path.normpath(os.path.join(root, file))
-                            base_name, _ = os.path.splitext(file)
+                    v_files = [f for f in sorted(files) if f.lower().endswith(VIDEO_EXTS)]
+                    if not v_files:
+                        continue
+                    s_files = [f for f in files if f.lower().endswith(".srt")]
+                    rel_season = os.path.basename(root)
+                    season_name = rel_season if rel_season != show_name else "Root"
 
-                            subs = []
-                            try:
-                                for f in os.listdir(root):
-                                    if is_subtitle_for_video(base_name, f):
-                                        sub_path = os.path.normpath(os.path.join(root, f))
-                                        subs.append({
-                                            "filename": f,
-                                            "path": sub_path,
-                                            "lines": _fast_count_subtitle_lines(sub_path)
-                                        })
-                            except Exception:
-                                pass
+                    for file in v_files:
+                        video_full_path = os.path.normpath(os.path.join(root, file))
+                        base_name, _ = os.path.splitext(file)
 
-                            size_mb = 0
-                            try:
-                                size_mb = round(os.path.getsize(video_full_path) / (1024 * 1024), 1)
-                            except Exception:
-                                pass
+                        subs = []
+                        for f in s_files:
+                            if is_subtitle_for_video(base_name, f):
+                                sub_path = os.path.normpath(os.path.join(root, f))
+                                subs.append({
+                                    "filename": f,
+                                    "path": sub_path,
+                                    "lines": _fast_count_subtitle_lines(sub_path)
+                                })
 
-                            rel_season = os.path.basename(root)
-                            has_target_sub = any(is_target_language_subtitle(sub["filename"], target_aliases) for sub in subs)
+                        size_mb = 0
+                        try:
+                            size_mb = round(os.path.getsize(video_full_path) / (1024 * 1024), 1)
+                        except Exception:
+                            pass
 
-                            show_episodes.append({
-                                "filename": file,
-                                "path": video_full_path,
-                                "season": rel_season if rel_season != show_name else "Root",
-                                "size_mb": size_mb,
-                                "subtitles": subs,
-                                "has_any_sub": len(subs) > 0,
-                                "has_target_sub": has_target_sub
-                            })
+                        has_target_sub = any(is_target_language_subtitle(sub["filename"], target_aliases) for sub in subs)
+
+                        show_episodes.append({
+                            "filename": file,
+                            "path": video_full_path,
+                            "season": season_name,
+                            "size_mb": size_mb,
+                            "subtitles": subs,
+                            "has_any_sub": len(subs) > 0,
+                            "has_target_sub": has_target_sub
+                        })
 
                 if show_episodes:
                     results.append({
@@ -159,40 +170,41 @@ def scan_library_folders(root_path: str, category: str = "series") -> List[Dict[
         # Movies scan
         try:
             for root, _, files in os.walk(root_path):
-                for file in sorted(files):
-                    if file.lower().endswith(VIDEO_EXTS):
-                        video_full_path = os.path.normpath(os.path.join(root, file))
-                        base_name, _ = os.path.splitext(file)
+                v_files = [f for f in sorted(files) if f.lower().endswith(VIDEO_EXTS)]
+                if not v_files:
+                    continue
+                s_files = [f for f in files if f.lower().endswith(".srt")]
 
-                        subs = []
-                        try:
-                            for f in os.listdir(root):
-                                if is_subtitle_for_video(base_name, f):
-                                    sub_path = os.path.normpath(os.path.join(root, f))
-                                    subs.append({
-                                        "filename": f,
-                                        "path": sub_path,
-                                        "lines": _fast_count_subtitle_lines(sub_path)
-                                    })
-                        except Exception:
-                            pass
+                for file in v_files:
+                    video_full_path = os.path.normpath(os.path.join(root, file))
+                    base_name, _ = os.path.splitext(file)
 
-                        size_mb = 0
-                        try:
-                            size_mb = round(os.path.getsize(video_full_path) / (1024 * 1024), 1)
-                        except Exception:
-                            pass
+                    subs = []
+                    for f in s_files:
+                        if is_subtitle_for_video(base_name, f):
+                            sub_path = os.path.normpath(os.path.join(root, f))
+                            subs.append({
+                                "filename": f,
+                                "path": sub_path,
+                                "lines": _fast_count_subtitle_lines(sub_path)
+                            })
 
-                        has_target_sub = any(is_target_language_subtitle(sub["filename"], target_aliases) for sub in subs)
+                    size_mb = 0
+                    try:
+                        size_mb = round(os.path.getsize(video_full_path) / (1024 * 1024), 1)
+                    except Exception:
+                        pass
 
-                        results.append({
-                            "filename": file,
-                            "path": video_full_path,
-                            "size_mb": size_mb,
-                            "subtitles": subs,
-                            "has_any_sub": len(subs) > 0,
-                            "has_target_sub": has_target_sub
-                        })
+                    has_target_sub = any(is_target_language_subtitle(sub["filename"], target_aliases) for sub in subs)
+
+                    results.append({
+                        "filename": file,
+                        "path": video_full_path,
+                        "size_mb": size_mb,
+                        "subtitles": subs,
+                        "has_any_sub": len(subs) > 0,
+                        "has_target_sub": has_target_sub
+                    })
         except Exception as e:
             logger.error(f"Error scanning movies path {root_path}: {e}")
 

@@ -25,7 +25,7 @@ async def test_embedded_extraction_status_handling(tmp_path):
                 with patch("app.services.pipeline.create_job", return_value=1), \
                      patch("app.services.pipeline.update_job"), \
                      patch("app.services.pipeline.append_job_log"), \
-                     patch("os.replace") as mock_replace, \
+                     patch("app.services.pipeline._publish_subtitle_atomic") as mock_publish, \
                      patch("os.remove") as mock_remove:
                      
                      with patch.object(pipeline, "trigger_bazarr_search"), \
@@ -34,44 +34,48 @@ async def test_embedded_extraction_status_handling(tmp_path):
                           
                           # Test RED status
                           def fake_extract_red(vid, out, preferred_lang):
-                              open(out, "w").close()
+                              with open(out, "w", encoding="utf-8") as f:
+                                  f.write("1\n00:00:01,000 --> 00:00:02,000\nBad\n\n")
                               return True
                           mock_extract.side_effect = fake_extract_red
                           mock_health.return_value = {"status": "RED", "reason": "Bad"}
                           
                           await pipeline._run_pipeline_logic(1, str(video), wait_seconds=0)
                           mock_health.assert_called()
-                          mock_replace.assert_not_called()
+                          mock_publish.assert_not_called()
                           mock_remove.assert_called()
                           
                           mock_health.reset_mock()
-                          mock_replace.reset_mock()
+                          mock_publish.reset_mock()
                           mock_remove.reset_mock()
                           
                           # Test YELLOW status
                           def fake_extract_yellow(vid, out, preferred_lang):
-                              open(out, "w").close()
+                              with open(out, "w", encoding="utf-8") as f:
+                                  f.write("1\n00:00:01,000 --> 00:00:02,000\nWarning\n\n")
                               return True
                           mock_extract.side_effect = fake_extract_yellow
                           mock_health.return_value = {"status": "YELLOW", "reason": "Warning"}
                           
                           await pipeline._run_pipeline_logic(1, str(video), wait_seconds=0)
                           mock_health.assert_called()
-                          mock_replace.assert_not_called()
+                          mock_publish.assert_not_called()
                           mock_remove.assert_called()
                           
                           mock_health.reset_mock()
-                          mock_replace.reset_mock()
+                          mock_publish.reset_mock()
                           mock_remove.reset_mock()
                           
                           # Test GREEN status
                           def fake_extract_green(vid, out, preferred_lang):
-                              open(out, "w").close()
+                              with open(out, "w", encoding="utf-8") as f:
+                                  f.write("1\n00:00:01,000 --> 00:00:02,000\nGood\n\n")
                               return True
                           mock_extract.side_effect = fake_extract_green
                           mock_health.return_value = {"status": "GREEN", "reason": "Good"}
+                          mock_publish.return_value = {"published": True, "skipped": False, "reason": "published"}
                           
                           await pipeline._run_pipeline_logic(1, str(video), wait_seconds=0)
                           mock_health.assert_called()
-                          mock_replace.assert_called()
+                          mock_publish.assert_called()
                           mock_remove.assert_not_called()

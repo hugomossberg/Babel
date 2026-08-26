@@ -13,12 +13,12 @@ def test_strict_non_verbal():
     res2 = validate_classifier_output(raw1, items2)
     assert res2[0]["text"] == ""
 
-    # Should downgrade (contains letters)
+    # Should downgrade (contains descriptive verbal participle)
     items3 = [{"id": 1, "text": "[SIGHING]"}]
     res3 = validate_classifier_output(raw1, items3)
     assert res3[0]["text"] == ""
 
-    # Should downgrade (contains letters)
+    # Should downgrade (multi-word descriptive SDH phrase)
     items4 = [{"id": 1, "text": "(door closes)"}]
     res4 = validate_classifier_output(raw1, items4)
     assert res4[0]["text"] == ""

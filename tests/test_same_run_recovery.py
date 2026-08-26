@@ -29,6 +29,11 @@ def mock_db_settings(monkeypatch):
         return settings.get(key, default)
     monkeypatch.setattr("app.services.pipeline.get_setting", mock_get_setting)
     monkeypatch.setattr("app.services.translator.get_setting", mock_get_setting)
+    # After hardening, provider resolution uses context_from_settings() from central registry
+    # which reads from DB. Mock it to avoid state bleed from other tests in full suite.
+    from app.core.ai_providers import ProviderContext
+    _gemini_ctx = ProviderContext(provider="gemini", model="gemini-3.5-flash-lite")
+    monkeypatch.setattr("app.core.ai_providers.context_from_settings", lambda *a, **kw: _gemini_ctx)
 
 @pytest.mark.asyncio
 async def test_first_execution_success(mock_db_settings, tmp_path, monkeypatch):
@@ -109,20 +114,21 @@ async def test_first_execution_success(mock_db_settings, tmp_path, monkeypatch):
     class MockModels:
         def generate_content(self, model, contents, config):
             nonlocal isolated_prompt
-            # Depending on config.system_instruction or contents
-            prompt_text = contents
-            sys_inst = getattr(config, 'system_instruction', '')
-            
-            if "Previous/Next are context only" in sys_inst and "TARGET is known" in sys_inst:
-                # Attempt 1: Contextual
-                return type('obj', (object,), {'text': '{"translation": "' + f"Dialogue line {target_idx}" + '"}'}) # Identical!
-            elif "strict translation engine" in sys_inst and "failed QA" in prompt_text:
-                # Attempt 2: Strict
-                return type('obj', (object,), {'text': '{"translation": "' + f"Dialogue line {target_idx}" + '"}'}) # Identical!
-            elif "strict translation engine" in sys_inst and "Translate this subtitle dialogue" in prompt_text:
-                # Attempt 3: Isolated
+            prompt_text = str(contents)
+            sys_inst = str(getattr(config, 'system_instruction', ''))
+
+            if "professional film/TV subtitle translator" in sys_inst or ("Previous/Next are context only" in sys_inst and "TARGET is known" in sys_inst):
+                # Stage 1: Contextual
+                return type('obj', (object,), {'text': '{"results": [{"id": 25, "text": "Dialogue line 25"}]}'})
+            elif "strict" in sys_inst and "Item ID" in prompt_text:
+                # Stage 2: Bulk Strict
+                return type('obj', (object,), {'text': '{"results": [{"id": 25, "text": "Dialogue line 25"}]}'})
+            elif "strict" in sys_inst and "failed QA" in prompt_text:
+                # Stage 3: Per-Cue Escalation Attempt 2 (Strict with context)
+                return type('obj', (object,), {'text': '{"translation": "' + f"Dialogue line {target_idx}" + '"}'})
+            elif "strict" in sys_inst and "Translate this subtitle dialogue" in prompt_text:
+                # Stage 3: Per-Cue Escalation Attempt 3 (Isolated)
                 isolated_prompt = prompt_text
-                # Success!
                 return type('obj', (object,), {'text': '{"translation": "Svensk text"}'})
 
             return type('obj', (object,), {'text': '{"translation": "Swedish"}'})
@@ -143,9 +149,8 @@ async def test_first_execution_success(mock_db_settings, tmp_path, monkeypatch):
     job = get_job_by_id(res["job_id"])
     assert job["status"] == "TRANSLATED" # NOT RECOVERING!
     
-    # Assert translation was only run 1 time for the whole batch
-    # wait, 1 full batch + 1 targeted batch = 2
-    assert call_counts["translate_batch"] == 2
+    # Main translation ran 1 time for the batch; recovery used structured stages
+    assert call_counts["translate_batch"] == 1
     
     # Escalate should be called once (for the stubborn cue)
     assert call_counts["escalate"] == 1

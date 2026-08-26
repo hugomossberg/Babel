@@ -71,7 +71,9 @@ def init_db():
             original_text TEXT NOT NULL,
             translated_text TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            UNIQUE(series_title, original_text)
+            source_language TEXT NOT NULL DEFAULT 'en',
+            target_language TEXT NOT NULL DEFAULT 'sv',
+            UNIQUE(series_title, source_language, target_language, original_text)
         )
         ''')
 
@@ -169,6 +171,21 @@ def init_db():
             PRIMARY KEY (provider, window_date)
         )
         """)
+
+        # Persistent extraction cache for embedded subtitle tracks (Pass 2A)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS embedded_extraction_cache (
+            video_path      TEXT NOT NULL,
+            file_size       INTEGER NOT NULL,
+            mtime_ns        INTEGER NOT NULL,
+            track_id        INTEGER,
+            track_language  TEXT NOT NULL,
+            content         TEXT NOT NULL,
+            created_at      TEXT NOT NULL,
+            PRIMARY KEY (video_path, file_size, mtime_ns, track_id, track_language)
+        )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_extraction_cache_path ON embedded_extraction_cache (video_path)")
         # ---------------------------------------------------------------
         # Add columns if not existing yet on old database files.
         # IMPORTANT: This must run BEFORE the UPDATE statements below
@@ -210,6 +227,64 @@ def init_db():
             except Exception:
                 pass
 
+        # v2.3.44: Ensure source_language and target_language columns and language-pair isolation.
+        try:
+            cursor.execute("ALTER TABLE translation_memory ADD COLUMN source_language TEXT NOT NULL DEFAULT 'en'")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE translation_memory ADD COLUMN target_language TEXT NOT NULL DEFAULT 'sv'")
+        except Exception:
+            pass
+
+        # Check if translation_memory has legacy 2-tuple UNIQUE constraint
+        cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='translation_memory'")
+        _tm_table_row = cursor.fetchone()
+        if _tm_table_row and "UNIQUE(series_title, original_text)" in _tm_table_row[0]:
+            cursor.execute('''
+            CREATE TABLE translation_memory_v2 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                series_title TEXT NOT NULL,
+                original_text TEXT NOT NULL,
+                translated_text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                source_language TEXT NOT NULL DEFAULT 'en',
+                target_language TEXT NOT NULL DEFAULT 'sv',
+                UNIQUE(series_title, source_language, target_language, original_text)
+            )
+            ''')
+            # Fetch and transform all existing rows (parsing legacy compound keys on-the-fly)
+            cursor.execute("SELECT id, series_title, original_text, translated_text, created_at, source_language, target_language FROM translation_memory ORDER BY id ASC")
+            _old_tm_rows = cursor.fetchall()
+            _migrated_v2_items = []
+            for _r in _old_tm_rows:
+                _r_id, _r_title, _r_orig, _r_trans, _r_created, _r_src, _r_tgt = _r
+                _s_title, _s_src, _s_tgt = parse_legacy_tm_series_key(_r_title)
+                _eff_title = _s_title if _s_src and _s_tgt else _r_title
+                _eff_src = _s_src or _r_src or 'en'
+                _eff_tgt = _s_tgt or _r_tgt or 'sv'
+                _migrated_v2_items.append((_r_id, _eff_title, _r_orig, _r_trans, _r_created, _eff_src, _eff_tgt))
+
+            cursor.executemany('''
+            INSERT OR REPLACE INTO translation_memory_v2 (id, series_title, original_text, translated_text, created_at, source_language, target_language)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', _migrated_v2_items)
+            cursor.execute("DROP TABLE translation_memory")
+            cursor.execute("ALTER TABLE translation_memory_v2 RENAME TO translation_memory")
+
+        # Migrate any remaining compound series_title keys "Show::src::tgt" created during prior runs
+        cursor.execute("SELECT id, series_title FROM translation_memory WHERE series_title LIKE '%::%'")
+        _compound_rows = cursor.fetchall()
+        for _r_id, _comp_title in _compound_rows:
+            _s_title, _s_src, _s_tgt = parse_legacy_tm_series_key(_comp_title)
+            if _s_src is not None and _s_tgt is not None:
+                cursor.execute(
+                    "UPDATE OR REPLACE translation_memory SET series_title = ?, source_language = ?, target_language = ? WHERE id = ?",
+                    (_s_title, _s_src, _s_tgt, _r_id)
+                )
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tm_lookup ON translation_memory(series_title, source_language, target_language)")
+
         # Reset stuck jobs on restart
         cursor.execute("""
         UPDATE jobs
@@ -239,6 +314,20 @@ def init_db():
         defaults = {
             "gemini_api_key": "",
             "gemini_model": "gemini-3.5-flash-lite",
+            "openai_api_key": "",
+            "openai_model": "gpt-4o-mini",
+            "deepl_api_key": "",
+            "ollama_url": "http://localhost:11434",
+            "ollama_model": "llama3",
+            "anthropic_api_key": "",
+            "anthropic_model": "claude-sonnet-5",
+            "openrouter_api_key": "",
+            "openrouter_model": "anthropic/claude-sonnet-5",
+            "deepseek_api_key": "",
+            "deepseek_model": "deepseek-v4-flash",
+            "custom_openai_url": "http://localhost:8000/v1",
+            "custom_openai_api_key": "",
+            "custom_openai_model": "default",
             "batch_size": "150",
             "max_concurrent_jobs": "3",
             "batch_concurrency": "2",
@@ -252,6 +341,11 @@ def init_db():
             "jellyfin_enabled": "false",
             "jellyfin_url": "http://jellyfin:8096",
             "jellyfin_api_key": "",
+            "notify_plex": "false",
+            "plex_url": "",
+            "plex_token": "",
+            "plex_path_babel_prefix": "",
+            "plex_path_plex_prefix": "",
             "media_series_path": "/tv",
             "media_movies_path": "/movies",
             "qa_max_unresolved_cues": "3",
@@ -264,6 +358,10 @@ def init_db():
             "daily_request_budget_openai": "0",
             "daily_request_budget_deepl": "0",
             "daily_request_budget_ollama": "0",
+            "daily_request_budget_anthropic": "0",
+            "daily_request_budget_openrouter": "0",
+            "daily_request_budget_deepseek": "0",
+            "daily_request_budget_custom": "0",
         }
         for k, v in defaults.items():
             cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
@@ -367,14 +465,12 @@ def create_job(video_path: str, event_source: str = "MANUAL", title: Optional[st
         title = os.path.basename(video_path)
 
     provider = get_setting("ai_provider", "gemini").lower()
-    if provider == "openai":
-        active_model = f"OpenAI ({get_setting('openai_model', 'gpt-4o-mini')})"
-    elif provider == "deepl":
-        active_model = "DeepL Translate"
-    elif provider in ["ollama", "localai"]:
-        active_model = f"Ollama ({get_setting('ollama_model', 'llama3')})"
-    else:
-        active_model = f"Gemini ({get_setting('gemini_model', 'gemini-3.5-flash-lite')})"
+    from app.core.ai_providers import context_from_settings, normalize_provider, get_provider_spec, format_engine
+    # Unknown/unsupported provider must fail explicitly — no job created, no Gemini fallback.
+    _prov = normalize_provider(provider)  # raises ValueError for unknown provider
+    get_provider_spec(_prov)              # raises ValueError if not in PROVIDERS registry
+    _ctx = context_from_settings(_prov)
+    active_model = _ctx.engine_label
 
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
@@ -462,14 +558,12 @@ def create_job_if_no_active(
     norm = os.path.normpath(video_path)
 
     provider = get_setting("ai_provider", "gemini").lower()
-    if provider == "openai":
-        active_model = f"OpenAI ({get_setting('openai_model', 'gpt-4o-mini')})"
-    elif provider == "deepl":
-        active_model = "DeepL Translate"
-    elif provider in ["ollama", "localai"]:
-        active_model = f"Ollama ({get_setting('ollama_model', 'llama3')})"
-    else:
-        active_model = f"Gemini ({get_setting('gemini_model', 'gemini-3.5-flash-lite')})"
+    from app.core.ai_providers import context_from_settings, normalize_provider, get_provider_spec
+    # Unknown/unsupported provider must fail explicitly — no job created, no Gemini fallback.
+    _prov = normalize_provider(provider)  # raises ValueError for unknown provider
+    get_provider_spec(_prov)              # raises ValueError if not in PROVIDERS registry
+    _ctx = context_from_settings(_prov)
+    active_model = _ctx.engine_label
 
     now = datetime.now(timezone.utc).isoformat()
     placeholders = ",".join("?" * len(ACTIVE_JOB_STATUSES))
@@ -736,15 +830,52 @@ def get_jobs_by_status(statuses: list) -> list:
             results.append(d)
         return results
 
-def save_translation_memory(series_title: str, original: str, translated: str):
+def parse_legacy_tm_series_key(raw_title: str) -> tuple:
+    """
+    Safely parses legacy compound TM series keys (e.g. 'Breaking Bad::en::sv').
+
+    Rules:
+    1. Uses rsplit("::", 2) to only attempt extraction on exactly 3 components.
+    2. Verifies that both candidate language codes correspond to valid languages
+       in Babel's central language registry.
+    3. If not a valid legacy language pair suffix (e.g. 'Something::Else',
+       'Show::Special::Edition', 'Show::foo::bar'), returns (raw_title, None, None)
+       without truncating or mutating the series title.
+    """
+    if not raw_title or "::" not in raw_title:
+        return raw_title, None, None
+
+    parts = raw_title.rsplit("::", 2)
+    if len(parts) != 3:
+        return raw_title, None, None
+
+    series_part, src_cand, tgt_cand = parts[0].strip(), parts[1].strip().lower(), parts[2].strip().lower()
+    if not series_part:
+        return raw_title, None, None
+
+    from app.core.languages import get_language
+    lang_src = get_language(src_cand)
+    lang_tgt = get_language(tgt_cand)
+
+    if lang_src is not None and lang_tgt is not None:
+        return series_part, lang_src.code, lang_tgt.code
+
+    return raw_title, None, None
+
+def save_translation_memory(series_title: str, original: str, translated: str, source_language: str = "en", target_language: str = "sv"):
     if not series_title or not original or not translated: return
     if len(original.split()) > 6: return
-    save_translation_memory_bulk(series_title, [{"original": original, "translated": translated}])
+    save_translation_memory_bulk(series_title, [{"original": original, "translated": translated}], source_language=source_language, target_language=target_language)
 
-def save_translation_memory_bulk(series_title: str, items: list):
+def save_translation_memory_bulk(series_title: str, items: list, source_language: str = "en", target_language: str = "sv"):
     if not series_title or not items: return
     from datetime import datetime, timezone
+    from app.core.languages import normalize_language_code
     now = datetime.now(timezone.utc).isoformat()
+
+    clean_series = series_title.strip()
+    norm_src = normalize_language_code(source_language, default="en")
+    norm_tgt = normalize_language_code(target_language, default="sv")
 
     valid_items = []
     for item in items:
@@ -752,13 +883,18 @@ def save_translation_memory_bulk(series_title: str, items: list):
         trans = item.get("translated", "").strip()
         if not orig or not trans: continue
         if len(orig.split()) > 6: continue
-        valid_items.append((series_title, orig, trans, now))
+        valid_items.append((clean_series, orig, trans, now, norm_src, norm_tgt))
 
     if not valid_items: return
 
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        cursor.executemany("INSERT OR REPLACE INTO translation_memory (series_title, original_text, translated_text, created_at) VALUES (?, ?, ?, ?)", valid_items)
+        cursor.executemany(
+            """INSERT OR REPLACE INTO translation_memory
+               (series_title, original_text, translated_text, created_at, source_language, target_language)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            valid_items
+        )
         conn.commit()
 
 def _is_legit_legacy_tm_key(target_title: str, candidate_title: str) -> bool:
@@ -768,22 +904,32 @@ def _is_legit_legacy_tm_key(target_title: str, candidate_title: str) -> bool:
     pattern = re.compile(rf"^{re.escape(target_title)}\s*-\s*[sS]\d{{1,4}}[eE]\d{{1,4}}.*$")
     return bool(pattern.match(candidate_title))
 
-def get_translation_memory(series_title: str, limit: int = 20) -> list:
+def get_translation_memory(series_title: str, limit: int = 20, source_language: str = "en", target_language: str = "sv") -> list:
     if not series_title: return []
     import random
+    from app.core.languages import normalize_language_code
+
+    clean_series = series_title.strip()
+    norm_src = normalize_language_code(source_language, default="en")
+    norm_tgt = normalize_language_code(target_language, default="sv")
+
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        escaped_title = series_title.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        escaped_title = clean_series.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         cursor.execute(
-            "SELECT series_title, original_text, translated_text FROM translation_memory WHERE series_title = ? OR series_title LIKE ? ESCAPE '\\' OR series_title LIKE ? ESCAPE '\\'",
-            (series_title, f"{escaped_title} - S%", f"{escaped_title} - s%")
+            """SELECT series_title, original_text, translated_text, source_language, target_language
+               FROM translation_memory
+               WHERE (series_title = ? OR series_title LIKE ? ESCAPE '\\' OR series_title LIKE ? ESCAPE '\\')
+                 AND source_language = ?
+                 AND target_language = ?""",
+            (clean_series, f"{escaped_title} - S%", f"{escaped_title} - s%", norm_src, norm_tgt)
         )
         rows = cursor.fetchall()
         valid = [
             {"original": r["original_text"], "translated": r["translated_text"]}
             for r in rows
-            if _is_legit_legacy_tm_key(series_title, r["series_title"])
+            if _is_legit_legacy_tm_key(clean_series, r["series_title"])
         ]
         if len(valid) > limit:
             return random.sample(valid, limit)

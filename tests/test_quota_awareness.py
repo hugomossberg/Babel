@@ -195,19 +195,17 @@ class TestDailyRPD:
 
         sleep_calls = []
 
-        with patch("app.services.translator.SubtitleTranslator.translate_srt_content", fake_translate):
-            with patch("app.services.pipeline.find_external_subtitle",
-                       side_effect=lambda p, l: video_path if l == "en" else None):
-                with patch("builtins.open", MagicMock(
-                    side_effect=lambda *a, **kw: MagicMock(
-                        __enter__=lambda *x: MagicMock(read=lambda: "1\n00:00:00,000 --> 00:00:01,000\nHello\n"),
-                        __exit__=lambda *x: None
-                    )
-                )):
-                    with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-                        pipeline = SubtitlePipeline()
-                        result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
-                        sleep_calls = [c.args[0] for c in mock_sleep.call_args_list]
+        en_srt_path = video_path.replace(".mkv", ".en.srt")
+        with open(en_srt_path, "w", encoding="utf-8") as _f:
+            _f.write("1\n00:00:00,000 --> 00:00:01,000\nHello world this is English.\n\n"
+                     "2\n00:00:01,000 --> 00:00:02,000\nTesting quota error handling.\n\n"
+                     "3\n00:00:02,000 --> 00:00:03,000\nProvider should be blocked.\n")
+
+        with patch("app.services.translator.SubtitleTranslator.translate_srt_content", fake_translate),              patch("app.services.pipeline.find_external_subtitle",
+                   side_effect=lambda p, l: en_srt_path if l == "en" else None),              patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            pipeline = SubtitlePipeline()
+            result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
+            sleep_calls = [c.args[0] for c in mock_sleep.call_args_list]
 
         # Job must be DEFERRED — NOT failed
         job = get_job_by_id(job_id)
@@ -541,17 +539,16 @@ class TestUserRequestBudget:
             async def fake_translate_budget(*args, **kwargs):
                 raise RequestBudgetExhaustedError(provider="gemini", used=250, budget=250)
 
-            with patch("app.services.translator.SubtitleTranslator.translate_srt_content", fake_translate_budget):
-                with patch("app.services.pipeline.find_external_subtitle",
-                           side_effect=lambda p, l: video_path if l == "en" else None):
-                    with patch("builtins.open", MagicMock(
-                        side_effect=lambda *a, **kw: MagicMock(
-                            __enter__=lambda *x: MagicMock(read=lambda: "1\n00:00:00,000 --> 00:00:01,000\nHello\n"),
-                            __exit__=lambda *x: None
-                        )
-                    )):
-                        pipeline = SubtitlePipeline()
-                        result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
+            en_srt_path = video_path.replace(".mkv", ".en.srt")
+            with open(en_srt_path, "w", encoding="utf-8") as _f:
+                _f.write("1\n00:00:00,000 --> 00:00:01,000\nHello world budget test.\n\n"
+                         "2\n00:00:01,000 --> 00:00:02,000\nTesting budget exhaustion.\n\n"
+                         "3\n00:00:02,000 --> 00:00:03,000\nProvider request quota used.\n")
+
+            with patch("app.services.translator.SubtitleTranslator.translate_srt_content", fake_translate_budget),                  patch("app.services.pipeline.find_external_subtitle",
+                       side_effect=lambda p, l: en_srt_path if l == "en" else None):
+                pipeline = SubtitlePipeline()
+                result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
 
             job = get_job_by_id(job_id)
             assert job["status"] == "DEFERRED", f"Expected DEFERRED, got {job['status']}"
@@ -699,17 +696,16 @@ class TestAuthError:
         async def fake_translate_auth(*args, **kwargs):
             raise ProviderConfigurationError("401 Unauthorized: invalid API key")
 
-        with patch("app.services.translator.SubtitleTranslator.translate_srt_content", fake_translate_auth):
-            with patch("app.services.pipeline.find_external_subtitle",
-                       side_effect=lambda p, l: video_path if l == "en" else None):
-                with patch("builtins.open", MagicMock(
-                    side_effect=lambda *a, **kw: MagicMock(
-                        __enter__=lambda *x: MagicMock(read=lambda: "1\n00:00:00,000 --> 00:00:01,000\nHello\n"),
-                        __exit__=lambda *x: None
-                    )
-                )):
-                    pipeline = SubtitlePipeline()
-                    result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
+        en_srt_path = video_path.replace(".mkv", ".en.srt")
+        with open(en_srt_path, "w", encoding="utf-8") as _f:
+            _f.write("1\n00:00:00,000 --> 00:00:01,000\nHello world auth test.\n\n"
+                     "2\n00:00:01,000 --> 00:00:02,000\nTesting auth error handling.\n\n"
+                     "3\n00:00:02,000 --> 00:00:03,000\nBad API key must cause FAILED.\n")
+
+        with patch("app.services.translator.SubtitleTranslator.translate_srt_content", fake_translate_auth),              patch("app.services.pipeline.find_external_subtitle",
+                   side_effect=lambda p, l: en_srt_path if l == "en" else None):
+            pipeline = SubtitlePipeline()
+            result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
 
         job = get_job_by_id(job_id)
         assert job["status"] == "FAILED", f"Auth error must result in FAILED, got {job['status']}"

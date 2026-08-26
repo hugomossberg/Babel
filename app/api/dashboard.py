@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import asyncio
 import httpx
 from datetime import datetime
@@ -16,29 +17,45 @@ from app.core.security import mask_secret, is_masked_secret, resolve_secret_key
 from app.services.docker_controller import docker_controller
 from app.services.bazarr_controller import bazarr_controller
 from app.services.scanner import scan_library_folders
-from app.services.jellyfin_notifier import notify_jellyfin_library_refresh
+from app.services.jellyfin_notifier import notify_jellyfin_library_refresh, check_jellyfin_connection
+from app.services.plex_notifier import notify_plex_library_refresh, check_plex_connection
+from app.core.ai_providers import get_default_model, get_provider_catalog, normalize_provider
 
 router = APIRouter()
 
 class AISettingsRequest(BaseModel):
-    ai_provider: Optional[str] = "gemini"
-    gemini_api_key: Optional[str] = ""
-    gemini_model: Optional[str] = "gemini-3.5-flash-lite"
-    openai_api_key: Optional[str] = ""
-    openai_model: Optional[str] = "gpt-4o-mini"
-    deepl_api_key: Optional[str] = ""
-    ollama_url: Optional[str] = "http://localhost:11434"
-    ollama_model: Optional[str] = "llama3"
-    escalation_provider: Optional[str] = "none"
-    escalation_model: Optional[str] = ""
-    escalate_to_pro: bool = False
-    batch_size: int = Field(default=150, ge=1)
+    ai_provider: Optional[str] = None
+    gemini_api_key: Optional[str] = None
+    gemini_model: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    openai_model: Optional[str] = None
+    anthropic_api_key: Optional[str] = None
+    anthropic_model: Optional[str] = None
+    openrouter_api_key: Optional[str] = None
+    openrouter_model: Optional[str] = None
+    deepseek_api_key: Optional[str] = None
+    deepseek_model: Optional[str] = None
+    custom_openai_url: Optional[str] = None
+    custom_openai_api_key: Optional[str] = None
+    custom_openai_model: Optional[str] = None
+    deepl_api_key: Optional[str] = None
+    deepl_model_type: Optional[str] = None
+    ollama_url: Optional[str] = None
+    ollama_model: Optional[str] = None
+    escalation_provider: Optional[str] = None
+    escalation_model: Optional[str] = None
+    escalate_to_pro: Optional[bool] = None
+    batch_size: Optional[int] = Field(default=None, ge=1)
     max_concurrent_jobs: Optional[int] = Field(default=None, ge=1)
     batch_concurrency: Optional[int] = Field(default=None, ge=1)
-    glossary: Optional[str] = ""
+    glossary: Optional[str] = None
     # Daily request budget: 0 = Unlimited (default), positive integer = daily limit
     daily_request_budget_gemini: Optional[int] = Field(default=None, ge=0)
     daily_request_budget_openai: Optional[int] = Field(default=None, ge=0)
+    daily_request_budget_anthropic: Optional[int] = Field(default=None, ge=0)
+    daily_request_budget_openrouter: Optional[int] = Field(default=None, ge=0)
+    daily_request_budget_deepseek: Optional[int] = Field(default=None, ge=0)
+    daily_request_budget_custom: Optional[int] = Field(default=None, ge=0)
     daily_request_budget_deepl: Optional[int] = Field(default=None, ge=0)
     daily_request_budget_ollama: Optional[int] = Field(default=None, ge=0)
 
@@ -52,6 +69,14 @@ class TestAIRequest(BaseModel):
 class TestBazarrRequest(BaseModel):
     bazarr_url: str
     bazarr_api_key: str
+
+class TestJellyfinRequest(BaseModel):
+    jellyfin_url: str
+    jellyfin_api_key: Optional[str] = ""
+
+class TestPlexRequest(BaseModel):
+    plex_url: str
+    plex_token: Optional[str] = ""
 
 class TargetLangItem(BaseModel):
     name: str
@@ -77,6 +102,11 @@ class IntegrationsSettingsRequest(BaseModel):
     notify_jellyfin: bool
     jellyfin_url: str
     jellyfin_api_key: str
+    notify_plex: Optional[bool] = False
+    plex_url: Optional[str] = ""
+    plex_token: Optional[str] = ""
+    plex_path_babel_prefix: Optional[str] = ""
+    plex_path_plex_prefix: Optional[str] = ""
 
 class ContainerActionRequest(BaseModel):
     container_name: str
@@ -109,6 +139,9 @@ async def api_active_jobs() -> Dict[str, Any]:
             "defer_reason": job.get("defer_reason"),
             "error_message": job.get("error_message"),
             "waiting_provider": job.get("waiting_provider"),
+            "waiting_model": job.get("waiting_model"),
+            "primary_provider": job.get("primary_provider"),
+            "primary_model": job.get("primary_model"),
         }
     return result
 
@@ -223,6 +256,9 @@ async def api_delete_subtitles(req: DeleteSubRequest):
         conn.commit()
 
     await notify_jellyfin_library_refresh()
+    if get_setting("notify_plex", "false").lower() == "true":
+        await notify_plex_library_refresh(video_path)
+    invalidate_media_cache()
     return {"status": "deleted", "deleted_files": deleted_files}
 
 @router.get("/settings/all")
@@ -249,13 +285,27 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "ai_provider": get_setting("ai_provider", "gemini"),
             "gemini_api_key": mask_secret(raw_key),
             "has_api_key": bool(raw_key),
-            "gemini_model": get_setting("gemini_model", "gemini-3.5-flash-lite"),
+            "gemini_model": get_setting("gemini_model", get_default_model("gemini")),
             "openai_api_key": mask_secret(get_setting("openai_api_key", "")),
             "has_openai_key": bool(get_setting("openai_api_key", "")),
-            "openai_model": get_setting("openai_model", "gpt-4o-mini"),
+            "openai_model": get_setting("openai_model", get_default_model("openai")),
+            "anthropic_api_key": mask_secret(get_setting("anthropic_api_key", "")),
+            "has_anthropic_key": bool(get_setting("anthropic_api_key", "")),
+            "anthropic_model": get_setting("anthropic_model", get_default_model("anthropic")),
+            "openrouter_api_key": mask_secret(get_setting("openrouter_api_key", "")),
+            "has_openrouter_key": bool(get_setting("openrouter_api_key", "")),
+            "openrouter_model": get_setting("openrouter_model", get_default_model("openrouter")),
+            "deepseek_api_key": mask_secret(get_setting("deepseek_api_key", "")),
+            "has_deepseek_key": bool(get_setting("deepseek_api_key", "")),
+            "deepseek_model": get_setting("deepseek_model", get_default_model("deepseek")),
+            "custom_openai_url": get_setting("custom_openai_url", "http://localhost:8000/v1"),
+            "custom_openai_api_key": mask_secret(get_setting("custom_openai_api_key", "")),
+            "has_custom_openai_key": bool(get_setting("custom_openai_api_key", "")),
+            "custom_openai_model": get_setting("custom_openai_model", get_default_model("custom")),
             "deepl_api_key": mask_secret(get_setting("deepl_api_key", "")),
+            "deepl_model_type": get_setting("deepl_model_type", get_default_model("deepl")),
             "ollama_url": get_setting("ollama_url", "http://localhost:11434"),
-            "ollama_model": get_setting("ollama_model", "llama3"),
+            "ollama_model": get_setting("ollama_model", get_default_model("ollama")),
             "escalation_provider": get_setting("escalation_provider", "none"),
             "escalation_model": get_setting("escalation_model", ""),
             "escalate_to_pro": get_setting("escalate_to_pro", "false").lower() == "true",
@@ -266,6 +316,10 @@ async def api_get_all_settings() -> Dict[str, Any]:
             # Daily request budgets (0 = Unlimited)
             "daily_request_budget_gemini": int(get_setting("daily_request_budget_gemini", "0") or "0"),
             "daily_request_budget_openai": int(get_setting("daily_request_budget_openai", "0") or "0"),
+            "daily_request_budget_anthropic": int(get_setting("daily_request_budget_anthropic", "0") or "0"),
+            "daily_request_budget_openrouter": int(get_setting("daily_request_budget_openrouter", "0") or "0"),
+            "daily_request_budget_deepseek": int(get_setting("daily_request_budget_deepseek", "0") or "0"),
+            "daily_request_budget_custom": int(get_setting("daily_request_budget_custom", "0") or "0"),
             "daily_request_budget_deepl": int(get_setting("daily_request_budget_deepl", "0") or "0"),
             "daily_request_budget_ollama": int(get_setting("daily_request_budget_ollama", "0") or "0"),
         },
@@ -275,7 +329,7 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "extract_source_embedded": get_setting("extract_source_embedded", "true").lower() == "true",
             "auto_repair_unhealthy": get_setting("auto_repair_unhealthy", "true").lower() == "true",
             "strict_sync_lock": get_setting("strict_sync_lock", "true").lower() == "true",
-            "original_language_guard": get_setting("original_language_guard", "true").lower() == "true",
+            # original_language_guard removed in v2.3.43 — kept in DB for backward compat but no longer active
         },
         "languages": languages,
         "available_languages": available_languages,
@@ -292,9 +346,14 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "bazarr_container_name": get_setting("bazarr_container_name", "bazarr"),
             "bazarr_container_status": docker_info,
             "wait_time_seconds": int(get_setting("wait_time_seconds", "15")),
-            "notify_jellyfin": get_setting("notify_jellyfin", "true").lower() == "true",
+            "notify_jellyfin": get_setting("notify_jellyfin", "false").lower() == "true",
             "jellyfin_url": get_setting("jellyfin_url", "http://jellyfin:8096"),
-            "jellyfin_api_key": mask_secret(get_setting("jellyfin_api_key", ""))
+            "jellyfin_api_key": mask_secret(get_setting("jellyfin_api_key", "")),
+            "notify_plex": get_setting("notify_plex", "false").lower() == "true",
+            "plex_url": get_setting("plex_url", ""),
+            "plex_token": mask_secret(get_setting("plex_token", "")),
+            "plex_path_babel_prefix": get_setting("plex_path_babel_prefix", ""),
+            "plex_path_plex_prefix": get_setting("plex_path_plex_prefix", "")
         }
     }
 
@@ -312,7 +371,7 @@ async def api_get_quota_status():
     """Return per-provider quota / budget status for UI display."""
     from app.core.quota import get_quota_status_for_provider
     active_provider = get_setting("ai_provider", "gemini").lower()
-    providers = ["gemini", "openai", "deepl", "ollama"]
+    providers = ["gemini", "openai", "anthropic", "openrouter", "deepseek", "custom", "deepl", "ollama"]
     quota_data = {p: get_quota_status_for_provider(p) for p in providers}
     return {
         "active_provider": active_provider,
@@ -323,7 +382,7 @@ async def api_get_quota_status():
 async def api_unblock_provider(provider: str):
     """Manually unblock a provider (admin action)."""
     from app.core.quota import unblock_provider
-    allowed = {"gemini", "openai", "deepl", "ollama"}
+    allowed = {"gemini", "openai", "anthropic", "openrouter", "deepseek", "custom", "deepl", "ollama"}
     if provider not in allowed:
         raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'")
     unblock_provider(provider)
@@ -331,29 +390,51 @@ async def api_unblock_provider(provider: str):
 
 @router.post("/settings/ai")
 async def api_save_ai_settings(req: AISettingsRequest):
-    if req.ai_provider:
+    if req.ai_provider is not None and req.ai_provider.strip():
         set_setting("ai_provider", req.ai_provider)
     if req.gemini_api_key is not None and not is_masked_secret(req.gemini_api_key):
         set_setting("gemini_api_key", req.gemini_api_key.strip())
-    if req.gemini_model:
+    if req.gemini_model is not None and req.gemini_model.strip():
         set_setting("gemini_model", req.gemini_model)
     if req.openai_api_key is not None and not is_masked_secret(req.openai_api_key):
         set_setting("openai_api_key", req.openai_api_key.strip())
-    if req.openai_model:
+    if req.openai_model is not None and req.openai_model.strip():
         set_setting("openai_model", req.openai_model)
+    if req.anthropic_api_key is not None and not is_masked_secret(req.anthropic_api_key):
+        set_setting("anthropic_api_key", req.anthropic_api_key.strip())
+    if req.anthropic_model is not None and req.anthropic_model.strip():
+        set_setting("anthropic_model", req.anthropic_model.strip())
+    if req.openrouter_api_key is not None and not is_masked_secret(req.openrouter_api_key):
+        set_setting("openrouter_api_key", req.openrouter_api_key.strip())
+    if req.openrouter_model is not None and req.openrouter_model.strip():
+        set_setting("openrouter_model", req.openrouter_model.strip())
+    if req.deepseek_api_key is not None and not is_masked_secret(req.deepseek_api_key):
+        set_setting("deepseek_api_key", req.deepseek_api_key.strip())
+    if req.deepseek_model is not None and req.deepseek_model.strip():
+        set_setting("deepseek_model", req.deepseek_model.strip())
+    if req.custom_openai_url is not None and req.custom_openai_url.strip():
+        set_setting("custom_openai_url", req.custom_openai_url.strip())
+    if req.custom_openai_api_key is not None and not is_masked_secret(req.custom_openai_api_key):
+        set_setting("custom_openai_api_key", req.custom_openai_api_key.strip())
+    if req.custom_openai_model is not None and req.custom_openai_model.strip():
+        set_setting("custom_openai_model", req.custom_openai_model.strip())
     if req.deepl_api_key is not None and not is_masked_secret(req.deepl_api_key):
         set_setting("deepl_api_key", req.deepl_api_key.strip())
-    if req.ollama_url:
+    if req.deepl_model_type is not None and req.deepl_model_type.strip():
+        set_setting("deepl_model_type", req.deepl_model_type.strip())
+    if req.ollama_url is not None and req.ollama_url.strip():
         set_setting("ollama_url", req.ollama_url.strip())
-    if req.ollama_model:
+    if req.ollama_model is not None and req.ollama_model.strip():
         set_setting("ollama_model", req.ollama_model.strip())
-    if req.escalation_provider:
+    if req.escalation_provider is not None and req.escalation_provider.strip():
         set_setting("escalation_provider", req.escalation_provider)
-    if req.escalation_model is not None:
+    if req.escalation_model is not None and req.escalation_model.strip():
         set_setting("escalation_model", req.escalation_model.strip())
-    set_setting("escalate_to_pro", "true" if req.escalate_to_pro else "false")
-    safe_batch_size = max(1, int(req.batch_size))
-    set_setting("batch_size", str(safe_batch_size))
+    if req.escalate_to_pro is not None:
+        set_setting("escalate_to_pro", "true" if req.escalate_to_pro else "false")
+    if req.batch_size is not None:
+        safe_batch_size = max(1, int(req.batch_size))
+        set_setting("batch_size", str(safe_batch_size))
     if req.max_concurrent_jobs is not None:
         safe_max_jobs = max(1, int(req.max_concurrent_jobs))
         set_setting("max_concurrent_jobs", str(safe_max_jobs))
@@ -363,12 +444,168 @@ async def api_save_ai_settings(req: AISettingsRequest):
     if req.glossary is not None:
         set_setting("glossary", req.glossary)
     # Daily request budgets: 0 = unlimited
-    for provider_key in ["gemini", "openai", "deepl", "ollama"]:
+    for provider_key in ["gemini", "openai", "anthropic", "openrouter", "deepseek", "custom", "deepl", "ollama"]:
         budget_field = f"daily_request_budget_{provider_key}"
         budget_val = getattr(req, budget_field, None)
         if budget_val is not None:
             set_setting(budget_field, str(max(0, int(budget_val))))
     return {"status": "saved"}
+
+
+_MODELS_CACHE: Dict[str, tuple[float, List[Dict[str, str]]]] = {}
+
+
+@router.get("/settings/providers")
+async def api_get_providers():
+    from app.core.ai_providers import PROVIDERS
+    return {"providers": {k: {"id": v.id, "label": v.label, "general_llm": v.general_llm, "default_model": v.default_model} for k, v in PROVIDERS.items()}}
+
+@router.get("/settings/models")
+async def api_get_provider_models(provider: str = Query("gemini"), url: Optional[str] = None, refresh: bool = Query(False)):
+    import logging
+    _log = logging.getLogger(__name__)
+    from app.core.ai_providers import (
+        get_provider_catalog,
+        get_default_model,
+        normalize_provider,
+        filter_gemini_models,
+        filter_openai_models,
+        filter_anthropic_models,
+        filter_openrouter_models,
+        filter_ollama_models,
+        filter_custom_models,
+    )
+    prov = normalize_provider(provider or "gemini")
+    cache_key = f"{prov}:{url or ''}"
+    now = datetime.now().timestamp()
+
+    if not refresh and cache_key in _MODELS_CACHE:
+        cached_time, cached_data = _MODELS_CACHE[cache_key]
+        ttl = 60.0 if prov in ["ollama", "custom"] else 3600.0
+        if now - cached_time < ttl:
+            return {"provider": prov, "default_model": get_default_model(prov), "models": cached_data, "cached": True}
+
+    models: List[Dict[str, str]] = []
+
+    if prov == "gemini":
+        key = resolve_secret_key("", "gemini_api_key")
+        if key:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    res = await client.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={key}")
+                    if res.status_code == 200:
+                        data = res.json()
+                        discovered = filter_gemini_models(data.get("models", []))
+                        if discovered:
+                            models = discovered
+            except Exception as e:
+                _log.debug(f"Gemini live discovery failed: {e}")
+        if not models:
+            models = get_provider_catalog("gemini")
+
+    elif prov == "openai":
+        key = resolve_secret_key("", "openai_api_key")
+        if key:
+            try:
+                headers = {"Authorization": f"Bearer {key}"}
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    res = await client.get("https://api.openai.com/v1/models", headers=headers)
+                    if res.status_code == 200:
+                        data = res.json()
+                        discovered = filter_openai_models(data.get("data", []))
+                        if discovered:
+                            models = discovered
+            except Exception as e:
+                _log.debug(f"OpenAI live discovery failed: {e}")
+        if not models:
+            models = get_provider_catalog("openai")
+
+    elif prov == "anthropic":
+        key = resolve_secret_key("", "anthropic_api_key")
+        if key:
+            try:
+                headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    res = await client.get("https://api.anthropic.com/v1/models", headers=headers)
+                    if res.status_code == 200:
+                        data = res.json()
+                        discovered = filter_anthropic_models(data.get("data", []))
+                        if discovered:
+                            models = discovered
+            except Exception as e:
+                _log.debug(f"Anthropic live discovery failed: {e}")
+        if not models:
+            models = get_provider_catalog("anthropic")
+
+    elif prov == "deepseek":
+        models = get_provider_catalog("deepseek")
+
+    elif prov == "openrouter":
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                res = await client.get("https://openrouter.ai/api/v1/models")
+                if res.status_code == 200:
+                    data = res.json()
+                    discovered = filter_openrouter_models(data.get("data", []))
+                    if discovered:
+                        models = discovered
+                else:
+                    raise Exception(f"Status {res.status_code}")
+        except Exception as e:
+            _log.debug(f"OpenRouter live discovery failed: {e}")
+            if cache_key in _MODELS_CACHE:
+                return {"provider": prov, "default_model": get_default_model(prov), "models": _MODELS_CACHE[cache_key][1], "cached": True}
+            models = get_provider_catalog("openrouter")
+            return {"provider": prov, "default_model": get_default_model(prov), "models": models, "cached": False}
+
+    elif prov in ["ollama", "localai"]:
+        endpoint = (url or get_setting("ollama_url", "http://localhost:11434")).rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                res = await client.get(f"{endpoint}/api/tags")
+                if res.status_code == 200:
+                    data = res.json()
+                    discovered = filter_ollama_models(data.get("models", []))
+                    if discovered:
+                        models = discovered
+                else:
+                    raise Exception("Ollama error")
+        except Exception as e:
+            _log.debug(f"Ollama live discovery failed: {e}")
+            if cache_key in _MODELS_CACHE:
+                return {"provider": prov, "default_model": get_default_model(prov), "models": _MODELS_CACHE[cache_key][1], "cached": True}
+            models = get_provider_catalog("ollama")
+            return {"provider": prov, "default_model": get_default_model(prov), "models": models, "cached": False}
+
+    elif prov in ["custom", "custom_openai"]:
+        endpoint = (url or get_setting("custom_openai_url", "http://localhost:8000/v1")).rstrip("/")
+        try:
+            key = resolve_secret_key("", "custom_openai_api_key")
+            headers = {"Authorization": f"Bearer {key or 'dummy'}"}
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                res = await client.get(f"{endpoint}/models", headers=headers)
+                if res.status_code == 200:
+                    data = res.json()
+                    discovered = filter_custom_models(data.get("data", []))
+                    if discovered:
+                        models = discovered
+                else:
+                    raise Exception("Custom error")
+        except Exception as e:
+            _log.debug(f"Custom OpenAI live discovery failed: {e}")
+            if cache_key in _MODELS_CACHE:
+                return {"provider": prov, "default_model": get_default_model(prov), "models": _MODELS_CACHE[cache_key][1], "cached": True}
+            models = get_provider_catalog("custom")
+            return {"provider": prov, "default_model": get_default_model(prov), "models": models, "cached": False}
+
+    elif prov == "deepl":
+        models = get_provider_catalog("deepl")
+
+    if not models:
+        models = get_provider_catalog(prov)
+
+    _MODELS_CACHE[cache_key] = (now, models)
+    return {"provider": prov, "default_model": get_default_model(prov), "models": models, "cached": False}
 
 
 @router.post("/settings/test-ai")
@@ -378,6 +615,11 @@ async def api_test_ai(req: TestAIRequest):
         "deepl": "deepl_api_key",
         "openai": "openai_api_key",
         "gemini": "gemini_api_key",
+        "anthropic": "anthropic_api_key",
+        "openrouter": "openrouter_api_key",
+        "deepseek": "deepseek_api_key",
+        "custom": "custom_openai_api_key",
+        "custom_openai": "custom_openai_api_key",
     }
     key = resolve_secret_key(req.api_key, setting_map.get(provider, "gemini_api_key")) if provider in setting_map else (req.api_key.strip() if req.api_key else "")
 
@@ -415,6 +657,94 @@ async def api_test_ai(req: TestAIRequest):
             return {"status": "ok", "response": "Connected"}
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
+    elif provider == "anthropic":
+        if not key:
+            raise HTTPException(status_code=400, detail="No Anthropic API Key provided or saved")
+        test_model = req.model or "claude-sonnet-5"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            try:
+                res = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": test_model,
+                        "max_tokens": 10,
+                        "messages": [{"role": "user", "content": "Respond with 'Connected'"}],
+                    },
+                )
+                if res.status_code != 200:
+                    try:
+                        err_json = res.json()
+                        err_msg = err_json.get("error", {}).get("message", res.text)
+                    except Exception:
+                        err_msg = res.text
+                    raise HTTPException(status_code=400, detail=f"Anthropic error ({res.status_code}): {err_msg}")
+                return {"status": "ok", "response": "Connected"}
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=str(e))
+    elif provider == "openrouter":
+        import openai
+        if not key:
+            raise HTTPException(status_code=400, detail="No OpenRouter API Key provided or saved")
+        try:
+            client = openai.OpenAI(
+                api_key=key,
+                base_url="https://openrouter.ai/api/v1",
+                default_headers={
+                    "HTTP-Referer": "https://github.com/hugomossberg/Babel",
+                    "X-Title": "Babel Subtitles",
+                },
+            )
+            resp = client.chat.completions.create(
+                model=req.model or "anthropic/claude-sonnet-5",
+                messages=[{"role": "user", "content": "Respond with 'Connected'"}],
+                max_tokens=10,
+            )
+            return {"status": "ok", "response": "Connected"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    elif provider == "deepseek":
+        import openai
+        if not key:
+            raise HTTPException(status_code=400, detail="No DeepSeek API Key provided or saved")
+        try:
+            client = openai.OpenAI(
+                api_key=key,
+                base_url="https://api.deepseek.com",
+            )
+            resp = client.chat.completions.create(
+                model=req.model or "deepseek-v4-flash",
+                messages=[{"role": "user", "content": "Respond with 'Connected'"}],
+                max_tokens=10,
+            )
+            return {"status": "ok", "response": "Connected"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    elif provider in ["custom", "custom_openai"]:
+        import openai
+        base_url = (req.url or get_setting("custom_openai_url", "http://localhost:8000/v1")).rstrip("/")
+        if not base_url:
+            raise HTTPException(status_code=400, detail="No Custom OpenAI Base URL provided or saved")
+        try:
+            client = openai.OpenAI(
+                api_key=key or "dummy",
+                base_url=base_url,
+            )
+            test_model = req.model or get_setting("custom_openai_model", "default")
+            resp = client.chat.completions.create(
+                model=test_model,
+                messages=[{"role": "user", "content": "Respond with 'Connected'"}],
+                max_tokens=10,
+            )
+            return {"status": "ok", "response": "Connected"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
     else:
         if not key:
             raise HTTPException(status_code=400, detail="No Gemini API Key provided or saved")
@@ -442,6 +772,10 @@ async def api_test_ai(req: TestAIRequest):
             raise HTTPException(status_code=408, detail=f"Connection timed out for model '{test_model}'. Model may be overloaded or unavailable.")
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=408, detail=f"Connection timed out for model '{test_model}'. Model may be overloaded or unavailable.")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/settings/test-bazarr")
 async def api_test_bazarr(req: TestBazarrRequest):
@@ -455,13 +789,42 @@ async def api_test_bazarr(req: TestBazarrRequest):
     else:
         raise HTTPException(status_code=400, detail=res.get("message", "Connection failed"))
 
+@router.post("/settings/test-jellyfin")
+async def api_test_jellyfin(req: TestJellyfinRequest):
+    key = resolve_secret_key(req.jellyfin_api_key, "jellyfin_api_key")
+    if not key:
+        raise HTTPException(status_code=400, detail="No Jellyfin API Token provided or saved")
+    if not req.jellyfin_url:
+        raise HTTPException(status_code=400, detail="No Jellyfin Server URL provided")
+
+    res = await check_jellyfin_connection(req.jellyfin_url, key)
+    if res.get("connected"):
+        return {"status": "ok", "version": res.get("version"), "server_name": res.get("server_name")}
+    else:
+        raise HTTPException(status_code=400, detail=res.get("message", "Connection failed"))
+
+@router.post("/settings/test-plex")
+async def api_test_plex(req: TestPlexRequest):
+    token = resolve_secret_key(req.plex_token, "plex_token")
+    if not token:
+        raise HTTPException(status_code=400, detail="No Plex Token provided or saved")
+    if not req.plex_url:
+        raise HTTPException(status_code=400, detail="No Plex Server URL provided")
+
+    res = await check_plex_connection(req.plex_url, token)
+    if res.get("connected"):
+        return {"status": "ok", "sections_count": res.get("sections_count")}
+    else:
+        raise HTTPException(status_code=400, detail=res.get("message", "Connection failed"))
+
 class ModulesSettingsRequest(BaseModel):
     clean_sdh: bool
     extract_target_embedded: bool
     extract_source_embedded: bool
     auto_repair_unhealthy: bool
     strict_sync_lock: bool
-    original_language_guard: bool
+    # original_language_guard removed in v2.3.43 (kept for backward compat with old clients)
+    original_language_guard: bool = False
 
 @router.post("/settings/modules")
 async def api_save_modules(req: ModulesSettingsRequest):
@@ -470,7 +833,7 @@ async def api_save_modules(req: ModulesSettingsRequest):
     set_setting("extract_source_embedded", "true" if req.extract_source_embedded else "false")
     set_setting("auto_repair_unhealthy", "true" if req.auto_repair_unhealthy else "false")
     set_setting("strict_sync_lock", "true" if req.strict_sync_lock else "false")
-    set_setting("original_language_guard", "true" if req.original_language_guard else "false")
+    # original_language_guard is silently accepted (backward compat) but no longer used in runtime
     return {"status": "saved"}
 
 @router.post("/settings/languages")
@@ -499,23 +862,104 @@ async def api_save_integrations(req: IntegrationsSettingsRequest):
     set_setting("jellyfin_url", req.jellyfin_url)
     if not is_masked_secret(req.jellyfin_api_key):
         set_setting("jellyfin_api_key", req.jellyfin_api_key.strip() if req.jellyfin_api_key else "")
+    set_setting("notify_plex", "true" if req.notify_plex else "false")
+    set_setting("plex_url", (req.plex_url or "").strip())
+    if not is_masked_secret(req.plex_token):
+        set_setting("plex_token", req.plex_token.strip() if req.plex_token else "")
+    set_setting("plex_path_babel_prefix", (req.plex_path_babel_prefix or "").strip())
+    set_setting("plex_path_plex_prefix", (req.plex_path_plex_prefix or "").strip())
     return {"status": "saved"}
 
+_media_cache: Dict[str, Any] = {}
+_media_cache_time: float = 0.0
+_media_cache_paths: list = []
 _scan_lock = asyncio.Lock()
+MEDIA_CACHE_TTL = 30.0  # seconds
+
+def invalidate_media_cache():
+    global _media_cache, _media_cache_time, _media_cache_paths
+    _media_cache = {}
+    _media_cache_time = 0.0
+    _media_cache_paths = []
+
+async def _attach_active_jobs_to_media(series_data: list, movies_data: list, all_paths: list) -> dict:
+    from app.core.db import get_active_jobs_by_video_paths
+    active_jobs_map = await asyncio.to_thread(get_active_jobs_by_video_paths, all_paths)
+
+    def _slim_job(job: dict) -> dict:
+        return {
+            "id": job.get("id"),
+            "status": job.get("status"),
+            "processed_lines": job.get("processed_lines"),
+            "total_lines": job.get("total_lines"),
+            "defer_reason": job.get("defer_reason"),
+            "error_message": job.get("error_message"),
+            "waiting_provider": job.get("waiting_provider"),
+            "waiting_model": job.get("waiting_model"),
+            "primary_provider": job.get("primary_provider"),
+            "primary_model": job.get("primary_model"),
+        }
+
+    for show in series_data:
+        for ep in show.get("episodes", []):
+            job = active_jobs_map.get(ep["path"])
+            ep["active_job"] = _slim_job(job) if job else None
+
+    for movie in movies_data:
+        job = active_jobs_map.get(movie["path"])
+        movie["active_job"] = _slim_job(job) if job else None
+
+    return {
+        "series": series_data,
+        "movies": movies_data,
+    }
 
 @router.get("/media-files")
-async def api_get_media_files():
+async def api_get_media_files(force: bool = False):
+    global _media_cache, _media_cache_time, _media_cache_paths
+
+    now = time.time()
+    has_valid_cache = bool(_media_cache and (now - _media_cache_time < MEDIA_CACHE_TTL))
+
+    if not force and has_valid_cache:
+        return await _attach_active_jobs_to_media(
+            _media_cache.get("series", []),
+            _media_cache.get("movies", []),
+            _media_cache_paths,
+        )
+
+    # If another scan is already running in background:
     if _scan_lock.locked():
-        raise HTTPException(status_code=429, detail="Scan in progress")
+        # If we have existing cached data, return it immediately so the UI is never blocked or empty
+        if _media_cache:
+            return await _attach_active_jobs_to_media(
+                _media_cache.get("series", []),
+                _media_cache.get("movies", []),
+                _media_cache_paths,
+            )
+        # If no cache exists at all, wait for the scan to complete rather than throwing 429
+        async with _scan_lock:
+            return await _attach_active_jobs_to_media(
+                _media_cache.get("series", []),
+                _media_cache.get("movies", []),
+                _media_cache_paths,
+            )
 
     async with _scan_lock:
+        now = time.time()
+        if not force and _media_cache and (now - _media_cache_time < MEDIA_CACHE_TTL):
+            return await _attach_active_jobs_to_media(
+                _media_cache.get("series", []),
+                _media_cache.get("movies", []),
+                _media_cache_paths,
+            )
+
         series_path = get_setting("media_series_path", "/tv")
         movies_path = get_setting("media_movies_path", "/movies")
 
         series_data = await asyncio.to_thread(scan_library_folders, series_path, "series")
         movies_data = await asyncio.to_thread(scan_library_folders, movies_path, "movies")
 
-        # Collect all video paths from the scan result for a single batch DB lookup
         all_paths: list = []
         for show in series_data:
             for ep in show.get("episodes", []):
@@ -523,35 +967,14 @@ async def api_get_media_files():
         for movie in movies_data:
             all_paths.append(movie["path"])
 
-        # One batch query: video_path → active job (if any)
-        from app.core.db import get_active_jobs_by_video_paths
-        active_jobs_map = await asyncio.to_thread(get_active_jobs_by_video_paths, all_paths)
-
-        # Attach active_job metadata to each item (only fields relevant to UI)
-        def _slim_job(job: dict) -> dict:
-            return {
-                "id": job.get("id"),
-                "status": job.get("status"),
-                "processed_lines": job.get("processed_lines"),
-                "total_lines": job.get("total_lines"),
-                "defer_reason": job.get("defer_reason"),
-                "error_message": job.get("error_message"),
-                "waiting_provider": job.get("waiting_provider"),
-            }
-
-        for show in series_data:
-            for ep in show.get("episodes", []):
-                job = active_jobs_map.get(ep["path"])
-                ep["active_job"] = _slim_job(job) if job else None
-
-        for movie in movies_data:
-            job = active_jobs_map.get(movie["path"])
-            movie["active_job"] = _slim_job(job) if job else None
-
-        return {
+        _media_cache = {
             "series": series_data,
             "movies": movies_data,
         }
+        _media_cache_paths = all_paths
+        _media_cache_time = time.time()
+
+        return await _attach_active_jobs_to_media(series_data, movies_data, all_paths)
 
 
 from app.services.updates_controller import updates_controller

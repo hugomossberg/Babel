@@ -6,6 +6,7 @@ import asyncio
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from app.services.pipeline import SubtitlePipeline
+from app.services.source_resolver import BazarrResult, BazarrResultCode
 from app.core.db import get_job_by_id
 
 def make_valid_srt(lang="en", count=10):
@@ -120,7 +121,7 @@ async def test_3_hybrid_bazarr_miss_starts_ai_immediately_no_grace_sleep(hybrid_
     pipeline = SubtitlePipeline()
     translate_called = False
 
-    async def mock_translate(subs, target_language, batch_size, job_id, show_title=None):
+    async def mock_translate(subs, target_language, source_language="English", batch_size=150, job_id=None, show_title=None):
         nonlocal translate_called
         translate_called = True
         return [
@@ -129,10 +130,13 @@ async def test_3_hybrid_bazarr_miss_starts_ai_immediately_no_grace_sleep(hybrid_
         ]
 
     monkeypatch.setattr(pipeline.translator, "translate_srt_content", mock_translate)
-    bazarr_trigger_mock = AsyncMock()
+    bazarr_trigger_mock = AsyncMock(return_value=BazarrResult(code=BazarrResultCode.MEDIA_NOT_FOUND, language="sv", detail="Not found"))
     monkeypatch.setattr(pipeline, "trigger_bazarr_search", bazarr_trigger_mock)
 
-    # Track any asyncio.sleep calls to ensure no 15s or 2s polling loops occurred
+    # Track any asyncio.sleep calls.
+    # Goal: verify that the OLD 15-second grace sleep is gone.
+    # The concurrent target-presence poller uses a 2s sleep — that is intentional
+    # and allowed. We only assert that no *legacy* grace sleeps >= 10s occurred.
     sleep_calls = []
     real_sleep = asyncio.sleep
 
@@ -147,13 +151,20 @@ async def test_3_hybrid_bazarr_miss_starts_ai_immediately_no_grace_sleep(hybrid_
     assert res["status"] == "translated"
     assert translate_called is True
     bazarr_trigger_mock.assert_called_once_with(str(video_path), language="sv")
-    # Assert no 15-second or 2-second grace period sleep was called
-    assert not any(d >= 2 for d in sleep_calls)
+    # Assert no 15-second (or other long) legacy grace-period sleep was called.
+    # The 2s concurrent poller sleep is allowed — it is not a grace sleep.
+    assert not any(d >= 10 for d in sleep_calls), (
+        f"Legacy grace sleep detected: {sleep_calls}. "
+        "No blocking grace period should exist in the hybrid pipeline."
+    )
     job = get_job_by_id(res["job_id"])
     assert job["status"] == "TRANSLATED"
     logs = "".join(job["logs"])
-    assert "Hybrid preparation completed" in logs
-    assert "Starting AI immediately (fixed grace delay avoided)" in logs
+    # v2.3.43: "Hybrid preparation completed" replaced by SourceResolver log messages
+    assert "Source Resolver" in logs
+    assert "Source selected" in logs or "source selected" in logs.lower()
+    # No fixed grace sleep — confirmed by sleep_calls check above
+
 
 
 @pytest.mark.asyncio
@@ -180,7 +191,7 @@ async def test_4_legacy_wait_time_seconds_in_db_ignored(hybrid_db_settings, tmp_
     pipeline = SubtitlePipeline()
     translate_called = False
 
-    async def mock_translate(subs, target_language, batch_size, job_id, show_title=None):
+    async def mock_translate(subs, target_language, source_language="English", batch_size=150, job_id=None, show_title=None):
         nonlocal translate_called
         translate_called = True
         return [
@@ -189,7 +200,7 @@ async def test_4_legacy_wait_time_seconds_in_db_ignored(hybrid_db_settings, tmp_
         ]
 
     monkeypatch.setattr(pipeline.translator, "translate_srt_content", mock_translate)
-    monkeypatch.setattr(pipeline, "trigger_bazarr_search", AsyncMock())
+    monkeypatch.setattr(pipeline, "trigger_bazarr_search", AsyncMock(return_value=BazarrResult(code=BazarrResultCode.MEDIA_NOT_FOUND, language="sv", detail="Not found")))
 
     sleep_calls = []
     async def tracking_sleep(delay, *args, **kwargs):
@@ -219,7 +230,7 @@ async def test_5_bazarr_unavailable_or_error_continues_to_ai(hybrid_db_settings,
     pipeline = SubtitlePipeline()
     translate_called = False
 
-    async def mock_translate(subs, target_language, batch_size, job_id, show_title=None):
+    async def mock_translate(subs, target_language, source_language="English", batch_size=150, job_id=None, show_title=None):
         nonlocal translate_called
         translate_called = True
         return [
@@ -274,7 +285,7 @@ async def test_6_pure_ai_mode_skips_bazarr_completely(tmp_path, monkeypatch):
     pipeline = SubtitlePipeline()
     translate_called = False
 
-    async def mock_translate(subs, target_language, batch_size, job_id, show_title=None):
+    async def mock_translate(subs, target_language, source_language="English", batch_size=150, job_id=None, show_title=None):
         nonlocal translate_called
         translate_called = True
         return [
@@ -387,7 +398,7 @@ async def test_9_no_duplicate_jellyfin_notification(hybrid_db_settings, tmp_path
     pipeline = SubtitlePipeline()
     monkeypatch.setattr(pipeline, "trigger_bazarr_search", AsyncMock())
 
-    async def mock_translate(subs, target_language, batch_size, job_id, show_title=None):
+    async def mock_translate(subs, target_language, source_language="English", batch_size=150, job_id=None, show_title=None):
         return [
             srt.Subtitle(index=i+1, start=sub.start, end=sub.end, content=f"Hej världen {i+1} detta är en svensk text")
             for i, sub in enumerate(subs)
@@ -417,7 +428,7 @@ async def test_10_atomic_single_writer_no_clobber(hybrid_db_settings, tmp_path, 
     pipeline = SubtitlePipeline()
     translate_called = False
 
-    async def mock_translate(subs, target_language, batch_size, job_id, show_title=None):
+    async def mock_translate(subs, target_language, source_language="English", batch_size=150, job_id=None, show_title=None):
         nonlocal translate_called
         translate_called = True
         return [
@@ -465,7 +476,7 @@ async def test_11_performance_benchmark_time_to_first_ai_request(hybrid_db_setti
     time_at_ai_call = None
     start_time = None
 
-    async def mock_translate(subs, target_language, batch_size, job_id, show_title=None):
+    async def mock_translate(subs, target_language, source_language="English", batch_size=150, job_id=None, show_title=None):
         nonlocal time_at_ai_call
         time_at_ai_call = time.monotonic()
         return [
@@ -474,7 +485,7 @@ async def test_11_performance_benchmark_time_to_first_ai_request(hybrid_db_setti
         ]
 
     monkeypatch.setattr(pipeline.translator, "translate_srt_content", mock_translate)
-    monkeypatch.setattr(pipeline, "trigger_bazarr_search", AsyncMock())
+    monkeypatch.setattr(pipeline, "trigger_bazarr_search", AsyncMock(return_value=BazarrResult(code=BazarrResultCode.MEDIA_NOT_FOUND, language="sv", detail="Not found")))
 
     start_time = time.monotonic()
     res = await pipeline.process_video_file(str(video_path), event_source="SONARR")
@@ -509,7 +520,7 @@ async def test_12_slow_bazarr_trigger_does_not_delay_source_prep_start(hybrid_db
     # Instrument extract_embedded_srt to record exact start time
     original_sanitize = pipeline.translator.translate_srt_content
 
-    async def tracking_translate(subs, target_language, batch_size, job_id, show_title=None):
+    async def tracking_translate(subs, target_language, source_language="English", batch_size=150, job_id=None, show_title=None):
         nonlocal ai_call_timestamp
         ai_call_timestamp = time.monotonic()
         return [
@@ -551,19 +562,19 @@ async def test_13_explicit_concurrency_ordering(hybrid_db_settings, tmp_path, mo
 
     monkeypatch.setattr(pipeline, "trigger_bazarr_search", controlled_bazarr_search)
 
-    # Intercept sanitize_srt_content to assert Bazarr search is in-flight
+    # Intercept sanitize_srt_content_with_provenance to assert Bazarr search is in-flight
     from app.core import cleaner
-    real_sanitize = cleaner.sanitize_srt_content
+    real_sanitize = cleaner.sanitize_srt_content_with_provenance
 
-    def tracking_sanitize(raw_text):
+    async def tracking_sanitize(raw_text, **kwargs):
         nonlocal source_prep_ran_while_bazarr_inflight
         if bazarr_search_started.is_set() and not bazarr_search_finished.is_set():
             source_prep_ran_while_bazarr_inflight = True
-        return real_sanitize(raw_text)
+        return await real_sanitize(raw_text, **kwargs)
 
-    monkeypatch.setattr("app.services.pipeline.sanitize_srt_content", tracking_sanitize)
+    monkeypatch.setattr("app.services.pipeline.sanitize_srt_content_with_provenance", tracking_sanitize)
 
-    async def mock_translate(subs, target_language, batch_size, job_id, show_title=None):
+    async def mock_translate(subs, target_language, source_language="English", batch_size=150, job_id=None, show_title=None):
         return [
             srt.Subtitle(index=i+1, start=sub.start, end=sub.end, content=f"Hej {i+1} svensk text")
             for i, sub in enumerate(subs)
@@ -595,7 +606,7 @@ async def test_14_hung_or_slow_bazarr_trigger_cancelled_without_orphan_tasks(hyb
 
     monkeypatch.setattr(pipeline, "trigger_bazarr_search", hung_bazarr_search)
 
-    async def mock_translate(subs, target_language, batch_size, job_id, show_title=None):
+    async def mock_translate(subs, target_language, source_language="English", batch_size=150, job_id=None, show_title=None):
         return [
             srt.Subtitle(index=i+1, start=sub.start, end=sub.end, content=f"Hej {i+1} svensk text")
             for i, sub in enumerate(subs)

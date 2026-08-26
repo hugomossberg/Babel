@@ -347,7 +347,7 @@ class TestFreshJobWithCapacity:
 
         translate_called = [0]
 
-        async def mock_translate(subs, target_language, batch_size, job_id, show_title=None):
+        async def mock_translate(subs, target_language, source_language="English", batch_size=150, job_id=None, show_title=None):
             translate_called[0] += 1
             return list(subs)  # echo back unchanged
 

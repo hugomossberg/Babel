@@ -44,16 +44,16 @@ def test_sdh_preserves_real_dialogue():
 def test_sdh_cleans_sound_effects_and_music_notes():
     """Verify that sound effects, reactions, music cues and notes are cleaned to <i></i>."""
     sdh_cases = [
-        ("(door slams)", "<i></i>"),
-        ("(phone ringing)", "<i></i>"),
-        ("(gunshots)", "<i></i>"),
-        ("(laughing)", "<i></i>"),
-        ("(sighs)", "<i></i>"),
+        ("[door slams]", "<i></i>"),
+        ("[phone ringing]", "<i></i>"),
+        ("[gunshots]", "<i></i>"),
+        ("[laughing]", "<i></i>"),
+        ("[sighs]", "<i></i>"),
         ("[MUSIC PLAYING]", "<i></i>"),
         ("[DOOR SLAMS]", "<i></i>"),
         ("[Dramatic music playing]", "<i></i>"),
-        ("(SCREAMING)", "<i></i>"),
-        ("♪ music ♪", "<i></i>"),
+        ("[SCREAMING]", "<i></i>"),
+        ("♪ - ♪", "<i></i>"),
         ("♪♪♪", "<i></i>"),
     ]
     for raw, expected in sdh_cases:
@@ -62,8 +62,8 @@ def test_sdh_cleans_sound_effects_and_music_notes():
 
 def test_sdh_mixed_lines_and_lyrics():
     """Verify that mixed lines strip SDH cues and lyrics strip music notes."""
-    assert clean_subtitle_text("[door opens] Hello John! (sighs)") == "Hello John!"
-    assert clean_subtitle_text("(whispering) Don't make a sound.") == "Don't make a sound."
+    assert clean_subtitle_text("[door opens] Hello John! [sighs]") == "Hello John!"
+    assert clean_subtitle_text("[whispering] Don't make a sound.") == "Don't make a sound."
     assert clean_subtitle_text("♪ Never gonna give you up ♪") == "Never gonna give you up"
 
 

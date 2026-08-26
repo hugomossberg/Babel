@@ -258,7 +258,7 @@ def test_ui_today_breakdown_and_smart_capacity():
     assert "Capacity Estimate" in html
     assert "usageStats.has_sufficient_history" in html
     assert "Not enough history" in html
-    assert "Avg AI calls / episode" in html
+    assert "Avg AI calls" in html
     assert "Estimated episodes remaining today" in html
 
 

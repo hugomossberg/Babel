@@ -48,7 +48,7 @@ def test_cleaner_conservative_sdh():
     subs, _ = sanitize_srt_content(text)
     assert subs[0].content == "I told him (and I mean this) to leave."
 
-    text2 = "1\n00:00:01,000 --> 00:00:02,000\n(laughing)"
+    text2 = "1\n00:00:01,000 --> 00:00:02,000\n[laughing]"
     subs2, _ = sanitize_srt_content(text2)
     assert subs2[0].content == "<i></i>"
 

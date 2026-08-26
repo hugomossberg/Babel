@@ -48,6 +48,7 @@ class UsageStage:
     ESCALATION = "ESCALATION"
     CLASSIFIER = "CLASSIFIER"
     ENTITY_VERIFY = "ENTITY_VERIFY"
+    SEMANTIC_AUDIT = "SEMANTIC_AUDIT"
 
 
 class UsageStatus:
@@ -372,43 +373,109 @@ def extract_gemini_usage(response):
 
 def extract_openai_usage(response):
     """
-    Extract token usage from OpenAI SDK ChatCompletion.
+    Extract token usage from OpenAI SDK ChatCompletion or dict response.
 
     prompt_tokens: total prompt tokens (includes cached subset)
     completion_tokens: output tokens INCLUDING reasoning tokens
-    prompt_tokens_details.cached_tokens: cached subset
+    prompt_tokens_details.cached_tokens / prompt_cache_hit_tokens: cached subset
 
     cached_input_tokens=None if cached_tokens <= 0 (no caching used).
     thinking_tokens: always None for OpenAI (reasoning is included in completion_tokens).
     """
     result = {"input_tokens": None, "cached_input_tokens": None, "output_tokens": None, "thinking_tokens": None}
     try:
-        usage = getattr(response, "usage", None)
+        if isinstance(response, dict):
+            usage = response.get("usage")
+        else:
+            usage = getattr(response, "usage", None)
         if usage is None:
             return result
-        pt = getattr(usage, "prompt_tokens", None)
+
+        if isinstance(usage, dict):
+            pt = usage.get("prompt_tokens")
+            ct = usage.get("completion_tokens")
+            ptd = usage.get("prompt_tokens_details") or {}
+            cached = ptd.get("cached_tokens") if isinstance(ptd, dict) else getattr(ptd, "cached_tokens", None)
+        else:
+            pt = getattr(usage, "prompt_tokens", None)
+            ct = getattr(usage, "completion_tokens", None)
+            ptd = getattr(usage, "prompt_tokens_details", None)
+            cached = getattr(ptd, "cached_tokens", None) if ptd is not None else None
+
         if pt is not None:
             result["input_tokens"] = int(pt)
-        ct = getattr(usage, "completion_tokens", None)
         if ct is not None:
             result["output_tokens"] = int(ct)
-        ptd = getattr(usage, "prompt_tokens_details", None)
-        if ptd is not None:
-            cached = getattr(ptd, "cached_tokens", None)
-            if cached is not None and int(cached) > 0:
-                result["cached_input_tokens"] = int(cached)
+        if cached is not None and int(cached) > 0:
+            result["cached_input_tokens"] = int(cached)
     except Exception as e:
         logger.debug("extract_openai_usage: parse error: %s", e)
     return result
 
+
+def extract_anthropic_usage(response):
+    """
+    Extract token usage from Anthropic Messages API response (dict or object).
+
+    input_tokens: total input prompt tokens
+    output_tokens: generated completion tokens
+    cache_read_input_tokens: cached prompt tokens (discounted)
+    """
+    result = {"input_tokens": None, "cached_input_tokens": None, "output_tokens": None, "thinking_tokens": None}
+    try:
+        if isinstance(response, dict):
+            usage = response.get("usage")
+        else:
+            usage = getattr(response, "usage", None)
+        if usage is None:
+            return result
+
+        if isinstance(usage, dict):
+            it = usage.get("input_tokens")
+            ot = usage.get("output_tokens")
+            cached = usage.get("cache_read_input_tokens")
+        else:
+            it = getattr(usage, "input_tokens", None)
+            ot = getattr(usage, "output_tokens", None)
+            cached = getattr(usage, "cache_read_input_tokens", None)
+
+        if it is not None:
+            result["input_tokens"] = int(it)
+        if ot is not None:
+            result["output_tokens"] = int(ot)
+        if cached is not None and int(cached) > 0:
+            result["cached_input_tokens"] = int(cached)
+    except Exception as e:
+        logger.debug("extract_anthropic_usage: parse error: %s", e)
+    return result
+
+
+
+def extract_ollama_usage(response):
+    result = {"input_tokens": None, "cached_input_tokens": None, "output_tokens": None, "thinking_tokens": None}
+    try:
+        if isinstance(response, dict):
+            pt = response.get("prompt_eval_count")
+            ct = response.get("eval_count")
+            if pt is not None:
+                result["input_tokens"] = int(pt)
+            if ct is not None:
+                result["output_tokens"] = int(ct)
+    except Exception:
+        pass
+    return result
 
 def extract_usage_from_response(provider, response):
     """Dispatch to correct provider usage adapter. Unknown providers return all-None."""
     p = (provider or "").lower().strip()
     if p == "gemini":
         return extract_gemini_usage(response)
-    elif p == "openai":
+    elif p in ("openai", "openrouter", "deepseek", "custom", "custom_openai"):
         return extract_openai_usage(response)
+    elif p == "anthropic":
+        return extract_anthropic_usage(response)
+    elif p in ("ollama", "localai"):
+        return extract_ollama_usage(response)
     else:
         return {"input_tokens": None, "cached_input_tokens": None, "output_tokens": None, "thinking_tokens": None}
 
@@ -580,7 +647,7 @@ def get_today_usage_summary():
         with sqlite3.connect(DB_PATH, timeout=10.0) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                """SELECT provider,
+                """SELECT provider, model,
                           COUNT(*) as calls,
                           SUM(input_tokens) as input_tokens,
                           SUM(cached_input_tokens) as cached_input_tokens,
@@ -588,7 +655,7 @@ def get_today_usage_summary():
                           SUM(estimated_cost_usd) as estimated_cost_usd
                    FROM ai_usage_ledger
                    WHERE created_at>=? AND created_at<=? AND status!='PENDING'
-                   GROUP BY provider""",
+                   GROUP BY provider, model""",
                 (day_start, day_end),
             ).fetchall()
     except Exception as e:
@@ -601,13 +668,33 @@ def get_today_usage_summary():
 
     for row in rows:
         p = row["provider"]
-        providers[p] = {
+        m = row["model"]
+        if p not in providers:
+            providers[p] = {
+                "calls_today": 0,
+                "input_tokens_today": None,
+                "cached_input_tokens_today": None,
+                "output_tokens_today": None,
+                "estimated_cost_today": None,
+                "models": {}
+            }
+
+        # Add to provider totals
+        providers[p]["calls_today"] += row["calls"] or 0
+        providers[p]["input_tokens_today"] = _nullable_add(providers[p]["input_tokens_today"], row["input_tokens"])
+        providers[p]["cached_input_tokens_today"] = _nullable_add(providers[p]["cached_input_tokens_today"], row["cached_input_tokens"])
+        providers[p]["output_tokens_today"] = _nullable_add(providers[p]["output_tokens_today"], row["output_tokens"])
+        providers[p]["estimated_cost_today"] = _nullable_add(providers[p]["estimated_cost_today"], row["estimated_cost_usd"])
+
+        # Add to model breakdown
+        providers[p]["models"][m] = {
             "calls_today": row["calls"] or 0,
             "input_tokens_today": row["input_tokens"],
             "cached_input_tokens_today": row["cached_input_tokens"],
             "output_tokens_today": row["output_tokens"],
             "estimated_cost_today": row["estimated_cost_usd"],
         }
+
         total_calls += row["calls"] or 0
         total_input = _nullable_add(total_input, row["input_tokens"])
         total_cached = _nullable_add(total_cached, row["cached_input_tokens"])

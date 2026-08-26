@@ -115,14 +115,14 @@ def test_bug_d_cleaner_dialogue_and_sdh_handling():
     assert clean_subtitle_text("(Help me)") == "(Help me)"
     assert clean_subtitle_text("(Stay back)") == "(Stay back)"
     assert clean_subtitle_text("(Good morning)") == "(Good morning)"
-    assert clean_subtitle_text("(whispering) Don't make a sound.") == "Don't make a sound."
+    assert clean_subtitle_text("[whispering] Don't make a sound.") == "Don't make a sound."
 
     # SDH cases to clean
-    assert clean_subtitle_text("(laughing)") == EMPTY_PLACEHOLDER
-    assert clean_subtitle_text("(door closes)") == EMPTY_PLACEHOLDER
-    assert clean_subtitle_text("(phone ringing)") == EMPTY_PLACEHOLDER
+    assert clean_subtitle_text("[laughing]") == EMPTY_PLACEHOLDER
     assert clean_subtitle_text("[door closes]") == EMPTY_PLACEHOLDER
-    assert clean_subtitle_text("(SCREAMING)") == EMPTY_PLACEHOLDER
+    assert clean_subtitle_text("[phone ringing]") == EMPTY_PLACEHOLDER
+    assert clean_subtitle_text("[door closes]") == EMPTY_PLACEHOLDER
+    assert clean_subtitle_text("[SCREAMING]") == EMPTY_PLACEHOLDER
     assert clean_subtitle_text("♪ Never gonna give you up ♪") == "Never gonna give you up"
     assert clean_subtitle_text("♪♪♪") == EMPTY_PLACEHOLDER
 

@@ -19,7 +19,7 @@ async def test_escalation_fail_closed_returns_none():
             res = await translator.escalate_single_line(1, "Hello", "", "", "Swedish", "Show")
             assert res is None
 
-            # C: Exact source English returns None
+            # C: Unverified identical source candidate returns None (fails closed)
             mock_client.return_value.models.generate_content.return_value.text = '{"translation": "Hello"}'
             res = await translator.escalate_single_line(1, "Hello", "", "", "Swedish", "Show")
             assert res is None
@@ -45,7 +45,8 @@ async def test_escalation_hard_translate_prompt():
             call_kwargs = mock_client.return_value.models.generate_content.call_args.kwargs
             config = call_kwargs.get("config")
 
-            assert "TARGET is known to still be untranslated English dialogue" in config.system_instruction
+            assert "TARGET is known to still be untranslated source-language dialogue" in config.system_instruction
+            assert "Do NOT return the original source-language text" in config.system_instruction
             assert res == "Hej"
 
 @pytest.mark.asyncio
@@ -62,24 +63,24 @@ async def test_safe_ids_reuse_in_recovery():
 
     pipeline = SubtitlePipeline()
     source_subs = [
-        srt.Subtitle(1, timedelta(seconds=1), timedelta(seconds=2), "NASA"),
+        srt.Subtitle(1, timedelta(seconds=1), timedelta(seconds=2), "911"),
         srt.Subtitle(2, timedelta(seconds=2), timedelta(seconds=3), "Hello"),
     ]
     # Initially, both lines are still unchanged source English
     translated_subs = [
-        srt.Subtitle(1, timedelta(seconds=1), timedelta(seconds=2), "NASA"),
+        srt.Subtitle(1, timedelta(seconds=1), timedelta(seconds=2), "911"),
         srt.Subtitle(2, timedelta(seconds=2), timedelta(seconds=3), "Hello"),
     ]
 
     # 2. Pipeline classifier step: simulate AI classifier classifying both candidate lines
     classifier_raw_response = json.dumps({
         "results": [
-            {"id": 1, "action": "keep", "reason": "acronym"},
+            {"id": 1, "action": "keep", "reason": "number"},
             {"id": 2, "action": "keep", "reason": "proper_noun"}  # Invalid keep: "Hello" is an English common word!
         ]
     })
     classifier_items = [
-        {"id": 1, "text": "NASA"},
+        {"id": 1, "text": "911"},
         {"id": 2, "text": "Hello"},
     ]
     validated_results = validate_classifier_output(classifier_raw_response, classifier_items)
@@ -95,9 +96,9 @@ async def test_safe_ids_reuse_in_recovery():
             assert res["action"] == "translate"
             assert res["text"] == ""  # blanked out to force translation
 
-    assert safe_ids == {0}  # Only NASA (idx 0) was deterministically validated as safe
+    assert safe_ids == {0}  # Only 911 (idx 0) was deterministically validated as safe
 
-    # 3. QA gate with safe_ids populated: NASA is accepted, Hello is identified as real untranslated
+    # 3. QA gate with safe_ids populated: 911 is accepted, Hello is identified as real untranslated
     qa_res = pipeline.qa_gate(source_subs, translated_subs, "sv", safe_ids=safe_ids)
     assert 0 not in qa_res["real_untranslated_ids"]
     assert 1 in qa_res["real_untranslated_ids"]

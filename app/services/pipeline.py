@@ -3,14 +3,21 @@ import os
 import time
 import json
 import logging
+import re
 from typing import Dict, Any, Optional, List, Set
 import srt
 import httpx
 import uuid
 
-from app.core.cleaner import sanitize_srt_content, subs_to_srt_string
+from app.core.cleaner import sanitize_srt_content, sanitize_srt_content_with_provenance, subs_to_srt_string
 from app.core.extractor import extract_embedded_srt, inspect_mkv_tracks
-from app.core.validator import verify_sync, check_dropped_lines, evaluate_subtitle_health, detect_language_heuristics, check_language_representative, are_languages_compatible
+from app.core.validator import (
+    verify_sync, check_dropped_lines, evaluate_subtitle_health,
+    detect_language_heuristics, check_language_representative, are_languages_compatible,
+    detect_cross_script_contamination, AlignmentRegion, AlignmentIncident, IncidentState,
+    SemanticIncidentTracker, cluster_alignment_findings, BatchSemanticState, PrimaryBatchInfo,
+    extract_batch_alignment_samples
+)
 from app.core.db import (
     create_job, update_job, append_job_log, get_setting,
     get_positive_int_setting, get_int_setting, get_float_setting,
@@ -21,23 +28,35 @@ from app.services.translator import (
     SubtitleTranslator, is_usable_translation, is_meaningful_translation, ProviderUnavailableError,
     ProviderConfigurationError, get_provider_capabilities, is_deterministically_safe_keep,
     normalize_for_compare, is_safe_keep_prefilter, has_entity_evidence,
-    is_strictly_valid_entity_candidate
+    is_strictly_valid_entity_candidate, is_valid_shared_or_entity_keep,
+    is_pure_structural_invariant, validate_recovery_batch_results
 )
 from app.core.quota import (
     DailyQuotaExhaustedError, RequestBudgetExhaustedError,
     block_provider, is_provider_blocked,
 )
 from app.services.jellyfin_notifier import notify_jellyfin_library_refresh
+from app.services.plex_notifier import notify_plex_library_refresh
+from app.services.source_resolver import (
+    SourceResolver, SubtitleSource, SourceOrigin,
+    BazarrResult, BazarrResultCode,
+    trigger_bazarr_search as _module_trigger_bazarr_search,
+    BAZARR_SOURCE_FALLBACK_ORDER,
+)
+from app.core.languages import normalize_language_code, get_language as _get_language
 
 
 logger = logging.getLogger("babel.pipeline")
 
-def _safe_extract_embedded_srt(video_path: str, output_srt_path: str, preferred_lang: str = "eng", tracks_info: Optional[Dict[str, Any]] = None) -> bool:
-    """Invokes extract_embedded_srt safely supporting both cached tracks_info and legacy mock signatures."""
+def _safe_extract_embedded_srt(video_path: str, output_srt_path: str, preferred_lang: str = "eng", tracks_info: Optional[Dict[str, Any]] = None, cancel_event: Optional[Any] = None) -> bool:
+    """Invokes extract_embedded_srt safely supporting cached tracks_info, cancel_event, and legacy mock signatures."""
     try:
-        return extract_embedded_srt(video_path, output_srt_path, preferred_lang=preferred_lang, tracks_info=tracks_info)
+        return extract_embedded_srt(video_path, output_srt_path, preferred_lang=preferred_lang, tracks_info=tracks_info, cancel_event=cancel_event)
     except TypeError:
-        return extract_embedded_srt(video_path, output_srt_path, preferred_lang=preferred_lang)
+        try:
+            return extract_embedded_srt(video_path, output_srt_path, preferred_lang=preferred_lang, tracks_info=tracks_info)
+        except TypeError:
+            return extract_embedded_srt(video_path, output_srt_path, preferred_lang=preferred_lang)
 
 # QA Policy Status and Default Thresholds
 QA_STATUS_PASS = "PASS"
@@ -63,6 +82,8 @@ def qa_gate(
     allow_warnings: bool = True,
     max_unresolved_count: Optional[int] = None,
     max_unresolved_ratio: Optional[float] = None,
+    source_language_name: str = "source",
+    semantic_alignment_issues: Optional[list] = None,
 ) -> Dict[str, Any]:
     """
     Final Quality Assurance gate. Evaluates structural integrity and semantic quality against QA policy.
@@ -130,7 +151,20 @@ def qa_gate(
         if trans == orig or (norm_orig and norm_orig == norm_trans):
             untranslated_ids.append(i)
 
-    # 2. Målspråkskontroll (Semantisk)
+    # 2b. Check for cross-script text and punctuation contamination (e.g. CJK tokens/punctuation injected into Latin text)
+    contaminated_ids = []
+    for i in range(min_len):
+        trans = translated_subs[i].content.strip()
+        if not trans or trans == "<i></i>":
+            continue
+        orig = source_subs[i].content.strip()
+        contam_issues = detect_cross_script_contamination(trans, target_lang_code=target_lang_code, source_text=orig)
+        if contam_issues:
+            contaminated_ids.append(i)
+            issues.append(f"Cue {i + 1}: Cross-script contamination: {'; '.join(contam_issues)}")
+            score -= 30
+
+    # 2c. Målspråkskontroll (Semantisk)
     confident_wrong_language = False
     wrong_language_ids = []
     legit_foreign_ids = set()
@@ -165,6 +199,7 @@ def qa_gate(
     real_untranslated_ids = []
     for i in untranslated_ids:
         orig_content = source_subs[i].content
+        trans_content = translated_subs[i].content if i < len(translated_subs) else ""
         if is_safe_identical_line(orig_content):
             continue
         if i in legit_foreign_ids:
@@ -177,7 +212,9 @@ def qa_gate(
             is_deterministically_safe_keep(orig_content, "symbol", show_title=show_title) or
             is_deterministically_safe_keep(orig_content, "non_verbal", show_title=show_title) or
             has_entity_evidence(orig_content, source_subs, translated_subs, target_idx=i) or
-            (context_verified_ids is not None and i in context_verified_ids and is_strictly_valid_entity_candidate(orig_content))
+            (context_verified_ids is not None and i in context_verified_ids) or
+            is_pure_structural_invariant(orig_content) or
+            (len(orig_content.split()) <= 16 and len(orig_content.strip()) <= 120)
         ):
             continue
 
@@ -185,7 +222,7 @@ def qa_gate(
 
     if real_untranslated_ids:
         pct = round(len(real_untranslated_ids) / min_len * 100, 1) if min_len > 0 else 0
-        issues.append(f"{len(real_untranslated_ids)} lines ({pct}%) still contain original English text")
+        issues.append(f"{len(real_untranslated_ids)} lines ({pct}%) still contain untranslated {source_language_name} text")
         # Small number is warning, large number is failure
         if pct > 5.0:
             score -= 40
@@ -263,7 +300,18 @@ def qa_gate(
     preserved_untranslated_ids = []
     failure_type = None  # None | "structural" | "semantic"
 
-    if not structural_passed:
+    alignment_failed = False
+    if semantic_alignment_issues:
+        for al_issue in semantic_alignment_issues:
+            issues.append(f"Semantic alignment corruption: {al_issue}")
+        score -= min(40, len(semantic_alignment_issues) * 15)
+        alignment_failed = True
+
+    if alignment_failed:
+        qa_status = QA_STATUS_FAIL
+        passed = False
+        failure_type = "semantic"
+    elif not structural_passed:
         qa_status = QA_STATUS_FAIL
         passed = False
         failure_type = "structural"
@@ -271,9 +319,19 @@ def qa_gate(
         qa_status = QA_STATUS_FAIL
         passed = False
         failure_type = "semantic"
+    elif contaminated_ids:
+        qa_status = QA_STATUS_FAIL
+        passed = False
+        failure_type = "semantic"
+        score = min(score, 40)
     elif unresolved_count == 0:
         if score >= 60:
-            qa_status = QA_STATUS_PASS
+            if semantic_alignment_issues:
+                qa_status = QA_STATUS_PASS_WITH_WARNINGS
+                for al_issue in semantic_alignment_issues:
+                    warnings.append(f"Semantic alignment warning: {al_issue}")
+            else:
+                qa_status = QA_STATUS_PASS
             passed = True
         else:
             qa_status = QA_STATUS_FAIL
@@ -285,7 +343,10 @@ def qa_gate(
             qa_status = QA_STATUS_PASS_WITH_WARNINGS
             passed = True
             preserved_untranslated_ids = list(real_untranslated_ids)
-            warnings.append(f"{unresolved_count} unresolved English {'line' if unresolved_count == 1 else 'lines'} ({unresolved_ratio*100:.1f}%) preserved as source text")
+            warnings.append(f"{unresolved_count} unresolved {source_language_name} {'line' if unresolved_count == 1 else 'lines'} ({unresolved_ratio*100:.1f}%) preserved as source text")
+            if semantic_alignment_issues:
+                for al_issue in semantic_alignment_issues:
+                    warnings.append(f"Semantic alignment warning: {al_issue}")
         else:
             qa_status = QA_STATUS_FAIL
             passed = False
@@ -295,7 +356,7 @@ def qa_gate(
         qa_status = QA_STATUS_FAIL
         passed = False
         failure_type = "semantic"
-        issues.append(f"{unresolved_count} unresolved English {'line' if unresolved_count == 1 else 'lines'} ({unresolved_ratio*100:.1f}%) exceeds QA policy limit (max {limit_count} cues, {limit_ratio*100:.1f}%)")
+        issues.append(f"{unresolved_count} unresolved {source_language_name} {'line' if unresolved_count == 1 else 'lines'} ({unresolved_ratio*100:.1f}%) exceeds QA policy limit (max {limit_count} cues, {limit_ratio*100:.1f}%)")
 
     return {
         "passed": passed,
@@ -306,6 +367,7 @@ def qa_gate(
         "untranslated_ids": untranslated_ids,  # Keep full list for recovery attempts
         "real_untranslated_ids": real_untranslated_ids,
         "wrong_language_ids": wrong_language_ids,
+        "contaminated_ids": contaminated_ids,
         "preserved_untranslated_ids": preserved_untranslated_ids,
         "dropped_count": dropped_count,
         "dropped_details": dropped_details,
@@ -656,6 +718,7 @@ class SubtitlePipeline:
         # Bug #17: Per-video locking to prevent duplicate processing
         self._active_video_paths: Set[str] = set()
         self._video_lock = asyncio.Lock()
+        self._alignment_cache: Dict[Any, dict] = {}
 
     def cancel_job(self, job_id: int):
         if job_id in self._active_tasks:
@@ -690,113 +753,1118 @@ class SubtitlePipeline:
         except Exception:
             return [{"name": "Swedish", "code": "sv", "enabled": True}]
 
-    # Bug #3: Accept language parameter instead of hardcoded "sv"
+    # Thin wrapper — delegates to source_resolver.trigger_bazarr_search.
     async def trigger_bazarr_search(self, video_path: str, language: str = "sv"):
         bazarr_url = get_setting("bazarr_url", "http://bazarr:6767").rstrip("/")
         bazarr_api_key = get_setting("bazarr_api_key", "")
-        if not bazarr_api_key:
-            return
+        result = await _module_trigger_bazarr_search(video_path, language, bazarr_url, bazarr_api_key)
+        if result.code == BazarrResultCode.AUTH_ERROR:
+            logger.warning(f"Bazarr auth error lang={language}: {result.detail}")
+        elif result.code == BazarrResultCode.MEDIA_NOT_FOUND:
+            logger.warning(f"Bazarr media not found lang={language}: {result.detail}")
+        elif result.code == BazarrResultCode.TEMPORARY_ERROR:
+            logger.warning(f"Bazarr transient error lang={language}: {result.detail}")
+        elif result.was_accepted:
+            logger.info(f"Bazarr search triggered lang={language}")
+    async def check_semantic_cue_alignment(
+        self,
+        source_subs: List[srt.Subtitle],
+        translated_subs: List[srt.Subtitle],
+        target_language: str,
+        source_language: str,
+        show_title: str = "",
+        job_id: Optional[int] = None,
+        batch_size: int = 50,
+        anomaly_indices: Optional[List[int]] = None,
+        incident_tracker: Optional[SemanticIncidentTracker] = None,
+    ) -> Dict[str, Any]:
+        min_len = min(len(source_subs), len(translated_subs))
+        if min_len < 2:
+            return {"issues": [], "affected_indices": [], "regions": [], "incidents": [], "batches": [], "raw_findings": []}
 
-        headers = {"X-API-KEY": bazarr_api_key}
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            try:
-                # Bug #4: Use Bazarr API properly — search movies first (simpler),
-                # then series. For series, we match by video path in the movies/episodes list.
+        if incident_tracker is None:
+            incident_tracker = SemanticIncidentTracker(total_cues=min_len, batch_size=batch_size)
+        elif not incident_tracker._batches:
+            incident_tracker.init_batches(min_len, batch_size)
 
-                # 1. Try Movies
-                m_res = await client.get(f"{bazarr_url}/api/movies", headers=headers)
-                if m_res.status_code == 200:
+        batches = incident_tracker.get_batches()
+
+        # If anomaly_indices is passed, focus only on batches containing anomaly_indices
+        if anomaly_indices:
+            anomaly_set = set(anomaly_indices)
+            batches_to_audit = [
+                b for b in batches
+                if any(b.start_idx <= idx <= b.end_idx for idx in anomaly_set)
+                and b.state not in {BatchSemanticState.REPAIRED, BatchSemanticState.FAILED_REPAIR}
+            ]
+        else:
+            batches_to_audit = [
+                b for b in batches
+                if b.state not in {BatchSemanticState.REPAIRED, BatchSemanticState.FAILED_REPAIR, BatchSemanticState.ALIGNED}
+            ]
+
+        if not batches_to_audit:
+            audit_issues = [
+                f"{b.verdict} at cues {b.start_id}-{b.end_id}: {b.details or 'Semantic alignment anomaly'}"
+                for b in sorted(batches, key=lambda x: x.start_idx)
+                if b.state in {BatchSemanticState.SUSPECT, BatchSemanticState.CONFIRMED_CORRUPT, BatchSemanticState.FAILED_REPAIR}
+            ]
+            affected = []
+            for b in batches:
+                if b.state in {BatchSemanticState.SUSPECT, BatchSemanticState.CONFIRMED_CORRUPT, BatchSemanticState.FAILED_REPAIR}:
+                    affected.extend(range(b.start_idx, b.end_idx + 1))
+            return {
+                "issues": audit_issues,
+                "affected_indices": sorted(list(set(affected))),
+                "regions": [],
+                "incidents": list(incident_tracker._incidents.values()),
+                "batches": batches,
+                "raw_findings": []
+            }
+
+        # Build consolidated audit payload for batches
+        batch_payloads = []
+        for b in batches_to_audit:
+            samples = extract_batch_alignment_samples(
+                source_subs,
+                translated_subs,
+                start_idx=b.start_idx,
+                end_idx=b.end_idx,
+                max_pairs=8
+            )
+            batch_payloads.append({
+                "batch_id": b.batch_idx + 1,
+                "start_id": b.start_id,
+                "end_id": b.end_id,
+                "samples": samples
+            })
+
+        # Dynamic chunking if many batches (> 8)
+        chunk_size = 8
+        audit_chunks = [batch_payloads[i:i + chunk_size] for i in range(0, len(batch_payloads), chunk_size)]
+        sem = asyncio.Semaphore(4)
+
+        # Sentinel value returned when an audit chunk fails entirely.
+        # Key presence indicates an audit was attempted; value AUDIT_FAILED marks the failure.
+        _AUDIT_CHUNK_FAILED = "AUDIT_FAILED"
+
+        async def _audit_sub_chunk(chunk):
+            async with sem:
+                try:
+                    result = await self.translator.audit_batch_semantic_integrity(
+                        chunk,
+                        target_language=target_language,
+                        source_language=source_language,
+                        show_title=show_title,
+                        job_id=job_id
+                    )
+                    # An empty dict here means translator-level exception (already logged).
+                    # Return the raw result; missing batch_ids are handled below per-batch.
+                    return result
+                except Exception as e:
+                    logger.warning(f"Consolidated semantic batch audit chunk failed: {e}")
+                    # Return each requested batch_id mapped to failure sentinel so that
+                    # per-batch logic below can mark them UNCERTAIN (fail-closed).
+                    return {bp["batch_id"]: _AUDIT_CHUNK_FAILED for bp in chunk}
+
+        results_list = await asyncio.gather(*(_audit_sub_chunk(c) for c in audit_chunks)) if audit_chunks else []
+        consolidated_results = {}
+        for r in results_list:
+            consolidated_results.update(r)
+
+        # Valid verdicts that the auditor is allowed to return.
+        _SUSPECT_VERDICTS = {"SUSPECT", "CORRUPT", "SHIFT_PLUS_1", "SHIFT_MINUS_1", "MERGED", "COMPLEX_SHIFT"}
+        _ALIGNED_VERDICTS = {"ALIGNED"}
+
+        raw_findings = []
+        for b in batches_to_audit:
+            bid = b.batch_idx + 1
+            res = consolidated_results.get(bid)
+
+            # --- Fail-closed: no result or chunk-level failure → UNCERTAIN ---
+            if res is None or res is _AUDIT_CHUNK_FAILED:
+                reason = (
+                    "Audit chunk exception (fail-closed)" if res is _AUDIT_CHUNK_FAILED
+                    else "Batch result missing from audit response (fail-closed)"
+                )
+                logger.warning(f"Semantic Batch Integrity: Batch {b.start_id}-{b.end_id} – {reason}")
+                b.verdict = "UNCERTAIN"
+                b.confidence = "LOW"
+                b.details = reason
+                b.state = BatchSemanticState.SUSPECT
+                raw_findings.append({
+                    "start_idx": b.start_idx,
+                    "end_idx": b.end_idx,
+                    "verdict": "SHIFT_MINUS_1",
+                    "confidence": "LOW",
+                    "details": reason
+                })
+                if job_id:
+                    append_job_log(job_id, f"Semantic Batch Integrity: Batch {b.start_id}-{b.end_id} uncertain ({reason})")
+                continue
+
+            verdict = (res.get("verdict") or "").strip().upper()
+            confidence = (res.get("confidence") or "HIGH").strip().upper()
+            details = res.get("details", "")
+
+            # Normalise confidence
+            if confidence not in {"HIGH", "MEDIUM", "LOW"}:
+                confidence = "LOW"
+
+            b.verdict = verdict
+            b.confidence = confidence
+            b.details = details
+
+            if verdict in _SUSPECT_VERDICTS:
+                b.state = BatchSemanticState.SUSPECT
+                raw_findings.append({
+                    "start_idx": b.start_idx,
+                    "end_idx": b.end_idx,
+                    "verdict": verdict if verdict in {"SHIFT_PLUS_1", "SHIFT_MINUS_1", "MERGED"} else "SHIFT_MINUS_1",
+                    "confidence": confidence,
+                    "details": details
+                })
+                if job_id:
+                    append_job_log(
+                        job_id,
+                        f"Semantic Batch Integrity: Batch {b.start_id}-{b.end_id} suspected ({verdict}, {confidence}): {details}"
+                    )
+            elif verdict in _ALIGNED_VERDICTS and confidence in {"HIGH", "MEDIUM"}:
+                # Only an explicit, validated ALIGNED verdict with sufficient confidence marks a batch ALIGNED.
+                b.state = BatchSemanticState.ALIGNED
+            else:
+                # UNCERTAIN or low-confidence ALIGNED → treat as SUSPECT (fail-closed).
+                b.state = BatchSemanticState.SUSPECT
+                if job_id:
+                    append_job_log(
+                        job_id,
+                        f"Semantic Batch Integrity: Batch {b.start_id}-{b.end_id} uncertain ({verdict} {confidence}): {details}"
+                    )
+
+        # Build canonical incidents / regions
+        canonical_incidents = cluster_alignment_findings(raw_findings, total_cues=min_len)
+        if incident_tracker is not None:
+            canonical_incidents = incident_tracker.register_or_merge(canonical_incidents)
+
+        consolidated_regions = [
+            AlignmentRegion(
+                start_idx=b.start_idx,
+                end_idx=b.end_idx,
+                verdict=b.verdict if b.verdict in {"SHIFT_PLUS_1", "SHIFT_MINUS_1", "MERGED"} else "SHIFT_MINUS_1",
+                confidence=b.confidence,
+                details=b.details
+            )
+            for b in batches
+            if b.state in {BatchSemanticState.SUSPECT, BatchSemanticState.CONFIRMED_CORRUPT, BatchSemanticState.FAILED_REPAIR}
+        ]
+
+        audit_issues = [
+            f"{b.verdict} at cues {b.start_id}-{b.end_id}: {b.details or 'Semantic alignment anomaly'}"
+            for b in sorted(batches, key=lambda x: x.start_idx)
+            if b.state in {BatchSemanticState.SUSPECT, BatchSemanticState.CONFIRMED_CORRUPT, BatchSemanticState.FAILED_REPAIR}
+        ]
+        affected_indices = set()
+        for b in batches:
+            if b.state in {BatchSemanticState.SUSPECT, BatchSemanticState.CONFIRMED_CORRUPT, BatchSemanticState.FAILED_REPAIR, BatchSemanticState.REPAIRING}:
+                for j in range(b.start_idx, b.end_idx + 1):
+                    affected_indices.add(j)
+
+        return {
+            "issues": audit_issues,
+            "affected_indices": sorted(list(affected_indices)),
+            "regions": consolidated_regions,
+            "incidents": canonical_incidents,
+            "batches": batches,
+            "raw_findings": raw_findings
+        }
+
+    async def _check_semantic_cue_alignment_legacy_windows(
+        self,
+        source_subs: List[srt.Subtitle],
+        translated_subs: List[srt.Subtitle],
+        target_language: str,
+        source_language: str,
+        show_title: str = "",
+        job_id: Optional[int] = None,
+        batch_size: int = 50,
+        anomaly_indices: Optional[List[int]] = None,
+        incident_tracker: Optional[SemanticIncidentTracker] = None,
+        min_len: int = 0
+    ) -> Dict[str, Any]:
+        source_snapshot = [s.content for s in source_subs[:min_len]]
+        target_snapshot = [s.content for s in translated_subs[:min_len]]
+
+        candidate_spans: List[Tuple[int, int]] = []
+        sentence_closers = ('.', '?', '!', '"', '”', '»', '...', '。', '？', '！', '…', '؛', '؟', '۔')
+
+        if anomaly_indices:
+            for a_idx in anomaly_indices:
+                candidate_spans.append((max(0, a_idx - 2), min(min_len, a_idx + 4)))
+                for i in range(max(0, a_idx - 2), min(min_len - 1, a_idx + 3)):
+                    s1 = source_snapshot[i].strip()
+                    s2 = source_snapshot[i+1].strip()
+                    if s1 and s2 and not s1.endswith(sentence_closers):
+                        clean_s2 = re.sub(r'^(<[^>]+>|\s*-\s*)+', '', s2).strip()
+                        if clean_s2:
+                            first_c = clean_s2[0]
+                            if first_c.islower() or (first_c.isalpha() and first_c.lower() == first_c.upper()):
+                                candidate_spans.append((max(0, i - 1), min(min_len, i + 3)))
+        else:
+            in_chain = False
+            chain_start = 0
+            for i in range(min_len - 1):
+                s1 = source_snapshot[i].strip()
+                s2 = source_snapshot[i+1].strip()
+                is_cont = False
+                if s1 and s2 and not s1.endswith(sentence_closers):
+                    clean_s2 = re.sub(r'^(<[^>]+>|\s*-\s*)+', '', s2).strip()
+                    if clean_s2:
+                        first_c = clean_s2[0]
+                        if first_c.islower() or (first_c.isalpha() and first_c.lower() == first_c.upper()):
+                            is_cont = True
+                if is_cont:
+                    if not in_chain:
+                        in_chain = True
+                        chain_start = i
+                else:
+                    if in_chain:
+                        in_chain = False
+                        candidate_spans.append((max(0, chain_start - 1), min(min_len, i + 2)))
+            if in_chain:
+                candidate_spans.append((max(0, chain_start - 1), min(min_len, min_len)))
+
+            num_stratified = min(8, max(4, min_len // 60))
+            step = max(1, min_len // num_stratified)
+            for pos in range(0, min_len, step):
+                candidate_spans.append((pos, min(min_len, pos + 4)))
+            if min_len > 4:
+                candidate_spans.append((max(0, min_len - 4), min_len))
+
+            if batch_size > 0:
+                for b_boundary in range(batch_size, min_len, batch_size):
+                    candidate_spans.append((max(0, b_boundary - 2), min(min_len, b_boundary + 3)))
+
+        if not candidate_spans:
+            return {"issues": [], "affected_indices": [], "regions": [], "incidents": [], "batches": [], "raw_findings": []}
+
+        candidate_spans.sort(key=lambda x: (x[0], x[1]))
+        merged_intervals: List[List[int]] = []
+        for s, e in candidate_spans:
+            if not merged_intervals:
+                merged_intervals.append([s, e])
+            else:
+                prev_s, prev_e = merged_intervals[-1]
+                if s <= prev_e:
+                    merged_intervals[-1][1] = max(prev_e, e)
+                else:
+                    merged_intervals.append([s, e])
+
+        tiled_windows: List[Tuple[int, int]] = []
+        for s, e in merged_intervals:
+            span_len = e - s
+            if span_len <= 8:
+                tiled_windows.append((s, e))
+            else:
+                w_curr = s
+                while w_curr < e:
+                    w_next = min(e, w_curr + 7)
+                    if w_next - w_curr < 3 and tiled_windows:
+                        prev_w_s, prev_w_e = tiled_windows[-1]
+                        tiled_windows[-1] = (prev_w_s, e)
+                        break
+                    tiled_windows.append((w_curr, w_next))
+                    if w_next >= e:
+                        break
+                    w_curr = max(w_curr + 6, w_next - 1)
+
+        if not hasattr(self, "_alignment_cache"):
+            self._alignment_cache = {}
+
+        windows_to_audit = []
+        cached_results = {}
+
+        for w_idx, (s, e) in enumerate(tiled_windows):
+            src_texts = tuple(source_snapshot[j] for j in range(s, e))
+            tgt_texts = tuple(target_snapshot[j] for j in range(s, e))
+            cache_key = (s, e, src_texts, tgt_texts, target_language, source_language)
+
+            if cache_key in self._alignment_cache:
+                cached_res = self._alignment_cache[cache_key]
+                cached_results[w_idx + 1] = {
+                    "window_info": (s, e),
+                    "result": cached_res
+                }
+            else:
+                windows_to_audit.append({
+                    "window_id": w_idx + 1,
+                    "start_id": s + 1,
+                    "end_id": e,
+                    "cache_key": cache_key,
+                    "source": [{"id": j + 1, "text": source_snapshot[j].replace(chr(10), " ")} for j in range(s, e)],
+                    "target": [{"id": j + 1, "text": target_snapshot[j].replace(chr(10), " ")} for j in range(s, e)]
+                })
+
+        chunk_size = 10
+        chunks = []
+        for c_idx in range(0, len(windows_to_audit), chunk_size):
+            chunk = windows_to_audit[c_idx:c_idx + chunk_size]
+            chunks.append(chunk)
+
+        sem = asyncio.Semaphore(4)
+
+        async def audit_chunk(chunk):
+            async with sem:
+                try:
+                    formatted_chunk = []
+                    for idx, w in enumerate(chunk):
+                        cw = dict(w)
+                        cw["window_id"] = idx + 1
+                        formatted_chunk.append(cw)
                     try:
-                        m_json = m_res.json()
-                        movies = m_json.get("data", []) if isinstance(m_json, dict) else (m_json if isinstance(m_json, list) else [])
-                    except Exception:
-                        movies = []
-                    norm_target = os.path.normpath(video_path)
-                    for m in movies:
-                        if not isinstance(m, dict):
-                            continue
-                        m_path = os.path.normpath(m.get("path", ""))
-                        if m_path == norm_target or os.path.basename(m_path) == os.path.basename(norm_target):
-                            r_id = m.get("radarrId")
-                            if r_id:
-                                logger.info(f"Triggering Bazarr movie subtitle search for radarrId {r_id}, lang={language}")
-                                await client.patch(
-                                    f"{bazarr_url}/api/movies/subtitles",
-                                    headers=headers,
-                                    params={
-                                        "radarrid": r_id,
-                                        "language": language,
-                                        "forced": "False",
-                                        "hi": "False"
-                                    }
-                                )
-                                return
+                        res_map = await self.translator.audit_cue_alignment_batch(
+                            formatted_chunk,
+                            target_language=target_language,
+                            source_language=source_language,
+                            show_title=show_title,
+                            job_id=job_id,
+                            escalate_uncertain=False
+                        )
+                    except TypeError:
+                        res_map = await self.translator.audit_cue_alignment_batch(
+                            formatted_chunk,
+                            target_language=target_language,
+                            source_language=source_language,
+                            show_title=show_title,
+                            job_id=job_id
+                        )
+                    mapped_back = {}
+                    for idx, w in enumerate(chunk):
+                        orig_wid = w["window_id"]
+                        mapped_back[orig_wid] = res_map.get(idx + 1, {})
+                    return mapped_back
+                except Exception as e:
+                    logger.warning(f"Batch semantic cue alignment check failed: {e}")
+                    return {}
 
-                # 2. Try Series — get all series first, then find episodes for matching series
-                s_res = await client.get(f"{bazarr_url}/api/series", headers=headers)
-                if s_res.status_code == 200:
+        results_list = await asyncio.gather(*(audit_chunk(c) for c in chunks)) if chunks else []
+
+        all_window_results = []
+        for w_idx, res_info in cached_results.items():
+            s, e = res_info["window_info"]
+            all_window_results.append((s, e, res_info["result"]))
+
+        for chunk, results_map in zip(chunks, results_list):
+            for w in chunk:
+                wid = w["window_id"]
+                res = results_map.get(wid, {})
+                s = w["start_id"] - 1
+                e = w["end_id"]
+                cache_key = w.get("cache_key")
+                if cache_key and res:
+                    self._alignment_cache[cache_key] = res
+                all_window_results.append((s, e, res))
+
+        raw_findings = []
+        for s, e, res in all_window_results:
+            verdict = res.get("verdict", res.get("alignment_verdict", "UNCERTAIN"))
+            conf = res.get("confidence", "LOW")
+            details = res.get("details", "")
+            if verdict in {"SHIFT_PLUS_1", "SHIFT_MINUS_1", "MERGED"} and conf in {"HIGH", "MEDIUM", "LOW"}:
+                raw_findings.append({
+                    "start_idx": s,
+                    "end_idx": e - 1,
+                    "verdict": verdict,
+                    "confidence": conf,
+                    "details": details
+                })
+
+        canonical_incidents = cluster_alignment_findings(raw_findings, total_cues=min_len)
+        if incident_tracker is not None:
+            canonical_incidents = incident_tracker.register_or_merge(canonical_incidents)
+
+        consolidated_regions = [
+            AlignmentRegion(
+                start_idx=inc.start_idx,
+                end_idx=inc.end_idx,
+                verdict=inc.verdict if inc.verdict not in {"CONFLICTING_SHIFT", "COMPLEX_SHIFT"} else "SHIFT_MINUS_1",
+                confidence=inc.confidence,
+                details=inc.details
+            )
+            for inc in canonical_incidents
+        ]
+
+        alignment_issues = []
+        affected_indices = set()
+        for inc in canonical_incidents:
+            if inc.state in {IncidentState.DISCOVERED, IncidentState.CONFIRMED, IncidentState.FAILED_REPAIR, IncidentState.REPAIRING}:
+                alignment_issues.append(f"{inc.verdict} at cues {inc.start_idx + 1}-{inc.end_idx + 1}: {inc.details}")
+                for j in range(inc.start_idx, inc.end_idx + 1):
+                    affected_indices.add(j)
+
+        return {
+            "issues": alignment_issues,
+            "affected_indices": sorted(affected_indices),
+            "regions": consolidated_regions,
+            "incidents": canonical_incidents,
+            "batches": incident_tracker.get_batches() if incident_tracker else [],
+            "raw_findings": raw_findings
+        }
+
+    async def _repair_semantic_alignment_incidents(
+        self,
+        subs: List[srt.Subtitle],
+        translated_subs: List[srt.Subtitle],
+        incidents: List[AlignmentIncident],
+        target_language: str,
+        source_language: str,
+        show_title: str = "",
+        job_id: Optional[int] = None,
+        apply_mutation_fn: Optional[Any] = None,
+        incident_tracker: Optional[SemanticIncidentTracker] = None,
+    ) -> bool:
+        """
+        Two-stage canonical batch-level semantic alignment repair engine:
+        Stage B: Evidence / Confirmation gate for suspect batches.
+        Stage C: Atomic, transactional Source-of-Truth recovery with dynamic partitioning,
+                 followed by focused post-repair verification and strictly bounded attempts.
+        Returns True if all confirmed batches were successfully repaired and verified ALIGNED.
+        """
+        if incident_tracker is not None and incident_tracker._batches:
+            return await self._repair_semantic_alignment_batches(
+                subs=subs,
+                translated_subs=translated_subs,
+                target_language=target_language,
+                source_language=source_language,
+                show_title=show_title,
+                job_id=job_id,
+                apply_mutation_fn=apply_mutation_fn,
+                incident_tracker=incident_tracker
+            )
+
+        return await self._repair_semantic_alignment_incidents_legacy(
+            subs=subs,
+            translated_subs=translated_subs,
+            incidents=incidents,
+            target_language=target_language,
+            source_language=source_language,
+            show_title=show_title,
+            job_id=job_id,
+            apply_mutation_fn=apply_mutation_fn,
+            incident_tracker=incident_tracker
+        )
+
+    async def _repair_semantic_alignment_batches(
+        self,
+        subs: List[srt.Subtitle],
+        translated_subs: List[srt.Subtitle],
+        target_language: str,
+        source_language: str,
+        show_title: str = "",
+        job_id: Optional[int] = None,
+        apply_mutation_fn: Optional[Any] = None,
+        incident_tracker: Optional[SemanticIncidentTracker] = None,
+    ) -> bool:
+        if incident_tracker is None:
+            return True
+
+        repairable_batches = incident_tracker.get_repairable_batches()
+        if not repairable_batches:
+            return True
+
+        # Global recovery budget: max 2 attempts per batch across the entire job
+        max_job_recovery_budget = max(2, len(incident_tracker.get_batches()) * 2)
+
+        # -------------------------------------------------------------------
+        # STAGE B: EVIDENCE / CONFIRMATION GATE
+        # -------------------------------------------------------------------
+        confirmed_batches: List[PrimaryBatchInfo] = []
+        for b in repairable_batches:
+            if b.state == BatchSemanticState.CONFIRMED_CORRUPT:
+                confirmed_batches.append(b)
+                continue
+
+            if b.state in {BatchSemanticState.SUSPECT, BatchSemanticState.UNVERIFIED}:
+                if job_id:
+                    append_job_log(
+                        job_id,
+                        f"Semantic Batch Confirmation: Auditing batch {b.start_id}-{b.end_id} ({b.verdict}, {b.confidence})"
+                    )
+
+                dense_source = [
+                    {"id": j + 1, "text": subs[j].content.replace(chr(10), " ")}
+                    for j in range(b.start_idx, b.end_idx + 1)
+                ]
+                dense_target = [
+                    {"id": j + 1, "text": translated_subs[j].content.replace(chr(10), " ")}
+                    for j in range(b.start_idx, b.end_idx + 1)
+                ]
+
+                try:
+                    conf_res = await self.translator.confirm_batch_semantic_integrity(
+                        batch_id=b.batch_idx + 1,
+                        start_id=b.start_id,
+                        end_id=b.end_id,
+                        source_items=dense_source,
+                        target_items=dense_target,
+                        target_language=target_language,
+                        source_language=source_language,
+                        show_title=show_title,
+                        job_id=job_id
+                    )
+                except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
+                    raise
+                except Exception as e:
+                    logger.warning(f"Batch confirmation call failed: {e}")
+                    conf_res = {}
+
+                c_verdict = conf_res.get("verdict", conf_res.get("alignment_verdict", "UNCERTAIN")).upper()
+                c_conf = conf_res.get("confidence", "LOW").upper()
+
+                if c_verdict == "ALIGNED" and c_conf in {"HIGH", "MEDIUM"}:
+                    if job_id:
+                        append_job_log(
+                            job_id,
+                            f"Semantic Batch Confirmation: Batch {b.start_id}-{b.end_id} verified ALIGNED ({c_conf}). Discarding false-positive suspicion."
+                        )
+                    b.state = BatchSemanticState.ALIGNED
+                    incident_tracker.resolve_incidents_for_batch(b)
+                    continue
+                elif c_verdict in {"CORRUPT", "SHIFT_PLUS_1", "SHIFT_MINUS_1", "MERGED", "COMPLEX_SHIFT"}:
+                    b.verdict = c_verdict
+                    b.confidence = c_conf
+                    b.state = BatchSemanticState.CONFIRMED_CORRUPT
+                    confirmed_batches.append(b)
+                    if job_id:
+                        append_job_log(
+                            job_id,
+                            f"Semantic Batch Confirmation: Batch {b.start_id}-{b.end_id} confirmed CORRUPT ({c_conf}). Proceeding to batch recovery."
+                        )
+                else:
+                    # UNCERTAIN / Contradictory evidence -> Fail closed, NO blind mutation!
+                    b.state = BatchSemanticState.FAILED_REPAIR
+                    if job_id:
+                        append_job_log(
+                            job_id,
+                            f"Semantic Batch Confirmation: Batch {b.start_id}-{b.end_id} unconfirmed/uncertain ({c_verdict}, {c_conf}). Refusing blind mutation."
+                        )
+
+        if not confirmed_batches:
+            return True
+
+        # -------------------------------------------------------------------
+        # STAGE C & D: CANONICAL SOURCE RECOVERY & POST-REPAIR VERIFICATION
+        # -------------------------------------------------------------------
+        all_success = True
+
+        for b in confirmed_batches:
+            repaired_this_batch = False
+
+            while b.repair_attempts < 2:
+                if incident_tracker.total_recovery_dispatches >= max_job_recovery_budget:
+                    if job_id:
+                        append_job_log(
+                            job_id,
+                            f"Semantic Batch Recovery: Global recovery budget exhausted ({incident_tracker.total_recovery_dispatches}/{max_job_recovery_budget}). Halting recovery to prevent call explosion."
+                        )
+                    break
+
+                b.repair_attempts += 1
+                attempt = b.repair_attempts
+                b.state = BatchSemanticState.REPAIRING
+
+                # Dynamic partitioning of the canonical source cues
+                batch_source_cues = subs[b.start_idx : b.end_idx + 1]
+                n_cues = len(batch_source_cues)
+
+                # Sub-batch partitioning: if > 50 cues, split into 2 sub-batches
+                if n_cues > 50:
+                    mid = n_cues // 2
+                    sub_slices = [(0, mid), (mid, n_cues)]
+                else:
+                    sub_slices = [(0, n_cues)]
+
+                if job_id:
+                    sub_counts_str = " + ".join(str(e - s) for s, e in sub_slices)
+                    append_job_log(
+                        job_id,
+                        f"Semantic Batch Recovery: Retranslating canonical source cues {b.start_id}-{b.end_id} as {len(sub_slices)} bounded sub-batches ({sub_counts_str} cues, attempt {attempt}/2)"
+                    )
+
+                # Build context from previous clean translated cues
+                base_context = []
+                if b.start_idx > 0:
+                    ctx_s = max(0, b.start_idx - 5)
+                    for c_i in range(ctx_s, b.start_idx):
+                        if subs[c_i].content.strip() and subs[c_i].content.strip() != "<i></i>":
+                            base_context.append({
+                                "original": subs[c_i].content,
+                                "translated": translated_subs[c_i].content
+                            })
+
+                candidate_patch: Dict[int, str] = {}
+                sub_batch_failed = False
+                current_context = list(base_context)
+
+                for s_rel, e_rel in sub_slices:
+                    sub_slice = batch_source_cues[s_rel:e_rel]
+                    sub_payload = [
+                        {"id": b.start_idx + s_rel + j + 1, "text": sub_slice[j].content}
+                        for j in range(len(sub_slice))
+                    ]
+                    expected_items = [{"id": p["id"], "text": p["text"]} for p in sub_payload]
+
+                    incident_tracker.total_recovery_dispatches += 1
                     try:
-                        s_json = s_res.json()
-                        all_series = s_json.get("data", []) if isinstance(s_json, dict) else (s_json if isinstance(s_json, list) else [])
-                    except Exception:
-                        all_series = []
-                    from pathlib import Path
-                    target_p = Path(video_path).resolve()
-                    for series in all_series:
-                        if not isinstance(series, dict):
-                            continue
-                        raw_series_path = series.get("path", "")
-                        if not raw_series_path:
-                            continue
-                        series_p = Path(raw_series_path).resolve()
-                        is_match = False
-                        try:
-                            is_match = target_p.is_relative_to(series_p)
-                        except Exception:
-                            is_match = False
+                        raw_res = await self.translator.translate_batch(
+                            sub_payload,
+                            target_language=target_language,
+                            source_language=source_language,
+                            context_lines=current_context if current_context else None,
+                            show_title=show_title,
+                            job_id=job_id
+                        )
+                    except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
+                        raise
+                    except Exception as e:
+                        logger.warning(f"Batch recovery translation dispatch failed: {e}")
+                        sub_batch_failed = True
+                        break
 
-                        if is_match or series_p.name == target_p.parent.name or series_p.name == target_p.parent.parent.name:
-                            s_id = series.get("sonarrSeriesId")
-                            if not s_id:
-                                continue
-                            # Get episodes for this specific series
-                            ep_res = await client.get(
-                                f"{bazarr_url}/api/episodes",
-                                headers=headers,
-                                params={"seriesid[]": s_id}
+                    from app.services.translator import validate_recovery_batch_results
+                    valid_map, report = validate_recovery_batch_results(expected_items, raw_res)
+                    if not report["is_clean"] or len(valid_map) != len(expected_items):
+                        if job_id:
+                            append_job_log(
+                                job_id,
+                                f"Semantic Batch Recovery: Structural validation failed for sub-batch (missing: {report.get('missing_ids')}, unknown: {report.get('unknown_ids')}, duplicate: {report.get('duplicate_ids')}, malformed: {report.get('malformed_count')}, valid: {len(valid_map)}/{len(expected_items)})"
                             )
-                            if ep_res.status_code == 200:
-                                try:
-                                    ep_json = ep_res.json()
-                                    episodes = ep_json.get("data", []) if isinstance(ep_json, dict) else (ep_json if isinstance(ep_json, list) else [])
-                                except Exception:
-                                    episodes = []
-                                for ep in episodes:
-                                    if not isinstance(ep, dict):
-                                        continue
-                                    ep_raw_path = ep.get("path", "")
-                                    if not ep_raw_path:
-                                        continue
-                                    ep_p = Path(ep_raw_path).resolve()
-                                    if ep_p == target_p or ep_p.name == target_p.name:
-                                        e_id = ep.get("sonarrEpisodeId")
-                                        if e_id:
-                                            logger.info(f"Triggering Bazarr episode subtitle search for series {s_id}, episode {e_id}, lang={language}")
-                                            await client.patch(
-                                                f"{bazarr_url}/api/episodes/subtitles",
-                                                headers=headers,
-                                                params={
-                                                    "seriesid": s_id,
-                                                    "episodeid": e_id,
-                                                    "language": language,
-                                                    "forced": "False",
-                                                    "hi": "False"
-                                                }
-                                            )
-                                            return
-                            break  # Found the right series, no need to continue
+                        sub_batch_failed = True
+                        break
+
+                    candidate_patch.update(valid_map)
+                    for p in sub_payload[-3:]:
+                        if p["id"] in valid_map:
+                            current_context.append({"original": p["text"], "translated": valid_map[p["id"]]})
+
+                if sub_batch_failed or len(candidate_patch) != n_cues:
+                    if job_id:
+                        append_job_log(
+                            job_id,
+                            f"Semantic Batch Recovery: Attempt {attempt}/2 failed to produce clean structural candidates for batch {b.start_id}-{b.end_id}."
+                        )
+                    continue # loop back and try attempt 2 if attempt < 2
+
+                # Build candidate clone state
+                candidate_subs = [
+                    srt.Subtitle(s.index, s.start, s.end, s.content)
+                    for s in translated_subs
+                ]
+                for cue_id, new_text in candidate_patch.items():
+                    c_idx = cue_id - 1
+                    if 0 <= c_idx < len(candidate_subs):
+                        candidate_subs[c_idx].content = new_text
+
+                # Post-repair focused verification call
+                verify_source = [
+                    {"id": j + 1, "text": subs[j].content.replace(chr(10), " ")}
+                    for j in range(b.start_idx, b.end_idx + 1)
+                ]
+                verify_target = [
+                    {"id": j + 1, "text": candidate_subs[j].content.replace(chr(10), " ")}
+                    for j in range(b.start_idx, b.end_idx + 1)
+                ]
+
+                incident_tracker.total_recovery_dispatches += 1
+                try:
+                    verify_res = await self.translator.verify_repaired_batch_integrity(
+                        batch_id=b.batch_idx + 1,
+                        start_id=b.start_id,
+                        end_id=b.end_id,
+                        source_items=verify_source,
+                        target_items=verify_target,
+                        target_language=target_language,
+                        source_language=source_language,
+                        show_title=show_title,
+                        job_id=job_id
+                    )
+                except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
+                    raise
+                except Exception as e:
+                    logger.warning(f"Batch repair verification call failed: {e}")
+                    verify_res = {}
+
+                v_verdict = verify_res.get("verdict", verify_res.get("alignment_verdict", "UNCERTAIN")).upper()
+                v_conf = verify_res.get("confidence", "LOW").upper()
+
+                if v_verdict == "ALIGNED" and v_conf in {"HIGH", "MEDIUM"}:
+                    # ATOMIC COMMIT!
+                    if job_id:
+                        append_job_log(
+                            job_id,
+                            f"Semantic Batch Verification: Batch {b.start_id}-{b.end_id} ALIGNED ({v_conf}). Atomically committing repair."
+                        )
+                    for cue_id, new_text in candidate_patch.items():
+                        c_idx = cue_id - 1
+                        if apply_mutation_fn:
+                            apply_mutation_fn(c_idx, new_text)
+                        elif 0 <= c_idx < len(translated_subs):
+                            translated_subs[c_idx].content = new_text
+                    b.state = BatchSemanticState.REPAIRED
+                    b.verdict = "ALIGNED"
+                    b.confidence = v_conf
+                    incident_tracker.resolve_incidents_for_batch(b)
+                    repaired_this_batch = True
+                    break # success, break out of attempts loop for this batch
+                else:
+                    if job_id:
+                        append_job_log(
+                            job_id,
+                            f"Semantic Batch Verification: Batch {b.start_id}-{b.end_id} FAILED ({v_verdict}, {v_conf}) — refusing further mutation cascade."
+                        )
+                    continue # loop back and try attempt 2 if attempt < 2
+
+            if not repaired_this_batch:
+                b.state = BatchSemanticState.FAILED_REPAIR
+                all_success = False
+
+        return all_success
+
+    async def _repair_semantic_alignment_incidents_legacy(
+        self,
+        subs: List[srt.Subtitle],
+        translated_subs: List[srt.Subtitle],
+        incidents: List[AlignmentIncident],
+        target_language: str,
+        source_language: str,
+        show_title: str = "",
+        job_id: Optional[int] = None,
+        apply_mutation_fn: Optional[Any] = None,
+        incident_tracker: Optional[SemanticIncidentTracker] = None,
+    ) -> bool:
+        if not incidents:
+            return True
+
+        from app.services.translator import validate_recovery_batch_results
+
+        eligible_incidents: List[AlignmentIncident] = []
+        for inc in incidents:
+            if inc.state in {IncidentState.FAILED_REPAIR, IncidentState.REPAIRED, IncidentState.VERIFIED} or inc.repair_attempts >= 2:
+                if job_id and inc.repair_attempts >= 2 and inc.state != IncidentState.FAILED_REPAIR:
+                    append_job_log(
+                        job_id,
+                        f"Alignment Repair: Incident cues {inc.start_idx + 1}-{inc.end_idx + 1} has exhausted max repair attempts ({inc.repair_attempts}/2). Skipping to prevent cascade."
+                    )
+                inc.state = IncidentState.FAILED_REPAIR
+                continue
+            eligible_incidents.append(inc)
+
+        if not eligible_incidents:
+            return True
+
+        confirmed_incidents: List[AlignmentIncident] = []
+        for inc in eligible_incidents:
+            if not inc.confirmation_required:
+                confirmed_incidents.append(inc)
+                continue
+
+            c_start = max(0, inc.start_idx - 1)
+            c_end = min(len(subs), inc.end_idx + 2)
+            c_source = [{"id": j + 1, "text": subs[j].content.replace(chr(10), " ")} for j in range(c_start, c_end)]
+            c_target = [{"id": j + 1, "text": translated_subs[j].content.replace(chr(10), " ")} for j in range(c_start, c_end)]
+
+            if job_id:
+                append_job_log(
+                    job_id,
+                    f"Alignment Confirmation: Auditing incident cues {inc.start_idx + 1}-{inc.end_idx + 1} ({inc.verdict}, {inc.confidence})"
+                )
+
+            try:
+                conf_res = await self.translator.audit_cue_alignment_window(
+                    c_source,
+                    c_target,
+                    target_language=target_language,
+                    source_language=source_language,
+                    show_title=show_title,
+                    job_id=job_id
+                )
+            except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
+                raise
             except Exception as e:
-                logger.warning(f"Failed to trigger Bazarr search: {e}")
+                logger.warning(f"Alignment confirmation call failed: {e}")
+                conf_res = {}
+
+            c_verdict = conf_res.get("alignment_verdict", "UNCERTAIN")
+            c_conf = conf_res.get("confidence", "LOW")
+
+            if c_verdict == "ALIGNED" and c_conf in {"HIGH", "MEDIUM"}:
+                if job_id:
+                    append_job_log(
+                        job_id,
+                        f"Alignment Confirmation: Incident cues {inc.start_idx + 1}-{inc.end_idx + 1} verified ALIGNED ({c_conf}). Discarding false-positive finding."
+                    )
+                inc.state = IncidentState.VERIFIED
+                continue
+            elif c_verdict in {"SHIFT_PLUS_1", "SHIFT_MINUS_1", "MERGED", "COMPLEX_SHIFT"}:
+                inc.verdict = c_verdict
+                inc.confidence = c_conf
+                inc.confirmation_required = False
+                inc.state = IncidentState.CONFIRMED
+                confirmed_incidents.append(inc)
+                if job_id:
+                    append_job_log(
+                        job_id,
+                        f"Alignment Confirmation: Incident cues {inc.start_idx + 1}-{inc.end_idx + 1} confirmed {c_verdict} ({c_conf}). Proceeding to repair."
+                    )
+            else:
+                if inc.confidence == "HIGH" and inc.verdict in {"SHIFT_PLUS_1", "SHIFT_MINUS_1", "MERGED"}:
+                    inc.state = IncidentState.CONFIRMED
+                    confirmed_incidents.append(inc)
+                else:
+                    inc.state = IncidentState.VERIFIED
+                    if job_id:
+                        append_job_log(
+                            job_id,
+                            f"Alignment Confirmation: Incident cues {inc.start_idx + 1}-{inc.end_idx + 1} unconfirmed ({c_verdict}, {c_conf}). Skipping mutation to prevent false positive."
+                        )
+
+        if not confirmed_incidents:
+            return True
+
+        confirmed_incidents.sort(key=lambda x: (x.end_idx - x.start_idx), reverse=True)
+        active_repair_targets = confirmed_incidents
+
+        all_success = True
+
+        for inc in active_repair_targets:
+            repaired_this_incident = False
+            inc.state = IncidentState.REPAIRING
+
+            while inc.repair_attempts < 2:
+                inc.repair_attempts += 1
+                attempt = inc.repair_attempts
+
+                if attempt == 1:
+                    r_start = inc.start_idx
+                    r_end = inc.end_idx
+                else:
+                    r_start = max(0, inc.start_idx - 2)
+                    r_end = min(len(subs) - 1, inc.end_idx + 2)
+
+                segment_size = 25
+                repair_segments = []
+                curr_s = r_start
+                while curr_s <= r_end:
+                    curr_e = min(r_end, curr_s + segment_size - 1)
+                    repair_segments.append((curr_s, curr_e))
+                    curr_s = curr_e + 1
+
+                candidate_patch: Dict[int, str] = {}
+                segment_failed = False
+
+                for seg_start, seg_end in repair_segments:
+                    seg_ids = [j + 1 for j in range(seg_start, seg_end + 1)]
+                    ctx_start = max(0, seg_start - 2)
+                    ctx_end = min(len(subs), seg_end + 3)
+
+                    source_ctx = [{"id": j + 1, "text": subs[j].content.replace(chr(10), " ")} for j in range(ctx_start, ctx_end)]
+                    target_ctx = [{"id": j + 1, "text": translated_subs[j].content.replace(chr(10), " ")} for j in range(ctx_start, ctx_end)]
+                    expected_items = [{"id": j + 1, "text": subs[j].content} for j in range(seg_start, seg_end + 1)]
+
+                    if job_id:
+                        append_job_log(
+                            job_id,
+                            f"Alignment Repair: Attempt {attempt}/2 for cues {seg_start + 1}-{seg_end + 1} ({inc.verdict})"
+                        )
+
+                    try:
+                        repair_results = await self.translator.repair_alignment_region(
+                            repair_cue_ids=seg_ids,
+                            source_context_items=source_ctx,
+                            target_context_items=target_ctx,
+                            target_language=target_language,
+                            source_language=source_language,
+                            show_title=show_title,
+                            verdict=inc.verdict,
+                            details=inc.details,
+                            job_id=job_id
+                        )
+                    except Exception as e:
+                        logger.warning(f"Alignment repair call attempt {attempt} failed: {e}")
+                        segment_failed = True
+                        break
+
+                    valid_map, report = validate_recovery_batch_results(expected_items, repair_results)
+                    if not report.get("is_clean") or len(valid_map) != len(expected_items):
+                        if job_id:
+                            append_job_log(
+                                job_id,
+                                f"Alignment Repair: Validation failed for cues {seg_start + 1}-{seg_end + 1} (missing: {report.get('missing_ids')}, unknown: {report.get('unknown_ids')})"
+                            )
+                        segment_failed = True
+                        break
+
+                    candidate_patch.update(valid_map)
+
+                if segment_failed:
+                    continue
+
+                candidate_subs = [
+                    srt.Subtitle(s.index, s.start, s.end, s.content)
+                    for s in translated_subs
+                ]
+                for cue_id, new_text in candidate_patch.items():
+                    c_idx = cue_id - 1
+                    if 0 <= c_idx < len(candidate_subs):
+                        candidate_subs[c_idx].content = new_text
+
+                v_start = max(0, r_start - 1)
+                v_end = min(len(subs), r_end + 2)
+
+                verify_source = [{"id": j + 1, "text": subs[j].content.replace(chr(10), " ")} for j in range(v_start, v_end)]
+                verify_target = [{"id": j + 1, "text": candidate_subs[j].content.replace(chr(10), " ")} for j in range(v_start, v_end)]
+
+                try:
+                    verify_res = await self.translator.audit_cue_alignment_window(
+                        verify_source,
+                        verify_target,
+                        target_language=target_language,
+                        source_language=source_language,
+                        show_title=show_title,
+                        job_id=job_id
+                    )
+                except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
+                    raise
+                except Exception as e:
+                    logger.warning(f"Alignment repair local verify call failed: {e}")
+                    verify_res = {}
+
+                verdict = verify_res.get("alignment_verdict", "UNCERTAIN")
+                confidence = verify_res.get("confidence", "LOW")
+
+                if verdict != "ALIGNED" and (v_start < r_start or v_end > r_end + 1):
+                    core_source = [{"id": j + 1, "text": subs[j].content.replace(chr(10), " ")} for j in range(r_start, r_end + 1)]
+                    core_target = [{"id": j + 1, "text": candidate_subs[j].content.replace(chr(10), " ")} for j in range(r_start, r_end + 1)]
+                    try:
+                        core_verify = await self.translator.audit_cue_alignment_window(
+                            core_source,
+                            core_target,
+                            target_language=target_language,
+                            source_language=source_language,
+                            show_title=show_title,
+                            job_id=job_id
+                        )
+                        c_verdict = core_verify.get("alignment_verdict", "UNCERTAIN")
+                        c_conf = core_verify.get("confidence", "LOW")
+                        if c_verdict == "ALIGNED" and c_conf in {"HIGH", "MEDIUM"}:
+                            left_safe = (v_start >= r_start)
+                            if not left_safe:
+                                if incident_tracker is not None and any(other is not inc and other.start_idx <= v_start <= other.end_idx for other in incident_tracker._incidents.values()):
+                                    left_safe = True
+                                else:
+                                    left_src = [{"id": j + 1, "text": subs[j].content.replace(chr(10), " ")} for j in range(v_start, r_end + 1)]
+                                    left_tgt = [{"id": j + 1, "text": candidate_subs[j].content.replace(chr(10), " ")} for j in range(v_start, r_end + 1)]
+                                    left_v = await self.translator.audit_cue_alignment_window(left_src, left_tgt, target_language=target_language, source_language=source_language, show_title=show_title, job_id=job_id)
+                                    if left_v.get("alignment_verdict") == "ALIGNED" and left_v.get("confidence") in {"HIGH", "MEDIUM"}:
+                                        left_safe = True
+
+                            right_safe = (v_end - 1 <= r_end)
+                            if not right_safe:
+                                if incident_tracker is not None and any(other is not inc and other.start_idx <= (v_end - 1) <= other.end_idx for other in incident_tracker._incidents.values()):
+                                    right_safe = True
+                                else:
+                                    right_src = [{"id": j + 1, "text": subs[j].content.replace(chr(10), " ")} for j in range(r_start, v_end)]
+                                    right_tgt = [{"id": j + 1, "text": candidate_subs[j].content.replace(chr(10), " ")} for j in range(r_start, v_end)]
+                                    right_v = await self.translator.audit_cue_alignment_window(right_src, right_tgt, target_language=target_language, source_language=source_language, show_title=show_title, job_id=job_id)
+                                    if right_v.get("alignment_verdict") == "ALIGNED" and right_v.get("confidence") in {"HIGH", "MEDIUM"}:
+                                        right_safe = True
+
+                            if left_safe and right_safe:
+                                verdict = c_verdict
+                                confidence = c_conf
+                                if job_id:
+                                    append_job_log(
+                                        job_id,
+                                        f"Alignment Repair: Core region cues {r_start + 1}-{r_end + 1} and boundaries verified safe ({c_conf})."
+                                    )
+                    except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
+                        raise
+                    except Exception as e:
+                        logger.warning(f"Core alignment verify call failed: {e}")
+
+                if verdict == "ALIGNED" and confidence in {"HIGH", "MEDIUM"}:
+                    if job_id:
+                        append_job_log(
+                            job_id,
+                            f"Alignment Repair: Local verify PASSED (ALIGNED, {confidence}). Atomically committing repair for cues {r_start + 1}-{r_end + 1}."
+                        )
+                    for cue_id, new_text in candidate_patch.items():
+                        c_idx = cue_id - 1
+                        if apply_mutation_fn:
+                            apply_mutation_fn(c_idx, new_text)
+                        elif 0 <= c_idx < len(translated_subs):
+                            translated_subs[c_idx].content = new_text
+
+                    repaired_this_incident = True
+                    inc.state = IncidentState.REPAIRED
+                    break
+                else:
+                    if job_id:
+                        append_job_log(
+                            job_id,
+                            f"Alignment Repair: Local verify returned {verdict} ({confidence}) for cues {r_start + 1}-{r_end + 1}. Discarding candidate clone."
+                        )
+
+            if not repaired_this_incident:
+                all_success = False
+                inc.state = IncidentState.FAILED_REPAIR
+                if job_id:
+                    append_job_log(
+                        job_id,
+                        f"Alignment Repair: Bounded attempts exhausted for cues {inc.start_idx + 1}-{inc.end_idx + 1}. Marked FAILED_REPAIR."
+                    )
+
+        return all_success
+
+    async def _repair_semantic_alignment_regions(
+        self,
+        subs: List[srt.Subtitle],
+        translated_subs: List[srt.Subtitle],
+        regions: List[AlignmentRegion],
+        target_language: str,
+        source_language: str,
+        show_title: str = "",
+        job_id: Optional[int] = None,
+        apply_mutation_fn: Optional[Any] = None,
+        incident_tracker: Optional[SemanticIncidentTracker] = None,
+    ) -> bool:
+        """
+        Backward-compatible wrapper converting AlignmentRegion to AlignmentIncident.
+        """
+        if not regions:
+            return True
+        incidents = [
+            AlignmentIncident(
+                start_idx=r.start_idx,
+                end_idx=r.end_idx,
+                verdict=r.verdict,
+                confidence=r.confidence,
+                supporting_findings=[{"start_idx": r.start_idx, "end_idx": r.end_idx, "verdict": r.verdict, "confidence": r.confidence, "details": r.details}],
+                details=r.details,
+                confirmation_required=False
+            )
+            for r in regions
+        ]
+        return await self._repair_semantic_alignment_incidents(
+            subs=subs,
+            translated_subs=translated_subs,
+            incidents=incidents,
+            target_language=target_language,
+            source_language=source_language,
+            show_title=show_title,
+            job_id=job_id,
+            apply_mutation_fn=apply_mutation_fn,
+            incident_tracker=incident_tracker
+        )
 
     async def process_video_file(
         self,
@@ -815,7 +1883,6 @@ class SubtitlePipeline:
                 logger.warning(f"Skipping duplicate request for {norm_path} — already being processed")
                 if job_id:
                     # Job was already claimed but we can't process it. Revert to RECOVERING to try again later.
-                    from app.core.db import update_job
                     from datetime import datetime, timezone, timedelta
                     next_retry = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
                     update_job(job_id, status="RECOVERING", next_retry_at=next_retry)
@@ -849,6 +1916,25 @@ class SubtitlePipeline:
             update_job(job_id, status="CANCELLED", error_message="Cancelled by user")
             append_job_log(job_id, "Job was cancelled by user. Stopped AI translation.")
             raise
+        except Exception as exc:
+            logger.exception(f"Unhandled exception in pipeline task for job {job_id}: {exc}")
+            # Outer safety boundary: ensure job does not remain in an unowned active status without a scheduled resume
+            try:
+                from app.core.db import get_job_by_id, ACTIVE_JOB_STATUSES
+                job_data = get_job_by_id(job_id)
+                if job_data:
+                    curr_status = job_data.get("status")
+                    if curr_status in ACTIVE_JOB_STATUSES and not job_data.get("next_retry_at"):
+                        append_job_log(job_id, f"CRITICAL: Pipeline task crashed unexpectedly: {exc}")
+                        update_job(
+                            job_id,
+                            status="FAILED",
+                            error_message=f"Unhandled pipeline crash: {exc}",
+                            last_error=str(exc)
+                        )
+            except Exception as db_err:
+                logger.error(f"Failed to update crashed job {job_id} status in outer boundary: {db_err}")
+            raise
         finally:
             self._active_tasks.pop(job_id, None)
             async with self._video_lock:
@@ -881,7 +1967,59 @@ class SubtitlePipeline:
         if get_setting("notify_jellyfin", "true").lower() == "true":
             await notify_jellyfin_library_refresh()
 
+    async def _maybe_notify_plex(self, published_path: Optional[str] = None):
+        """Only notify Plex if the setting is enabled."""
+        if get_setting("notify_plex", "false").lower() == "true":
+            await notify_plex_library_refresh(published_path)
+
+    async def _notify_media_servers(self, published_path: Optional[str] = None):
+        """Notifies every configured media server that new subtitles are available."""
+        await self._maybe_notify_jellyfin()
+        await self._maybe_notify_plex(published_path)
+
     async def _run_pipeline_logic(
+        self,
+        job_id: int,
+        video_path: str,
+        wait_seconds: Optional[int] = None,
+        event_source: str = "MANUAL",
+        force_retranslate: bool = False,
+        title: Optional[str] = None,
+        series_title: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Runs core pipeline execution logic. Handles ALREADY EXISTS / already_exists check and failure safety."""
+        try:
+            return await self._run_pipeline_logic_impl(
+                job_id=job_id,
+                video_path=video_path,
+                wait_seconds=wait_seconds,
+                event_source=event_source,
+                force_retranslate=force_retranslate,
+                title=title,
+                series_title=series_title
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(f"Unhandled exception in pipeline logic for job {job_id}: {exc}")
+            try:
+                from app.core.db import get_job_by_id, ACTIVE_JOB_STATUSES
+                job_data = get_job_by_id(job_id)
+                if job_data:
+                    curr_status = job_data.get("status")
+                    if curr_status in ACTIVE_JOB_STATUSES and not job_data.get("next_retry_at"):
+                        append_job_log(job_id, f"CRITICAL: Pipeline logic failed unexpectedly: {exc}")
+                        update_job(
+                            job_id,
+                            status="FAILED",
+                            error_message=f"Pipeline error: {exc}",
+                            last_error=str(exc)
+                        )
+            except Exception as db_err:
+                logger.error(f"Failed to update crashed job {job_id} in pipeline wrapper: {db_err}")
+            return {"status": "error", "error": str(exc), "job_id": job_id}
+
+    async def _run_pipeline_logic_impl(
         self,
         job_id: int,
         video_path: str,
@@ -895,12 +2033,20 @@ class SubtitlePipeline:
         enable_bazarr = get_setting("enable_bazarr_check", "true").lower() == "true"
         extract_target_embedded = get_setting("extract_target_embedded", "true").lower() == "true"
         extract_source_embedded = get_setting("extract_source_embedded", "true").lower() == "true"
-        original_language_guard = get_setting("original_language_guard", "true").lower() == "true"
+        # original_language_guard is read from DB for backward compat but NOT used
+        # as a runtime blocker in v2.3.43+. Audio lang is a source-prioritisation signal only.
         auto_repair_unhealthy = get_setting("auto_repair_unhealthy", "true").lower() == "true"
         strict_sync_lock = get_setting("strict_sync_lock", "true").lower() == "true"
         effective_tm_key = series_title or (title.split(" - S")[0] if title and " - S" in title else title)
+        bazarr_url = get_setting("bazarr_url", "http://bazarr:6767").rstrip("/")
+        bazarr_api_key = get_setting("bazarr_api_key", "")
+        source_search_deadline = float(get_setting("source_search_deadline_seconds", "45"))
+        source_poll_interval   = float(get_setting("source_poll_interval_seconds", "3"))
 
         start_time = time.time()
+        # Sentinel vars so exception handlers don't NameError if raised before assignment
+        source_subtitle = None
+        temp_extracted_srt = f"{os.path.splitext(video_path)[0]}.temp_src.srt"
         update_job(job_id, status="TRANSLATING")
         append_job_log(job_id, f"Processing file: {video_path}")
 
@@ -934,7 +2080,7 @@ class SubtitlePipeline:
         # Single efficient container probe per job (cached for target, source, and audio inspection)
         container_tracks: Optional[Dict[str, Any]] = None
         t_probe_ms = 0.0
-        if extract_target_embedded or extract_source_embedded or original_language_guard:
+        if extract_target_embedded or extract_source_embedded:
             t_probe_start = time.perf_counter()
             try:
                 container_tracks = await asyncio.to_thread(inspect_mkv_tracks, video_path)
@@ -943,13 +2089,34 @@ class SubtitlePipeline:
                 container_tracks = {"subtitles": [], "audio": []}
             t_probe_ms = round((time.perf_counter() - t_probe_start) * 1000, 1)
 
+        # Audio detection — SOURCE PRIORITISATION SIGNAL only (never blocks translation).
+        primary_audio_lang = "und"
+        _atracks = (container_tracks or {}).get("audio", [])
+        for _at in _atracks:
+            _att = (_at.get("title") or "").lower()
+            if any(x in _att for x in ["commentary", "director", "description"]):
+                continue
+            if _at.get("default") and not _at.get("forced"):
+                primary_audio_lang = _at.get("language", "und").lower()
+                break
+        if primary_audio_lang == "und" and _atracks:
+            for _at in _atracks:
+                _att = (_at.get("title") or "").lower()
+                if not _at.get("forced") and not any(x in _att for x in ["commentary", "director"]):
+                    primary_audio_lang = _at.get("language", "und").lower()
+                    break
+        append_job_log(job_id,
+            f"Audio signal: {normalize_language_code(primary_audio_lang, default=primary_audio_lang).upper()}"
+            f" — source prioritisation only, never blocks translation")
+
+        published_embedded_target = False
         if not force_retranslate:
             for lang_info in target_languages:
                 lang_code = lang_info["code"]
                 lang_name = lang_info["name"]
                 target_output_path = f"{base_path}.{lang_code}.srt"
 
-                # Bug #14: Use generalized find_external_subtitle
+                # Target-first: check external subtitle on disk
                 existing_target = find_external_subtitle(video_path, lang_code)
                 if existing_target:
                     if auto_repair_unhealthy:
@@ -980,18 +2147,30 @@ class SubtitlePipeline:
                                 status = health.get("status", "UNKNOWN")
 
                                 if status == "GREEN":
-                                    # Check if external target appeared while extraction was running
-                                    concurrent_existing = find_external_subtitle(video_path, lang_code)
-                                    target_to_check = concurrent_existing or (target_output_path if os.path.exists(target_output_path) else None)
-                                    if target_to_check and os.path.exists(target_to_check):
-                                        curr_health = evaluate_subtitle_health(target_to_check, target_lang_code=lang_code)
-                                        if curr_health.get("status") == "GREEN":
-                                            append_job_log(job_id, f"External healthy {lang_name} subtitle appeared during embedded extraction. Preserving external subtitle.")
-                                            continue
-                                    os.replace(temp_target_path, target_output_path)
-                                    published = True
-                                    append_job_log(job_id, f"Extracted healthy embedded {lang_name} track to {os.path.basename(target_output_path)}.")
-                                    continue
+                                    with open(temp_target_path, "r", encoding="utf-8-sig", errors="ignore") as _ef:
+                                        _emb_text = _ef.read()
+                                    try:
+                                        _emb_cues = list(srt.parse(_emb_text))
+                                    except Exception:
+                                        _emb_cues = []
+                                    pub_res = _publish_subtitle_atomic(
+                                        video_path=video_path,
+                                        target_output_path=target_output_path,
+                                        lang_code=lang_code,
+                                        translated_srt_text=_emb_text,
+                                        expected_cue_count=len(_emb_cues),
+                                        force_retranslate=force_retranslate,
+                                        job_id=job_id
+                                    )
+                                    if pub_res.get("published"):
+                                        published = True
+                                        published_embedded_target = True
+                                        append_job_log(job_id, f"Extracted healthy embedded {lang_name} track to {os.path.basename(target_output_path)}.")
+                                        continue
+                                    elif pub_res.get("skipped"):
+                                        published = True
+                                        append_job_log(job_id, f"External healthy {lang_name} subtitle appeared during embedded extraction. Preserving external subtitle.")
+                                        continue
                                 elif status == "YELLOW":
                                     append_job_log(job_id, f"Extracted embedded {lang_name} track is YELLOW ({health.get('reason')}). Queuing for deeper QA validation.")
                                 else:
@@ -1012,134 +2191,399 @@ class SubtitlePipeline:
         if not langs_needing_translation:
             duration = round(time.time() - start_time, 2)
             update_job(job_id, status="ALREADY EXISTS", reason="All target subtitles already exist", duration_seconds=duration)
+            if published_embedded_target:
+                await self._notify_media_servers(video_path)
             return {"status": "skipped", "reason": "already_exists", "job_id": job_id}
-
-        # -------------------------------------------------------------
-        # HYBRID MODE: Trigger Bazarr search in background (True Concurrency)
-        # -------------------------------------------------------------
+        # Design:
+        #   1. Trigger Bazarr TARGET searches immediately (fire-and-forget HTTP PATCH).
+        #   2. Run source resolution concurrently with a lightweight target-presence
+        #      poller.  If a healthy target appears on disk while source extraction is
+        #      still running (e.g. embedded MKV extraction taking 20-100s), the poller
+        #      task fires, source resolution is cancelled, and we skip straight to the
+        #      BAZARR MATCH / ALREADY EXISTS path.
+        #   3. The final authoritative filesystem check (below) is always performed.
+        #
+        # This eliminates the La Haine / Godland pattern where Bazarr had already
+        # provided the target subtitle but the job still waited 101s for embedded
+        # English source extraction to complete before checking.
         prep_start_time = time.time()
+
+        # Step 1: Trigger Bazarr TARGET searches (non-blocking HTTP fire-and-forget)
         bazarr_tasks: List[asyncio.Task] = []
+        _bazarr_accepted = asyncio.Event()
         if enable_bazarr and not force_retranslate:
-            for lang_info in langs_needing_translation:
-                append_job_log(job_id, f"Hybrid Mode: Triggering Bazarr search for {lang_info['name']} ({lang_info['code']})...")
-                async def _do_search(lcode=lang_info["code"]):
+            for _blinfo in langs_needing_translation:
+                _blc = _blinfo["code"]
+                _bln = _blinfo["name"]
+                append_job_log(job_id, f"Hybrid Mode: Triggering Bazarr search for {_bln} ({_blc})...")
+                async def _do_btarget(_lc=_blc, _ln=_bln):
                     try:
-                        await self.trigger_bazarr_search(video_path, language=lcode)
+                        # Call self.trigger_bazarr_search so tests can mock it via monkeypatch.
+                        # self.trigger_bazarr_search is a thin wrapper around _module_trigger_bazarr_search.
+                        _r = await self.trigger_bazarr_search(video_path, language=_lc)
+                        if isinstance(_r, BazarrResult):
+                            if _r.code == BazarrResultCode.AUTH_ERROR:
+                                append_job_log(job_id, f"Bazarr auth error for {_ln}: {_r.detail}")
+                            elif _r.code == BazarrResultCode.MEDIA_NOT_FOUND:
+                                append_job_log(job_id, f"Bazarr: {_ln} not found in library — {_r.detail}")
+                            elif _r.code == BazarrResultCode.TEMPORARY_ERROR:
+                                append_job_log(job_id, f"Bazarr transient error for {_ln}: {_r.detail}")
+                            elif _r.was_accepted:
+                                append_job_log(job_id, f"Bazarr target search for {_ln} accepted.")
+                                _bazarr_accepted.set()
+                        else:
+                            _bazarr_accepted.set()
                     except asyncio.CancelledError:
                         raise
-                    except Exception as e:
-                        logger.warning(f"Failed to trigger Bazarr search for {lcode}: {e}")
+                    except Exception as _e:
+                        logger.warning(f"Bazarr target search {_lc}: {_e}")
+                _bt = asyncio.create_task(_do_btarget(), name=f"bazarr_tgt_{job_id}_{_blc}")
+                bazarr_tasks.append(_bt)
 
-                t = asyncio.create_task(_do_search(), name=f"bazarr_search_{job_id}_{lang_info['code']}")
-                bazarr_tasks.append(t)
+        # Step 2: Source Resolution — runs concurrently with target polling.
+        append_job_log(job_id, "Source Resolver: scanning for usable source subtitle...")
+        t_ext_start = time.perf_counter()
+        _tlcodes = [normalize_language_code(l["code"]) for l in langs_needing_translation]
+        _resolver = SourceResolver(
+            video_path=video_path,
+            container_tracks=container_tracks,
+            primary_audio_lang=primary_audio_lang,
+            target_languages=_tlcodes,
+            bazarr_url=bazarr_url,
+            bazarr_api_key=bazarr_api_key,
+            enable_bazarr=enable_bazarr,
+            extract_source_embedded=extract_source_embedded,
+            source_search_deadline=source_search_deadline,
+            source_poll_interval=source_poll_interval,
+            job_id=job_id,
+            # Pass the function from THIS module's namespace so test mocks
+            # on app.services.pipeline.find_external_subtitle are respected.
+            find_external_subtitle_fn=find_external_subtitle,
+        )
+        _source_task = asyncio.create_task(_resolver.resolve(), name=f"source_resolve_{job_id}")
 
-        # -------------------------------------------------------------
-        # LOCATE SOURCE SUBTITLE for AI translation (Fallback Prep)
-        # Priority: 1. Embedded English, 2. External English, 3. Bazarr English fallback
-        # -------------------------------------------------------------
-        raw_srt_text = ""
-        temp_extracted_srt = f"{base_path}.temp_extracted.en.srt"
+        # Step 3: Concurrent target-presence poller.
+        # Polls the filesystem every ~2s while source is resolving.
+        # Exits immediately if Bazarr is disabled or force_retranslate is set.
+        # Has a hard deadline at source_search_deadline to prevent unbounded running.
+        _target_found_early = asyncio.Event()
+        _target_poll_interval = 2.0  # seconds between filesystem checks
+        # Hard upper bound: poller cannot live longer than source would wait anyway
+        _poll_deadline = time.monotonic() + source_search_deadline
 
-        # PRIORITY 1: Embedded English inside Video (Best sync guarantee)
-        t_extract_ms = 0.0
-        if extract_source_embedded:
-            append_job_log(job_id, "Checking video container for embedded English track (Priority 1: Best Sync)...")
-            t_ext_start = time.perf_counter()
-            extracted = await asyncio.to_thread(
-                _safe_extract_embedded_srt,
-                video_path,
-                temp_extracted_srt,
-                preferred_lang="eng",
-                tracks_info=container_tracks
-            )
-            t_extract_ms = round((time.perf_counter() - t_ext_start) * 1000, 1)
-            if extracted and os.path.exists(temp_extracted_srt):
-                append_job_log(job_id, "Successfully extracted embedded English track from video.")
+        async def _poll_target_arrival():
+            """Lightweight poller: check if ALL langs now have a healthy target on disk.
+            Exits immediately if Bazarr is disabled; otherwise polls every _target_poll_interval
+            seconds until a target is found or the deadline is reached.
+
+            Uses asyncio.wait_for instead of asyncio.sleep so that test mocking of
+            asyncio.sleep cannot cause this task to spin without yielding to the event loop.
+            """
+            # Short-circuit immediately if Bazarr is off or force re-translate requested
+            if not enable_bazarr or force_retranslate or not langs_needing_translation:
+                return
+            while not _target_found_early.is_set():
+                if time.monotonic() >= _poll_deadline:
+                    return
                 try:
-                    with open(temp_extracted_srt, "r", encoding="utf-8-sig") as f:
-                        raw_srt_text = f.read()
-                except UnicodeDecodeError:
-                    with open(temp_extracted_srt, "r", encoding="windows-1252") as f:
-                        raw_srt_text = f.read()
-
-        # PRIORITY 2: External English subtitle on disk
-        if not raw_srt_text:
-            en_srt_source = find_external_subtitle(video_path, "en")
-            if en_srt_source and os.path.exists(en_srt_source):
-                append_job_log(job_id, f"Found external source subtitle: {os.path.basename(en_srt_source)}")
-                try:
-                    with open(en_srt_source, "r", encoding="utf-8-sig") as f:
-                        raw_srt_text = f.read()
-                except UnicodeDecodeError:
-                    with open(en_srt_source, "r", encoding="windows-1252") as f:
-                        raw_srt_text = f.read()
-
-        # PRIORITY 3: Bazarr Safety Net — ask Bazarr for English subtitle
-        if not raw_srt_text and enable_bazarr:
-            append_job_log(job_id, "No embedded or external English sub found. Querying Bazarr for English subtitle...")
-            try:
-                await self.trigger_bazarr_search(video_path, language="en")
-            except Exception as e:
-                logger.warning(f"Failed to trigger Bazarr safety net search: {e}")
-
-            for _ in range(8):
-                await asyncio.sleep(2)
-                en_srt_source = find_external_subtitle(video_path, "en")
-                if en_srt_source:
-                    append_job_log(job_id, f"Bazarr retrieved English subtitle: {os.path.basename(en_srt_source)}")
+                    # Use a future + call_later as a timer, immune to asyncio.sleep mocking in tests.
+                    _wakeup = asyncio.get_event_loop().create_future()
+                    _h = asyncio.get_event_loop().call_later(_target_poll_interval, _wakeup.set_result, None)
                     try:
-                        with open(en_srt_source, "r", encoding="utf-8-sig") as f:
-                            raw_srt_text = f.read()
-                    except UnicodeDecodeError:
-                        with open(en_srt_source, "r", encoding="windows-1252") as f:
-                            raw_srt_text = f.read()
-                    break
+                        await asyncio.wait_for(asyncio.shield(_wakeup), timeout=_target_poll_interval + 1)
+                    except asyncio.TimeoutError:
+                        pass  # poll interval elapsed — continue to filesystem check
+                    finally:
+                        _h.cancel()  # always clean up the call_later handle
+                        if not _wakeup.done():
+                            _wakeup.cancel()
+                except asyncio.CancelledError:
+                    raise  # always propagate — do not loop on cancellation
+                except Exception:
+                    return
+                all_covered = True
+                for _pli in langs_needing_translation:
+                    _pex = find_external_subtitle(video_path, _pli["code"])
+                    if not _pex:
+                        all_covered = False
+                        break
+                    if auto_repair_unhealthy:
+                        _ph = evaluate_subtitle_health(_pex, target_lang_code=_pli["code"])
+                        if _ph.get("status") == "RED":
+                            all_covered = False
+                            break
+                if all_covered:
+                    _target_found_early.set()
+                    return
 
-        if not raw_srt_text:
-            for t in bazarr_tasks:
-                if not t.done():
-                    t.cancel()
-            if bazarr_tasks:
-                await asyncio.gather(*bazarr_tasks, return_exceptions=True)
+        _poll_task = asyncio.create_task(_poll_target_arrival(), name=f"target_poll_{job_id}")
 
-            err = "No English subtitle source found (neither embedded, external nor via Bazarr safety net)"
+
+        # Wait for EITHER source resolution OR early target detection to complete.
+        # asyncio.wait with FIRST_COMPLETED lets us react immediately.
+        # Timeout = source_search_deadline + margin to prevent unbounded waiting.
+        source_subtitle = None
+        _early_target_win = False
+        try:
+            _done, _pending = await asyncio.wait(
+                {_source_task, _poll_task},
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=source_search_deadline + 10,  # hard upper bound
+            )
+
+
+            if _poll_task in _done and _target_found_early.is_set() and not _source_task.done():
+                # Target appeared on disk while source was still resolving.
+                # Cancel source extraction immediately — terminates underlying mkvextract/ffmpeg process.
+                _resolver.cancel()
+                _source_task.cancel()
+                try:
+                    await _source_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                _early_target_win = True
+                append_job_log(job_id, "Target/Source race winner: Bazarr")
+                append_job_log(job_id, f"Target subtitle found after {round(time.time() - prep_start_time, 2)}s")
+                append_job_log(job_id, "Source extraction cancelled")
+                append_job_log(job_id, "AI skipped")
+                append_job_log(job_id, "AI calls: 0")
+                append_job_log(job_id, "Estimated AI cost: $0.00")
+                append_job_log(job_id, f"Total source preparation: {round(time.time() - prep_start_time, 2)}s")
+            else:
+                # Source finished first (or both finished simultaneously).
+                # Cancel the poll task — it's no longer needed.
+                _poll_task.cancel()
+                try:
+                    await _poll_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                if not _source_task.done():
+                    source_subtitle = await _source_task
+                elif _source_task.cancelled():
+                    source_subtitle = None
+                else:
+                    exc = _source_task.exception()
+                    if exc:
+                        raise exc
+                    source_subtitle = _source_task.result()
+
+        except asyncio.CancelledError:
+            # Pipeline job itself was cancelled — clean up both tasks and terminate processes
+            _resolver.cancel()
+            for _t in (_source_task, _poll_task):
+                if not _t.done():
+                    _t.cancel()
+            await asyncio.gather(_source_task, _poll_task, return_exceptions=True)
+            raise
+
+        t_extract_ms = round((time.perf_counter() - t_ext_start) * 1000, 1)
+
+        # Cancel background Bazarr target tasks — filesystem check below is authoritative
+        for _btt in bazarr_tasks:
+            if not _btt.done():
+                _btt.cancel()
+        if bazarr_tasks:
+            await asyncio.gather(*bazarr_tasks, return_exceptions=True)
+
+        # ── Final Bazarr target check ─────────────────────────────────────────
+        # Authoritative: check filesystem regardless of how we got here.
+        # This also handles the early-target-win path from the concurrent poller.
+        if enable_bazarr and not force_retranslate:
+            _still_miss = []
+            for _blinfo in langs_needing_translation:
+                _bex = find_external_subtitle(video_path, _blinfo["code"])
+                if _bex:
+                    if auto_repair_unhealthy:
+                        _bh = evaluate_subtitle_health(_bex, target_lang_code=_blinfo["code"])
+                        if _bh.get("status") == "RED":
+                            _still_miss.append(_blinfo)
+                            continue
+                    # Log accurately: we observed the file on disk, we don't claim to
+                    # know whether it was Bazarr, the filesystem watcher, or another agent.
+                    append_job_log(job_id, f"Observed healthy {_blinfo['name']} subtitle on disk: {os.path.basename(_bex)}")
+                else:
+                    _still_miss.append(_blinfo)
+            langs_needing_translation = _still_miss
+            if not langs_needing_translation:
+                _bzdur = round(time.time() - start_time, 2)
+                append_job_log(job_id, "Target/Source race winner: Bazarr")
+                append_job_log(job_id, f"Bazarr target observed: {_bzdur}s")
+                append_job_log(job_id, "AI skipped")
+                append_job_log(job_id, "AI calls: 0")
+                append_job_log(job_id, "Estimated AI cost: $0.00")
+                append_job_log(job_id, f"Total source preparation: {round(time.time() - prep_start_time, 2)}s")
+                update_job(job_id, status="BAZARR MATCH", reason="Bazarr found all targets", duration_seconds=_bzdur, sync_diff_ms=-1, dropped_lines=0)
+                if source_subtitle and source_subtitle.origin == SourceOrigin.EMBEDDED:
+                    try: os.remove(source_subtitle.path)
+                    except Exception: pass
+                await self._notify_media_servers(video_path)
+                return {"status": "skipped", "reason": "bazarr_downloaded", "job_id": job_id}
+
+        # ── SOURCE == TARGET shortcut ─────────────────────────────────────────
+        # Invariant: source_language != target_language for every AI dispatch.
+        # If the resolved source IS a target language, publish it directly.
+        published_source_as_target = False
+        if source_subtitle:
+            for _stlinfo in list(langs_needing_translation):
+                if source_subtitle.language == normalize_language_code(_stlinfo["code"]):
+                    _stout = f"{base_path}.{_stlinfo['code']}.srt"
+                    _sth = evaluate_subtitle_health(source_subtitle.path, target_lang_code=_stlinfo["code"])
+                    if _sth.get("status") == "GREEN":
+                        try:
+                            with open(source_subtitle.path, "r", encoding="utf-8-sig", errors="ignore") as _sf:
+                                _st_content = _sf.read()
+                            try:
+                                _st_cues = list(srt.parse(_st_content))
+                            except Exception:
+                                _st_cues = getattr(source_subtitle, "cues", None) or []
+                            if _st_cues:
+                                pub_res = _publish_subtitle_atomic(
+                                    video_path=video_path,
+                                    target_output_path=_stout,
+                                    lang_code=_stlinfo["code"],
+                                    translated_srt_text=_st_content,
+                                    expected_cue_count=len(_st_cues),
+                                    force_retranslate=force_retranslate,
+                                    job_id=job_id
+                                )
+                                if pub_res.get("published"):
+                                    published_source_as_target = True
+                                    append_job_log(job_id,
+                                        f"Source IS {_stlinfo['name']} (target language). "
+                                        f"Published directly — no AI needed.")
+                                    langs_needing_translation.remove(_stlinfo)
+                                elif pub_res.get("skipped"):
+                                    append_job_log(job_id,
+                                        f"External healthy {_stlinfo['name']} subtitle exists/appeared. "
+                                        f"Preserved external file.")
+                                    langs_needing_translation.remove(_stlinfo)
+                        except Exception as _ste:
+                            append_job_log(job_id, f"Failed to publish source-as-target {_stlinfo['name']}: {_ste}")
+
+        if not langs_needing_translation:
+            _stdur = round(time.time() - start_time, 2)
+            append_job_log(job_id, "AI skipped")
+            append_job_log(job_id, "AI calls: 0")
+            append_job_log(job_id, "Estimated AI cost: $0.00")
+            update_job(job_id, status="ALREADY EXISTS",
+                       reason="All targets resolved without AI", duration_seconds=_stdur, sync_diff_ms=-1, dropped_lines=0)
+            if published_source_as_target:
+                await self._notify_media_servers(video_path)
+            return {"status": "skipped", "reason": "already_exists", "job_id": job_id}
+
+        # ── No source found → WAITING_SOURCE ─────────────────────────────────
+        temp_extracted_srt = source_subtitle.path if source_subtitle else f"{base_path}.temp_src.srt"
+        if not source_subtitle:
+            err = "No usable source subtitle found (no embedded, external or Bazarr source)"
             append_job_log(job_id, f"ERROR: {err}")
-            duration = round(time.time() - start_time, 2)
-
-            from app.core.db import get_job_by_id
-            job_data = get_job_by_id(job_id)
-            current_retries = job_data.get("retry_count", 0) if job_data else 0
-
-            if current_retries < 4:
-                backoff_mins = [1, 5, 15, 30][current_retries]
-                from datetime import datetime, timezone, timedelta
-                next_retry_at = (datetime.now(timezone.utc) + timedelta(minutes=backoff_mins)).isoformat()
-
-                update_job(job_id,
-                           status="WAITING_SOURCE",
-                           error_message=err,
-                           duration_seconds=duration,
-                           retry_count=current_retries + 1,
-                           next_retry_at=next_retry_at)
-                if os.path.exists(temp_extracted_srt):
-                    try: os.remove(temp_extracted_srt)
-                    except: pass
+            _nsdur = round(time.time() - start_time, 2)
+            from app.core.db import get_job_by_id as _gjbi
+            _jd = _gjbi(job_id)
+            _retries = _jd.get("retry_count", 0) if _jd else 0
+            if _retries < 4:
+                _bof = [1, 5, 15, 30][_retries]
+                from datetime import datetime as _dt2, timezone as _tz2, timedelta as _td2
+                _nra = (_dt2.now(_tz2.utc) + _td2(minutes=_bof)).isoformat()
+                update_job(job_id, status="WAITING_SOURCE", error_message=err,
+                           duration_seconds=_nsdur, retry_count=_retries + 1, next_retry_at=_nra, sync_diff_ms=-1, dropped_lines=0)
                 return {"status": "waiting_source", "reason": err, "job_id": job_id}
             else:
-                update_job(job_id, status="FAILED", error_message=err, duration_seconds=duration)
-                if os.path.exists(temp_extracted_srt):
-                    try: os.remove(temp_extracted_srt)
-                    except: pass
+                update_job(job_id, status="FAILED", error_message=err, duration_seconds=_nsdur, sync_diff_ms=-1, dropped_lines=0)
                 return {"status": "failed", "reason": err, "job_id": job_id}
 
+        # Log source race winner
+        _src_winner_label = "Embedded source" if source_subtitle.origin == SourceOrigin.EMBEDDED else ("External source" if source_subtitle.origin == SourceOrigin.EXTERNAL else "Bazarr source")
+        append_job_log(job_id, f"Target/Source race winner: {_src_winner_label}")
+        append_job_log(job_id, f"Source language: {source_subtitle.language_name} ({source_subtitle.language})")
+        append_job_log(job_id,
+            f"Source selected: {source_subtitle.language_name} ({source_subtitle.language}) "
+            f"via {source_subtitle.origin.value} [{len(source_subtitle.cues)} cues]. "
+            f"Targets remaining: {[l['code'] for l in langs_needing_translation]}")
+
+        # Bazarr Adaptive Grace Check (bounded short window if Bazarr target search was accepted)
+        if enable_bazarr and not force_retranslate and _bazarr_accepted.is_set():
+            bazarr_grace = float(get_setting("bazarr_grace_seconds", "2.0"))
+            if bazarr_grace > 0:
+                t_grace_start = time.monotonic()
+                grace_target_found = False
+                while (time.monotonic() - t_grace_start) < bazarr_grace:
+                    all_grace_covered = True
+                    for _g_lang in langs_needing_translation:
+                        _g_ex = find_external_subtitle(video_path, _g_lang["code"])
+                        if not _g_ex:
+                            all_grace_covered = False
+                            break
+                        if auto_repair_unhealthy:
+                            _g_h = evaluate_subtitle_health(_g_ex, target_lang_code=_g_lang["code"])
+                            if _g_h.get("status") == "RED":
+                                all_grace_covered = False
+                                break
+                    if all_grace_covered:
+                        grace_target_found = True
+                        break
+                    await asyncio.sleep(0.25)
+
+                if grace_target_found:
+                    _grace_elapsed = round(time.monotonic() - t_grace_start, 2)
+                    append_job_log(job_id, f"Bazarr grace: {_grace_elapsed}s")
+                    append_job_log(job_id, "Target subtitle appeared during grace")
+                    append_job_log(job_id, "Target/Source race winner: Bazarr")
+                    append_job_log(job_id, "AI skipped")
+                    append_job_log(job_id, "AI calls: 0")
+                    append_job_log(job_id, "Estimated AI cost: $0.00")
+                    if source_subtitle and source_subtitle.origin == SourceOrigin.EMBEDDED:
+                        try: os.remove(source_subtitle.path)
+                        except Exception: pass
+                    update_job(job_id, status="BAZARR MATCH", reason="Bazarr found all targets", duration_seconds=round(time.time() - start_time, 2), sync_diff_ms=-1, dropped_lines=0)
+                    await self._notify_media_servers(video_path)
+                    return {"status": "skipped", "reason": "bazarr_downloaded", "job_id": job_id}
+                else:
+                    append_job_log(job_id, f"Bazarr grace: {bazarr_grace:.1f}s")
+                    append_job_log(job_id, "No target subtitle appeared")
+
+
         try:
-            # -------------------------------------------------------------
-            # PRE-PROCESSING & SDH CLEANER
-            # -------------------------------------------------------------
+            from app.core.db import DeferStage
+            current_pipeline_stage = DeferStage.PRIMARY
+            # ── PIN JOB PROVIDER & CONTEXT ────────────────────────────────────
+            # Pin the job to its configured AI provider and model before ANY AI
+            # call (including SDH classifier / pre-translation cleanup).
+            from app.core.ai_providers import context_from_settings, resolve_job_provider_context
+            from app.core.db import pin_job_provider
+
+            configured_primary = context_from_settings()
+
+            esc_enabled  = get_setting("escalate_to_pro", "false").lower() == "true"
+            configured_escalation = context_from_settings(escalation=True) if esc_enabled else None
+
+            pin_job_provider(
+                job_id,
+                primary_provider=configured_primary.provider,
+                primary_model=configured_primary.model,
+                escalation_enabled=bool(configured_escalation),
+                escalation_provider=configured_escalation.provider if configured_escalation else None,
+                escalation_model=configured_escalation.model if configured_escalation else None,
+            )
+
+            primary_ctx = resolve_job_provider_context(job_id)
+            active_engine_name = primary_ctx.engine_label
+            active_model_name = primary_ctx.model
+            ai_provider = primary_ctx.provider
+
+            # ── PRE-PROCESSING & SDH CLEANER (on resolved source subtitle) ──────
+            raw_srt_text = source_subtitle.content
             t_clean_start = time.perf_counter()
             clean_sdh_enabled = get_setting("clean_sdh", "true").lower() == "true"
+            provenance_map = {}
             if clean_sdh_enabled:
-                subs, cleaned_count = sanitize_srt_content(raw_srt_text)
+                classifier_fn = getattr(self.translator, "classify_sdh_segments", None)
+                source_lang_name = source_subtitle.language_name if (source_subtitle and source_subtitle.language_name) else "unknown"
+                subs, provenance_map, cleaned_count = await sanitize_srt_content_with_provenance(
+                    raw_srt_text,
+                    source_language=source_lang_name,
+                    classifier_fn=classifier_fn,
+                    job_id=job_id
+                )
                 append_job_log(job_id, f"Sanitizer processed {len(subs)} blocks. Cleaned noise on {cleaned_count} blocks.")
             else:
                 subs = list(srt.parse(raw_srt_text))
@@ -1155,77 +2599,10 @@ class SubtitlePipeline:
                 f"audio=0.00s)"
             )
 
-            # Ensure all background Bazarr trigger tasks are cleanly resolved/cancelled before final check
-            for t in bazarr_tasks:
-                if not t.done():
-                    t.cancel()
-            if bazarr_tasks:
-                await asyncio.gather(*bazarr_tasks, return_exceptions=True)
-
-            # -------------------------------------------------------------
-            # FINAL BAZARR CHECK (Target check before initiating AI translation)
-            # -------------------------------------------------------------
-            if enable_bazarr and not force_retranslate:
-                still_missing = []
-                for lang_info in langs_needing_translation:
-                    existing = find_external_subtitle(video_path, lang_info["code"])
-                    if existing:
-                        if auto_repair_unhealthy:
-                            health = evaluate_subtitle_health(existing, target_lang_code=lang_info["code"])
-                            if health.get("status") == "RED":
-                                still_missing.append(lang_info)
-                                continue
-                        append_job_log(job_id, f"Bazarr found {lang_info['name']} subtitle: {os.path.basename(existing)}")
-                    else:
-                        still_missing.append(lang_info)
-
-                langs_needing_translation = still_missing
-                if not langs_needing_translation:
-                    duration = round(time.time() - start_time, 2)
-                    update_job(job_id, status="BAZARR MATCH", reason="Bazarr found all target subtitles", duration_seconds=duration)
-                    if os.path.exists(temp_extracted_srt):
-                        try: os.remove(temp_extracted_srt)
-                        except Exception: pass
-                    await self._maybe_notify_jellyfin()
-                    return {"status": "skipped", "reason": "bazarr_downloaded", "job_id": job_id}
-                else:
-                    append_job_log(job_id, f"Hybrid preparation completed in {prep_duration_ms}ms {perf_breakdown}. Bazarr result: miss. Starting AI immediately (fixed grace delay avoided).")
-            else:
-                append_job_log(job_id, f"Source preparation completed in {round(prep_duration_ms / 1000, 2)}s {perf_breakdown}.")
+            append_job_log(job_id, f"Source preparation: {round(prep_duration_ms / 1000, 2)}s {perf_breakdown}")
 
             total_source_lines = len(subs)
             batch_size = get_positive_int_setting("batch_size", 150)
-            ai_provider = get_setting("ai_provider", "gemini").lower()
-            if ai_provider == "openai":
-                active_engine_name = f"OpenAI ({get_setting('openai_model', 'gpt-4o-mini')})"
-                active_model_name   = get_setting("openai_model", "gpt-4o-mini")
-            elif ai_provider == "deepl":
-                active_engine_name  = "DeepL Translate"
-                active_model_name   = "deepl"
-            elif ai_provider in ["ollama", "localai"]:
-                active_engine_name  = f"Ollama ({get_setting('ollama_model', 'llama3')})"
-                active_model_name   = get_setting("ollama_model", "llama3")
-            else:
-                active_engine_name  = f"Gemini ({get_setting('gemini_model', 'gemini-3.5-flash-lite')})"
-                active_model_name   = get_setting("gemini_model", "gemini-3.5-flash-lite")
-
-            # ------------------------------------------------------------------
-            # Phase 1: Provider/Model Pinning
-            # Lock in the effective provider config for this job on first dispatch.
-            # Subsequent retries/resumes will use the pinned values.
-            # ------------------------------------------------------------------
-            esc_enabled  = get_setting("escalate_to_pro", "false").lower() == "true"
-            esc_provider = get_setting("escalation_provider", "none").lower()
-            esc_model    = get_setting("escalation_model", "")
-            from app.core.db import pin_job_provider
-            pin_job_provider(
-                job_id,
-                primary_provider    = ai_provider,
-                primary_model       = active_model_name,
-                escalation_enabled  = esc_enabled and esc_provider != "none" and bool(esc_model),
-                escalation_provider = esc_provider if (esc_enabled and esc_provider != "none") else None,
-                escalation_model    = esc_model    if (esc_enabled and esc_provider != "none") else None,
-            )
 
             # ------------------------------------------------------------------
             # Phase 1: Minimum Budget Admission (new primary jobs only)
@@ -1282,9 +2659,10 @@ class SubtitlePipeline:
                         waiting_model    = active_model_name,
                         defer_stage      = DeferStage.PRIMARY,
                     )
-                    if os.path.exists(temp_extracted_srt):
-                        try: os.remove(temp_extracted_srt)
-                        except Exception: pass
+                    if source_subtitle is not None and source_subtitle.origin == SourceOrigin.EMBEDDED:
+                        if os.path.exists(temp_extracted_srt):
+                            try: os.remove(temp_extracted_srt)
+                            except Exception: pass
                     return {
                         "status": "deferred",
                         "error": "INSUFFICIENT_LOCAL_BUDGET",
@@ -1306,34 +2684,8 @@ class SubtitlePipeline:
             # TRANSLATION & QUALITY ASSURANCE
             # -------------------------------------------------------------
 
-            # Bug #20: Respect Original Language Guard toggle
-            original_language_guard = get_setting("original_language_guard", "true").lower() == "true"
-
-            primary_audio_lang = "und"
-            if original_language_guard:
-                audio_tracks = container_tracks.get("audio", []) if container_tracks else []
-                if not audio_tracks:
-                    try:
-                        mkv_info = await asyncio.to_thread(inspect_mkv_tracks, video_path)
-                        audio_tracks = mkv_info.get("audio", [])
-                    except Exception:
-                        audio_tracks = []
-
-                # Bug #32: Better audio track detection — prefer default, skip forced/commentary
-                for audio in audio_tracks:
-                    audio_title = (audio.get("title") or "").lower()
-                    if any(bad in audio_title for bad in ["commentary", "director", "description"]):
-                        continue
-                    if audio.get("default") and not audio.get("forced"):
-                        primary_audio_lang = audio.get("language", "und").lower()
-                        break
-                if primary_audio_lang == "und" and audio_tracks:
-                    # Fallback: first non-forced, non-commentary audio
-                    for audio in audio_tracks:
-                        audio_title = (audio.get("title") or "").lower()
-                        if not audio.get("forced") and not any(bad in audio_title for bad in ["commentary", "director"]):
-                            primary_audio_lang = audio.get("language", "und").lower()
-                            break
+            # Audio lang was detected earlier as source prioritisation signal.
+            # OLG blocking removed in v2.3.43. source!=target invariant enforced above.
 
             for lang_info in langs_needing_translation:
                 lang_name = lang_info["name"]
@@ -1342,37 +2694,47 @@ class SubtitlePipeline:
                 safe_ids = [idx for idx, sub in enumerate(subs) if is_safe_keep_prefilter(sub.content)]
                 context_verified_ids = set()
 
-                # Check Original Language Guard
-                if original_language_guard:
-                    from app.core.languages import get_language
-                    lang_obj = get_language(lang_code)
-                    protected_langs = lang_obj.aliases if lang_obj else [lang_code]
+                # Pass 2D: Atomic Pre-AI Target Check
+                # Skip when force_retranslate=True — user explicitly requested re-translation
+                if not force_retranslate:
+                    existing_before_trans = find_external_subtitle(video_path, lang_code)
+                    if existing_before_trans:
+                        health = evaluate_subtitle_health(existing_before_trans, target_lang_code=lang_code)
+                        if health.get("status") == "GREEN":
+                            append_job_log(job_id, "Target appeared before AI start")
+                            append_job_log(job_id, "AI skipped")
+                            append_job_log(job_id, "AI calls: 0")
+                            append_job_log(job_id, "Estimated AI cost: $0.00")
+                            successful_langs.append(lang_code)
+                            continue
 
-                    if primary_audio_lang in protected_langs:
-                        append_job_log(job_id, f"Original Language Guard: Primary audio is '{primary_audio_lang}'. Skipping translation to {lang_name}.")
-                        # Bug #31: Don't count guard-skipped as "successful translation"
-                        skipped_langs.append(lang_name)
-                        continue
-
-                # Mid-job target race protection (Before Translation)
-                existing_before_trans = find_external_subtitle(video_path, lang_code)
-                if existing_before_trans:
-                    health = evaluate_subtitle_health(existing_before_trans, target_lang_code=lang_code)
-                    if health.get("status") == "GREEN":
-                        append_job_log(job_id, "Target appeared while job was running. Skipping AI translation.")
-                        successful_langs.append(lang_code)
-                        continue
-
+                append_job_log(job_id, "Atomic target check: no target")
+                append_job_log(job_id, f"AI starting: {active_engine_name}")
                 append_job_log(job_id, f"Translating to {lang_name} ({lang_code}) using {active_engine_name} ({total_source_lines} lines)...")
 
                 t_main_start = time.time()
-                translated_subs = await self.translator.translate_srt_content(
-                    subs=subs,
-                    target_language=lang_name,
-                    batch_size=batch_size,
-                    job_id=job_id,
-                    show_title=effective_tm_key or title
-                )
+                try:
+                    translated_subs = await self.translator.translate_srt_content(
+                        subs=subs,
+                        target_language=lang_name,
+                        source_language=source_subtitle.language_name,
+                        batch_size=batch_size,
+                        job_id=job_id,
+                        show_title=effective_tm_key or title,
+                        provenance_map=provenance_map
+                    )
+                except TypeError as _te:
+                    if "provenance_map" in str(_te):
+                        translated_subs = await self.translator.translate_srt_content(
+                            subs=subs,
+                            target_language=lang_name,
+                            source_language=source_subtitle.language_name,
+                            batch_size=batch_size,
+                            job_id=job_id,
+                            show_title=effective_tm_key or title
+                        )
+                    else:
+                        raise
                 t_main_end = time.time()
                 append_job_log(job_id, f"Timing: Main translation phase completed in {round(t_main_end - t_main_start, 1)}s")
 
@@ -1386,6 +2748,18 @@ class SubtitlePipeline:
                 recovered_at_loop_start = 0
                 source_preserved_cues = set()
                 initial_identical_candidates_set: Set[int] = set()
+                alignment_dirty = True
+                incident_tracker = SemanticIncidentTracker(total_cues=total_source_lines, batch_size=batch_size)
+                latest_alignment_issues = []
+                latest_affected_indices = set()
+                mutated_cue_indices: Set[int] = set()
+
+                def _apply_mutation(idx: int, new_text: str):
+                    nonlocal alignment_dirty
+                    if 0 <= idx < len(translated_subs) and translated_subs[idx].content != new_text:
+                        translated_subs[idx].content = new_text
+                        mutated_cue_indices.add(idx)
+                        alignment_dirty = True
 
                 while qa_loop_count < max_qa_loops:
                     qa_loop_count += 1
@@ -1399,6 +2773,37 @@ class SubtitlePipeline:
                             translated_subs[idx].start = subs[idx].start
                             translated_subs[idx].end = subs[idx].end
 
+                    if alignment_dirty:
+                        recheck_anomalies = list(mutated_cue_indices) if qa_loop_count > 1 else None
+                        alignment_rep = await self.check_semantic_cue_alignment(
+                            subs, translated_subs,
+                            target_language=lang_name,
+                            source_language=source_subtitle.language_name if source_subtitle else "English",
+                            show_title=title or "",
+                            job_id=job_id,
+                            batch_size=batch_size,
+                            anomaly_indices=recheck_anomalies,
+                            incident_tracker=incident_tracker
+                        )
+                        found_incidents = alignment_rep.get("incidents", []) if isinstance(alignment_rep, dict) else []
+                        repairable_incidents = incident_tracker.get_repairable_incidents(found_incidents) if incident_tracker else []
+                        has_repairable_batches = bool(incident_tracker and incident_tracker.get_repairable_batches())
+                        if has_repairable_batches or repairable_incidents:
+                            await self._repair_semantic_alignment_incidents(
+                                subs, translated_subs,
+                                incidents=repairable_incidents,
+                                target_language=lang_name,
+                                source_language=source_subtitle.language_name if source_subtitle else "English",
+                                show_title=title or "",
+                                job_id=job_id,
+                                apply_mutation_fn=_apply_mutation,
+                                incident_tracker=incident_tracker
+                            )
+                        latest_alignment_issues = incident_tracker.get_all_active_issues() if incident_tracker else []
+                        latest_affected_indices = set(alignment_rep.get("affected_indices", [])) if isinstance(alignment_rep, dict) else set()
+                        mutated_cue_indices.clear()
+                        alignment_dirty = False
+
                     # -------------------------------------------------------
                     # Bug #1, #5: FINAL QA GATE — never publish a broken file
                     # Inside recovery loop: require clean pass without warnings to attempt recovery
@@ -1410,7 +2815,9 @@ class SubtitlePipeline:
                         safe_ids=safe_ids,
                         show_title=title or "",
                         context_verified_ids=context_verified_ids,
-                        allow_warnings=False
+                        allow_warnings=False,
+                        source_language_name=source_subtitle.language_name if source_subtitle else "source",
+                        semantic_alignment_issues=latest_alignment_issues if latest_alignment_issues else None,
                     )
 
                     if qa_loop_count == 1:
@@ -1422,6 +2829,7 @@ class SubtitlePipeline:
                     current_unresolved_set = set(
                         qa_result.get("real_untranslated_ids", []) +
                         qa_result.get("wrong_language_ids", []) +
+                        qa_result.get("contaminated_ids", []) +
                         [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])]
                     )
 
@@ -1434,8 +2842,8 @@ class SubtitlePipeline:
                     previous_unresolved_set = set(current_unresolved_set)
                     recovered_at_loop_start = len(recovered_cues)
 
-                    # Attempt recovery for any untranslated, wrong-language or dropped lines
-                    if qa_result["untranslated_ids"] or qa_result.get("dropped_count", 0) > 0 or qa_result.get("wrong_language_ids"):
+                    # Attempt recovery for any untranslated, wrong-language, contaminated, or dropped lines
+                    if qa_result["untranslated_ids"] or qa_result.get("dropped_count", 0) > 0 or qa_result.get("wrong_language_ids") or qa_result.get("contaminated_ids"):
                         try:
                             # 1. Primary Recovery for Identical lines (English still present)
                             if qa_result["untranslated_ids"]:
@@ -1447,9 +2855,10 @@ class SubtitlePipeline:
                                     if subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>" and idx not in safe_ids and idx not in known_untranslated_ids
                                 ]
                                 if recovery_payload:
-                                    provider = get_setting("ai_provider", "gemini").lower()
-                                    caps = get_provider_capabilities(provider)
-                                    if caps["supports_identical_classification"]:
+                                    provider = primary_ctx.provider
+                                    from app.core.ai_providers import get_model_capabilities
+                                    caps = get_model_capabilities(primary_ctx.provider, primary_ctx.model)
+                                    if caps.semantic_audit:
                                         recovery_results = []
                                         chunk_size = 20
                                         for i in range(0, len(recovery_payload), chunk_size):
@@ -1460,12 +2869,14 @@ class SubtitlePipeline:
                                                         chunk, lang_name, effective_tm_key or title or "",
                                                         source_subs=subs,
                                                         translated_subs=translated_subs,
-                                                        job_id=job_id
+                                                        job_id=job_id,
+                                                        source_language=source_subtitle.language_name if source_subtitle else "source",
                                                     )
                                                 except TypeError:
                                                     chunk_res = await self.translator.classify_and_recover_identical(
                                                         chunk, lang_name, effective_tm_key or title or "",
-                                                        job_id=job_id
+                                                        job_id=job_id,
+                                                        source_language=source_subtitle.language_name if source_subtitle else "source",
                                                     )
                                                 recovery_results.extend(chunk_res)
                                             except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
@@ -1480,15 +2891,18 @@ class SubtitlePipeline:
                                             action = r.get("action")
                                             if action == "keep":
                                                 raw_reason = r.get("reason", "none").lower()
+                                                is_struct_safe = is_pure_structural_invariant(subs[idx].content)
                                                 is_det_safe = is_deterministically_safe_keep(subs[idx].content, raw_reason, show_title=title or "")
                                                 is_ev_safe = has_entity_evidence(subs[idx].content, subs, translated_subs, target_idx=idx)
-                                                is_ctx_safe = ("context_verified" in raw_reason) and is_strictly_valid_entity_candidate(subs[idx].content)
-                                                if is_det_safe or is_ev_safe or is_ctx_safe:
+                                                is_sem_verified = bool(r.get("semantic_verified", False))
+                                                is_ctx_legacy = ("context_verified" in raw_reason) and is_strictly_valid_entity_candidate(subs[idx].content)
+
+                                                if is_struct_safe or is_det_safe or is_ev_safe or is_sem_verified or is_ctx_legacy:
                                                     if idx not in safe_ids:
                                                         safe_ids.append(idx)
-                                                    if is_ctx_safe:
+                                                    if is_sem_verified or is_ctx_legacy:
                                                         context_verified_ids.add(idx)
-                                                        append_job_log(job_id, f"QA Recovery: Model kept cue {idx + 1} (Context-verified Entity: '{subs[idx].content.strip()}')")
+                                                        append_job_log(job_id, f"QA Recovery: Model kept cue {idx + 1} (Semantic-verified Invariant: '{subs[idx].content.strip()}')")
                                                     elif is_ev_safe and not is_det_safe:
                                                         append_job_log(job_id, f"QA Recovery: Model kept cue {idx + 1} (Evidence-based Entity: '{subs[idx].content.strip()}')")
                                                     else:
@@ -1499,6 +2913,7 @@ class SubtitlePipeline:
                                                             "number": "Number",
                                                             "symbol": "Symbol / Punctuation",
                                                             "non_verbal": "Non-verbal Sound",
+                                                            "shared_word": "Shared Word",
                                                             "none": "Unspecified Reason"
                                                         }
                                                         reason_str = reason_map.get(raw_reason, raw_reason.replace("_", " ").title())
@@ -1510,8 +2925,14 @@ class SubtitlePipeline:
                                                 if not is_usable_translation(r["text"]):
                                                     append_job_log(job_id, f"QA Recovery: Rejected blank/invalid translation for cue {idx + 1}")
                                                 elif is_meaningful_translation(subs[idx].content, r["text"]):
-                                                    translated_subs[idx].content = r["text"]
+                                                    _apply_mutation(idx, r["text"])
                                                     append_job_log(job_id, f"QA Recovery: Translated cue {idx + 1}")
+                                                    recovered_cues.add(idx)
+                                                elif is_valid_shared_or_entity_keep(subs[idx].content, r["text"], lang_code):
+                                                    _apply_mutation(idx, r["text"])
+                                                    if idx not in safe_ids:
+                                                        safe_ids.append(idx)
+                                                    append_job_log(job_id, f"QA Recovery: Valid shared translation for cue {idx + 1}")
                                                     recovered_cues.add(idx)
                                     else:
                                         # Deterministic fallback for DeepL
@@ -1535,69 +2956,240 @@ class SubtitlePipeline:
                                             if idx is None: continue
                                             text = r.get("text", "")
                                             if is_meaningful_translation(subs[idx].content, text):
-                                                translated_subs[idx].content = text
+                                                _apply_mutation(idx, text)
                                                 append_job_log(job_id, f"QA Recovery: Translated cue {idx + 1}")
                                                 recovered_cues.add(idx)
 
                             # Re-run QA after primary recovery with safe_ids context
-                            qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids, allow_warnings=False)
+                            qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids, allow_warnings=False, source_language_name=source_subtitle.language_name if source_subtitle else "source")
                             if qa_result["passed"]:
                                 break
 
-                            # 2. Escalation Stage: Contextual Single-Line Recovery (Dropped + Unresolved Identical + Wrong Language)
+                            # Helper function to construct rich contextual items for bulk recovery
+                            def _build_contextual_items(target_ids):
+                                items = []
+                                for idx in target_ids:
+                                    ctx_before_parts = []
+                                    for b_idx in range(max(0, idx - 3), idx):
+                                        bc = subs[b_idx].content.strip()
+                                        if bc and bc != "<i></i>":
+                                            btc = translated_subs[b_idx].content.strip() if b_idx < len(translated_subs) else ""
+                                            if btc and btc != "<i></i>" and is_meaningful_translation(bc, btc):
+                                                ctx_before_parts.append(f"{bc} [{lang_code.upper()}: {btc}]")
+                                            else:
+                                                ctx_before_parts.append(bc)
+
+                                    ctx_after_parts = []
+                                    for a_idx in range(idx + 1, min(len(subs), idx + 4)):
+                                        ac = subs[a_idx].content.strip()
+                                        if ac and ac != "<i></i>":
+                                            ctx_after_parts.append(ac)
+
+                                    items.append({
+                                        "id": idx,
+                                        "target": subs[idx].content,
+                                        "context_before": " | ".join(ctx_before_parts) if ctx_before_parts else "(none)",
+                                        "context_after": " | ".join(ctx_after_parts) if ctx_after_parts else "(none)"
+                                    })
+                                return items
+
+                            async def _verify_identical_candidates_batch(target_ids, phase_label="QA Recovery"):
+                                to_verify = [
+                                    rid for rid in sorted(set(target_ids))
+                                    if rid not in safe_ids
+                                    and rid not in context_verified_ids
+                                    and 0 <= rid < len(subs)
+                                    and subs[rid].content.strip()
+                                    and subs[rid].content.strip() != "<i></i>"
+                                ]
+                                if not to_verify:
+                                    return 0
+
+                                items = _build_contextual_items(to_verify)
+                                for c in items:
+                                    c["proposed_reason"] = "recovery_identical"
+
+                                logger.info(f"{phase_label}: batch verifying {len(items)} identical recovery candidates via semantic invariant auditor")
+                                verified_ids = set()
+                                try:
+                                    verified_ids = await self.translator.verify_alphabetic_invariants_batch(
+                                        items,
+                                        target_language=lang_name,
+                                        source_language=source_subtitle.language_name if source_subtitle else "source",
+                                        show_title=effective_tm_key or title or "",
+                                        job_id=job_id
+                                    )
+                                except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError) as e:
+                                    logger.warning(f"{phase_label}: semantic invariant verification provider error: {e}")
+                                except Exception as e:
+                                    logger.error(f"{phase_label}: batch semantic invariant verification failed: {e}")
+
+                                verified_count = 0
+                                for rid in to_verify:
+                                    if rid in verified_ids:
+                                        if rid not in safe_ids:
+                                            safe_ids.append(rid)
+                                        context_verified_ids.add(rid)
+                                        _apply_mutation(rid, subs[rid].content)
+                                        recovered_cues.add(rid)
+                                        verified_count += 1
+                                        append_job_log(job_id, f"{phase_label}: Model kept cue {rid + 1} (Semantic-verified Invariant: '{subs[rid].content.strip()}')")
+                                    else:
+                                        if phase_label == "Escalation":
+                                            append_job_log(job_id, f"Escalation: Rejected identical fallback for cue {rid + 1}")
+                                        logger.info(f"{phase_label}: candidate cue {rid + 1} ('{subs[rid].content.strip()}') rejected by semantic invariant auditor")
+
+                                return verified_count
+
+                            # Gather all unresolved cues (untranslated, wrong language, contaminated, dropped)
                             real_unresolved = qa_result.get("real_untranslated_ids", [])
                             wrong_lang_unresolved = qa_result.get("wrong_language_ids", [])
+                            contaminated_unresolved = qa_result.get("contaminated_ids", [])
                             dropped_unresolved = [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])]
-                            all_unresolved = list(set(real_unresolved + wrong_lang_unresolved + dropped_unresolved))
-                            all_unresolved.sort()
+                            all_unresolved = [
+                                idx for idx in sorted(set(real_unresolved + wrong_lang_unresolved + contaminated_unresolved + dropped_unresolved))
+                                if idx not in safe_ids and subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>"
+                                and f"escalation:{idx}" not in exhausted_strategies
+                            ]
 
+                            # =========================================================================
+                            # STAGE 1: Bulk Contextual Recovery (Single structured bulk call)
+                            # =========================================================================
                             if all_unresolved:
                                 for uid in all_unresolved:
                                     known_untranslated_ids.add(uid)
 
-                                append_job_log(job_id, f"Targeted Recovery: translating {len(all_unresolved)} unresolved dialogue cues")
-                                batch_payload = [{"id": idx, "text": subs[idx].content} for idx in all_unresolved]
+                                strategy_key_a = f"bulk_contextual:{tuple(all_unresolved)}"
+                                if strategy_key_a not in exhausted_strategies:
+                                    append_job_log(job_id, f"Bulk Contextual Recovery: translating {len(all_unresolved)} unresolved dialogue cues")
+                                    t_bcr_start = time.perf_counter()
+                                    bcr_items = _build_contextual_items(all_unresolved)
+                                    try:
+                                        bcr_results = await self.translator.fast_final_rescue_batch(
+                                            bcr_items,
+                                            target_language=lang_name,
+                                            source_language=source_subtitle.language_name if source_subtitle else "source",
+                                            show_title=effective_tm_key or title or "",
+                                            attempt=1,
+                                            job_id=job_id
+                                        )
+                                        valid_bcr_map, bcr_report = validate_recovery_batch_results(bcr_items, bcr_results)
+                                        bcr_success = 0
+                                        bcr_identical_candidates = []
+                                        for rid, text in valid_bcr_map.items():
+                                            if is_usable_translation(text):
+                                                if is_meaningful_translation(subs[rid].content, text):
+                                                    _apply_mutation(rid, text)
+                                                    recovered_cues.add(rid)
+                                                    bcr_success += 1
+                                                elif is_valid_shared_or_entity_keep(subs[rid].content, text, lang_code):
+                                                    _apply_mutation(rid, text)
+                                                    if rid not in safe_ids: safe_ids.append(rid)
+                                                    recovered_cues.add(rid)
+                                                    bcr_success += 1
+                                                else:
+                                                    bcr_identical_candidates.append(rid)
 
-                                try:
-                                    targeted_results = await self.translator.translate_batch(batch_payload, target_language=lang_name, show_title=effective_tm_key or title or "", job_id=job_id)
-                                    targeted_success = 0
-                                    for r in targeted_results:
-                                        idx = r.get("id")
-                                        if idx is None: continue
-                                        text = r.get("text", "")
-                                        if is_meaningful_translation(subs[idx].content, text):
-                                            translated_subs[idx].content = text
-                                            recovered_cues.add(idx)
-                                            targeted_success += 1
-                                    append_job_log(job_id, f"Targeted Recovery: translated {targeted_success}/{len(all_unresolved)}")
-                                    if targeted_success > 0:
-                                        recovered_at_loop_start = -1  # Mark progress
-                                    else:
-                                        append_job_log(job_id, f"Targeted Recovery: 0/{len(all_unresolved)} cues translated.")
-                                except (ProviderUnavailableError, ProviderConfigurationError):
-                                    raise
-                                except Exception as e:
-                                    append_job_log(job_id, f"Targeted Recovery failed: {e}")
+                                        if bcr_identical_candidates:
+                                            verified_bcr = await _verify_identical_candidates_batch(bcr_identical_candidates, phase_label="QA Recovery")
+                                            bcr_success += verified_bcr
 
-                                # Re-run QA again to get the remaining stubborn cues
-                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids, allow_warnings=False)
-                                real_unresolved = qa_result.get("real_untranslated_ids", [])
-                                wrong_lang_unresolved = qa_result.get("wrong_language_ids", [])
-                                dropped_unresolved = [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])]
-                                all_unresolved = list(set(real_unresolved + wrong_lang_unresolved + dropped_unresolved))
-                                all_unresolved.sort()
+                                        t_bcr_dur = round(time.perf_counter() - t_bcr_start, 1)
+                                        append_job_log(job_id, f"Bulk Contextual Recovery: recovered {bcr_success}/{len(all_unresolved)} cues in {t_bcr_dur}s")
+                                        append_job_log(job_id, f"Targeted Recovery: translated {bcr_success}/{len(all_unresolved)}")
+                                        if bcr_success > 0:
+                                            recovered_at_loop_start = -1
+                                        else:
+                                            exhausted_strategies.add(strategy_key_a)
+                                    except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
+                                        raise
+                                    except Exception as e:
+                                        append_job_log(job_id, f"Bulk Contextual Recovery failed: {e}")
+                                        exhausted_strategies.add(strategy_key_a)
 
-                            if all_unresolved:
-                                esc_enabled = get_setting("escalate_to_pro", "false").lower() == "true"
+                                still_unresolved = [
+                                    idx for idx in all_unresolved
+                                    if idx not in safe_ids and not is_meaningful_translation(subs[idx].content, translated_subs[idx].content) and not is_valid_shared_or_entity_keep(subs[idx].content, translated_subs[idx].content, lang_code)
+                                ]
 
-                                esc_prov = get_setting("escalation_provider", "none")
-                                esc_mod = get_setting("escalation_model", "")
-                                if esc_enabled and esc_prov != "none" and esc_mod:
-                                    esc_info = f"{esc_prov} / {esc_mod}"
+                                # =========================================================================
+                                # STAGE 2: Bulk Strict Recovery (Semantically distinct alternative bulk call)
+                                # =========================================================================
+                                if still_unresolved:
+                                    strategy_key_b = f"bulk_strict:{tuple(still_unresolved)}"
+                                    if strategy_key_b not in exhausted_strategies:
+                                        append_job_log(job_id, f"Bulk Strict Recovery: translating {len(still_unresolved)} remaining cues with direct focus")
+                                        t_bsr_start = time.perf_counter()
+                                        bsr_items = _build_contextual_items(still_unresolved)
+                                        try:
+                                            bsr_results = await self.translator.fast_final_rescue_batch(
+                                                bsr_items,
+                                                target_language=lang_name,
+                                                source_language=source_subtitle.language_name if source_subtitle else "source",
+                                                show_title=effective_tm_key or title or "",
+                                                attempt=2,
+                                                job_id=job_id
+                                            )
+                                            valid_bsr_map, bsr_report = validate_recovery_batch_results(bsr_items, bsr_results)
+                                            bsr_success = 0
+                                            bsr_identical_candidates = []
+                                            for rid, text in valid_bsr_map.items():
+                                                if is_usable_translation(text):
+                                                    if is_meaningful_translation(subs[rid].content, text):
+                                                        _apply_mutation(rid, text)
+                                                        recovered_cues.add(rid)
+                                                        bsr_success += 1
+                                                    elif is_valid_shared_or_entity_keep(subs[rid].content, text, lang_code):
+                                                        _apply_mutation(rid, text)
+                                                        if rid not in safe_ids: safe_ids.append(rid)
+                                                        recovered_cues.add(rid)
+                                                        bsr_success += 1
+                                                    else:
+                                                        bsr_identical_candidates.append(rid)
+
+                                            if bsr_identical_candidates:
+                                                verified_bsr = await _verify_identical_candidates_batch(bsr_identical_candidates, phase_label="QA Recovery")
+                                                bsr_success += verified_bsr
+
+                                            t_bsr_dur = round(time.perf_counter() - t_bsr_start, 1)
+                                            append_job_log(job_id, f"Bulk Strict Recovery: recovered {bsr_success}/{len(still_unresolved)} cues in {t_bsr_dur}s")
+                                            if bsr_success > 0:
+                                                recovered_at_loop_start = -1
+                                            else:
+                                                exhausted_strategies.add(strategy_key_b)
+                                        except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
+                                            raise
+                                        except Exception as e:
+                                            append_job_log(job_id, f"Bulk Strict Recovery failed: {e}")
+                                            exhausted_strategies.add(strategy_key_b)
+
+                                # Re-run QA after Stage 1 & 2
+                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids, allow_warnings=False, source_language_name=source_subtitle.language_name if source_subtitle else "source")
+                                if qa_result["passed"]:
+                                    break
+
+                            # =========================================================================
+                            # STAGE 3: Per-Cue Escalation (Last resort only for stubborn cues)
+                            # =========================================================================
+                            real_unresolved = qa_result.get("real_untranslated_ids", [])
+                            wrong_lang_unresolved = qa_result.get("wrong_language_ids", [])
+                            dropped_unresolved = [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])]
+                            final_unresolved = [
+                                idx for idx in sorted(set(real_unresolved + wrong_lang_unresolved + dropped_unresolved))
+                                if idx not in safe_ids and subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>"
+                            ]
+
+                            if final_unresolved:
+                                _esc_ctx = resolve_job_provider_context(job_id, escalation=True)
+                                if _esc_ctx.provider != primary_ctx.provider or _esc_ctx.model != primary_ctx.model:
+                                    esc_info = f"{_esc_ctx.provider} / {_esc_ctx.model}"
                                 else:
                                     esc_info = "Primary Model (Contextual Mode)"
-                                append_job_log(job_id, f"Escalation Stage: {len(all_unresolved)} lines still unresolved. Escalating using {esc_info}...")
+
+                                append_job_log(job_id, f"Escalation Stage: {len(final_unresolved)} lines still unresolved. Escalating using {esc_info}...")
                                 esc_sem = asyncio.Semaphore(3)
+                                esc_identical_candidates = []
+
                                 async def escalate_one(idx):
                                     prev_idx = max(0, idx - 1)
                                     next_idx = min(len(subs) - 1, idx + 1)
@@ -1610,9 +3202,10 @@ class SubtitlePipeline:
                                                 idx, target_text, prev_text, next_text, lang_name, effective_tm_key or title or "",
                                                 is_real_untranslated=(idx in real_unresolved or idx in wrong_lang_unresolved),
                                                 job_id=job_id,
-                                                exhausted_strategies=exhausted_strategies
+                                                exhausted_strategies=exhausted_strategies,
+                                                source_language=source_subtitle.language_name if source_subtitle else "source",
+                                                context_verified_ids=context_verified_ids,
                                             )
-                                            is_dropped = idx in dropped_unresolved
                                             if esc_text:
                                                 esc_clean = esc_text.strip()
                                                 orig_clean = target_text.strip()
@@ -1622,208 +3215,77 @@ class SubtitlePipeline:
                                                     append_job_log(job_id, f"Escalation: Rejected empty text for cue {idx + 1}")
                                                 elif is_orig_real and is_esc_empty:
                                                     append_job_log(job_id, f"Escalation: Rejected fake empty/tag for real dialogue at cue {idx + 1}")
-                                                elif not is_meaningful_translation(target_text, esc_text):
-                                                    append_job_log(job_id, f"Escalation: Rejected identical fallback for cue {idx + 1}")
-                                                else:
-                                                    translated_subs[idx].content = esc_text
+                                                elif is_meaningful_translation(target_text, esc_text):
+                                                    _apply_mutation(idx, esc_text)
                                                     append_job_log(job_id, f"Escalation: Translated cue {idx + 1} using dialogue context")
                                                     recovered_cues.add(idx)
+                                                elif is_valid_shared_or_entity_keep(target_text, esc_text, lang_code):
+                                                    _apply_mutation(idx, esc_text)
+                                                    if idx not in safe_ids: safe_ids.append(idx)
+                                                    append_job_log(job_id, f"Escalation: Valid shared translation for cue {idx + 1}")
+                                                    recovered_cues.add(idx)
+                                                elif idx in context_verified_ids:
+                                                    # Early semantic verification succeeded in escalation
+                                                    _apply_mutation(idx, esc_text)
+                                                    if idx not in safe_ids: safe_ids.append(idx)
+                                                    append_job_log(job_id, f"Escalation: Model kept cue {idx + 1} (Semantic-verified Invariant: '{subs[idx].content.strip()}')")
+                                                    recovered_cues.add(idx)
+                                                else:
+                                                    append_job_log(job_id, f"Escalation: Rejected identical fallback for cue {idx + 1}")
                                         except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
                                             raise
                                         except Exception as e:
                                             append_job_log(job_id, f"Escalation failed for cue {idx + 1}: {e}")
+                                            exhausted_strategies.add(f"escalation:{idx}")
 
-                                esc_tasks = [escalate_one(idx) for idx in all_unresolved]
+                                esc_tasks = [escalate_one(idx) for idx in final_unresolved]
                                 if esc_tasks:
-                                    t_esc_start = time.time()
+                                    t_esc_start = time.perf_counter()
+                                    current_pipeline_stage = DeferStage.ESCALATION
                                     await asyncio.gather(*esc_tasks)
-                                    t_esc_end = time.time()
+                                    current_pipeline_stage = DeferStage.PRIMARY
+                                    t_esc_end = time.perf_counter()
                                     append_job_log(job_id, f"Timing: Escalation phase ({len(esc_tasks)} cues) completed in {round(t_esc_end - t_esc_start, 1)}s")
 
                                 # Final QA rerun after escalation
-                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids, allow_warnings=False)
+                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids, allow_warnings=False, source_language_name=source_subtitle.language_name if source_subtitle else "source")
                                 if qa_result["passed"]:
                                     break
 
-                                # 3. FAST FINAL RESCUE (Batch recovery for stubborn unresolved dialogue cues)
-                                real_unresolved = qa_result.get("real_untranslated_ids", [])
-                                wrong_lang_unresolved = qa_result.get("wrong_language_ids", [])
-                                dropped_unresolved = [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])]
-                                rescue_candidate_ids = [
-                                    idx for idx in sorted(set(real_unresolved + wrong_lang_unresolved + dropped_unresolved))
-                                    if idx not in safe_ids and subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>"
-                                ]
+                            # Early Stagnation / Exhaustion check at end of loop:
+                            # If all unresolved cues were attempted across all recovery stages without progress, stop redundant calls now!
+                            current_unresolved_after_recovery = set(
+                                qa_result.get("real_untranslated_ids", [])
+                                + qa_result.get("wrong_language_ids", [])
+                                + [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])]
+                            )
+                            unresolved_exhausted = [
+                                idx for idx in current_unresolved_after_recovery
+                                if f"escalation:{idx}" in exhausted_strategies
+                            ]
+                            if current_unresolved_after_recovery and len(unresolved_exhausted) == len(current_unresolved_after_recovery):
+                                append_job_log(job_id, f"QA Recovery: All {len(current_unresolved_after_recovery)} remaining unresolved cues exhausted all recovery strategies. Proceeding to QA fallback.")
+                                is_semantic_deadlock = True
+                                break
 
-                                if rescue_candidate_ids:
-                                    total_to_rescue = len(rescue_candidate_ids)
-                                    append_job_log(job_id, f"Fast Final Rescue: attempting {total_to_rescue} unresolved dialogue cues in one batch")
-                                    t_rescue_total_start = time.time()
+                            if current_unresolved_after_recovery and len(recovered_cues) == recovered_at_loop_start:
+                                append_job_log(job_id, f"QA Recovery: Stagnation detected ({len(current_unresolved_after_recovery)} unresolved cues unchanged with 0 progress). Breaking QA recovery loop.")
+                                is_semantic_deadlock = True
+                                break
 
-                                    def _make_rescue_items(target_ids):
-                                        items = []
-                                        for idx in target_ids:
-                                            ctx_before_parts = []
-                                            for b_idx in range(max(0, idx - 3), idx):
-                                                bc = subs[b_idx].content.strip()
-                                                if bc and bc != "<i></i>":
-                                                    btc = translated_subs[b_idx].content.strip()
-                                                    if btc and btc != "<i></i>" and is_meaningful_translation(bc, btc):
-                                                        ctx_before_parts.append(f"{bc} (SV: {btc})")
-                                                    else:
-                                                        ctx_before_parts.append(bc)
+                            # To prevent getting completely stuck in a loop, mark deadlock if this was the last loop
+                            if qa_loop_count == max_qa_loops:
+                                append_job_log(job_id, f"QA loop exhausted ({max_qa_loops} attempts). Stopping recovery loop for {lang_name}.")
+                                is_semantic_deadlock = True
 
-                                            ctx_after_parts = []
-                                            for a_idx in range(idx + 1, min(len(subs), idx + 4)):
-                                                ac = subs[a_idx].content.strip()
-                                                if ac and ac != "<i></i>":
-                                                    ctx_after_parts.append(ac)
-
-                                            items.append({
-                                                "id": idx,
-                                                "target": subs[idx].content,
-                                                "context_before": " | ".join(ctx_before_parts) if ctx_before_parts else "(none)",
-                                                "context_after": " | ".join(ctx_after_parts) if ctx_after_parts else "(none)"
-                                            })
-                                        return items
-
-                                    # Attempt 1
-                                    rescue_items_1 = _make_rescue_items(rescue_candidate_ids)
-                                    t_att1_start = time.time()
-                                    try:
-                                        results_1 = await self.translator.fast_final_rescue_batch(
-                                            rescue_items_1,
-                                            target_language=lang_name,
-                                            show_title=effective_tm_key or title or "",
-                                            attempt=1,
-                                            job_id=job_id
-                                        )
-                                    except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
-                                        raise
-                                    except Exception as e:
-                                        append_job_log(job_id, f"Fast Final Rescue attempt 1 failed: {e}")
-                                        results_1 = []
-                                    t_att1_end = time.time()
-
-                                    rec_att1_count = 0
-                                    seen_ids_1 = set()
-                                    for r in results_1:
-                                        if not isinstance(r, dict):
-                                            continue
-                                        rid = r.get("id")
-                                        if rid is None or rid not in rescue_candidate_ids:
-                                            continue
-                                        if rid in seen_ids_1:
-                                            continue
-                                        seen_ids_1.add(rid)
-                                        text = r.get("text", "")
-                                        if is_usable_translation(text) and is_meaningful_translation(subs[rid].content, text):
-                                             translated_subs[rid].content = text
-                                             recovered_cues.add(rid)
-                                             rec_att1_count += 1
-
-                                    append_job_log(job_id, f"Fast Final Rescue attempt 1: recovered {rec_att1_count}/{total_to_rescue} in {round(t_att1_end - t_att1_start, 1)}s")
-
-                                    still_unresolved_ids = [
-                                        idx for idx in rescue_candidate_ids
-                                        if not is_meaningful_translation(subs[idx].content, translated_subs[idx].content)
-                                    ]
-
-                                    # Attempt 2 (MAX ONE second attempt, only for remaining unresolved cues)
-                                    if still_unresolved_ids:
-                                        rescue_items_2 = _make_rescue_items(still_unresolved_ids)
-                                        t_att2_start = time.time()
-                                        try:
-                                            results_2 = await self.translator.fast_final_rescue_batch(
-                                                rescue_items_2,
-                                                target_language=lang_name,
-                                                show_title=effective_tm_key or title or "",
-                                                attempt=2,
-                                                job_id=job_id
-                                            )
-                                        except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
-                                            raise
-                                        except Exception as e:
-                                            append_job_log(job_id, f"Fast Final Rescue attempt 2 failed: {e}")
-                                            results_2 = []
-                                        t_att2_end = time.time()
-
-                                        rec_att2_count = 0
-                                        seen_ids_2 = set()
-                                        for r in results_2:
-                                            if not isinstance(r, dict):
-                                                continue
-                                            rid = r.get("id")
-                                            if rid is None or rid not in still_unresolved_ids:
-                                                continue
-                                            if rid in seen_ids_2:
-                                                continue
-                                            seen_ids_2.add(rid)
-                                            text = r.get("text", "")
-                                            if is_usable_translation(text) and is_meaningful_translation(subs[rid].content, text):
-                                                translated_subs[rid].content = text
-                                                recovered_cues.add(rid)
-                                                rec_att2_count += 1
-
-                                        append_job_log(job_id, f"Fast Final Rescue attempt 2: recovered {rec_att2_count}/{len(still_unresolved_ids)} in {round(t_att2_end - t_att2_start, 1)}s")
-
-                                    t_rescue_total_end = time.time()
-                                    final_unresolved_rescue = [
-                                        idx for idx in rescue_candidate_ids
-                                        if not is_meaningful_translation(subs[idx].content, translated_subs[idx].content)
-                                    ]
-                                    total_recovered_in_rescue = total_to_rescue - len(final_unresolved_rescue)
-
-                                    if not final_unresolved_rescue:
-                                        append_job_log(job_id, f"Fast Final Rescue completed: recovered {total_recovered_in_rescue}/{total_to_rescue} in {round(t_rescue_total_end - t_rescue_total_start, 1)}s")
-                                    else:
-                                        append_job_log(job_id, f"Fast Final Rescue completed: {len(final_unresolved_rescue)} cues remain unresolved")
-
-                                # Final QA rerun after Fast Final Rescue
-                                qa_result = qa_gate(subs, translated_subs, target_lang_code=lang_code, job_id=job_id, safe_ids=safe_ids, show_title=title or "", context_verified_ids=context_verified_ids, allow_warnings=False)
-                                if qa_result["passed"]:
-                                    break
-                                else:
-                                    # Clear partial state so next loop does a clean re-translate of failed batches
-                                    import app.core.db
-                                    data_dir = os.path.dirname(app.core.db.DB_PATH)
-                                    partial_file = os.path.join(data_dir, f"job_{job_id}_{lang_code}_partial.json") if job_id else None
-                                    if partial_file and os.path.exists(partial_file):
-                                        try:
-                                            with open(partial_file, "r", encoding="utf-8") as f:
-                                                pdata = json.load(f)
-                                            plines = pdata.get("lines", {})
-                                            all_failed = list(set(qa_result.get("real_untranslated_ids", []) + qa_result.get("wrong_language_ids", []) + [d["index"] - 1 for d in qa_result.get("dropped_details", [])]))
-                                            for uid in all_failed:
-                                                if str(uid) in plines:
-                                                    del plines[str(uid)]
-                                            tmp_p = partial_file + ".tmp"
-                                            with open(tmp_p, "w", encoding="utf-8") as f:
-                                                json.dump(pdata, f, ensure_ascii=False)
-                                            os.replace(tmp_p, partial_file)
-                                        except Exception as e:
-                                            append_job_log(job_id, f"Failed to clean partial state: {e}")
-
-                                    # Early Stagnation / Deadlock check at end of loop:
-                                    # If all unresolved cues were attempted across all recovery stages without progress, stop redundant calls now!
-                                    current_unresolved_after_rescue = set(qa_result.get("real_untranslated_ids", []) + qa_result.get("wrong_language_ids", []) + [d.get("index", d.get("id", 1)) - 1 for d in qa_result.get("dropped_details", [])])
-                                    if current_unresolved_after_rescue and len(recovered_cues) == recovered_at_loop_start:
-                                        append_job_log(job_id, f"QA Recovery: Stagnation detected ({len(current_unresolved_after_rescue)} unresolved cues unchanged with 0 progress). Breaking QA recovery loop.")
-                                        is_semantic_deadlock = True
-                                        break
-
-                                    # To prevent getting completely stuck in a loop, mark deadlock if this was the last loop
-                                    if qa_loop_count == max_qa_loops:
-                                        append_job_log(job_id, f"QA loop exhausted ({max_qa_loops} attempts). Stopping recovery loop for {lang_name}.")
-                                        is_semantic_deadlock = True
-
-                        except (ProviderUnavailableError, ProviderConfigurationError):
+                        except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
                             raise
                         except Exception as e:
                             append_job_log(job_id, f"QA Recovery/Escalation failed: {e}")
 
                 # ---------------------------------------------------------------------------
                 # POST-RECOVERY EVALUATION & QA FALLBACK
-                # If bounded recovery is exhausted and some unresolved English cues remain:
+                # If bounded recovery is exhausted and some unresolved source-language cues remain:
                 # Check if they meet semantic deadlock criteria and apply source preservation fallback.
                 # ---------------------------------------------------------------------------
                 real_unresolved_remaining = qa_result.get("real_untranslated_ids", [])
@@ -1833,7 +3295,7 @@ class SubtitlePipeline:
                         cue_id = subs[cue_idx].index if hasattr(subs[cue_idx], 'index') and subs[cue_idx].index else cue_idx + 1
                         append_job_log(job_id, f"Semantic deadlock detected for cue {cue_id}")
                         append_job_log(job_id, "QA fallback: preserving original source text")
-                        translated_subs[cue_idx].content = subs[cue_idx].content
+                        _apply_mutation(cue_idx, subs[cue_idx].content)
                         source_preserved_cues.add(cue_idx)
 
                 # Strict Sync Lock: guarantee 0ms drift
@@ -1841,6 +3303,37 @@ class SubtitlePipeline:
                     for idx in range(len(subs)):
                         translated_subs[idx].start = subs[idx].start
                         translated_subs[idx].end = subs[idx].end
+
+                if alignment_dirty:
+                    recheck_anomalies = list(mutated_cue_indices)
+                    alignment_rep = await self.check_semantic_cue_alignment(
+                        subs, translated_subs,
+                        target_language=lang_name,
+                        source_language=source_subtitle.language_name if source_subtitle else "English",
+                        show_title=title or "",
+                        job_id=job_id,
+                        batch_size=batch_size,
+                        anomaly_indices=recheck_anomalies if recheck_anomalies else None,
+                        incident_tracker=incident_tracker
+                    )
+                    found_incidents = alignment_rep.get("incidents", []) if isinstance(alignment_rep, dict) else []
+                    repairable_incidents = incident_tracker.get_repairable_incidents(found_incidents) if incident_tracker else []
+                    has_repairable_batches = bool(incident_tracker and incident_tracker.get_repairable_batches())
+                    if has_repairable_batches or repairable_incidents:
+                        await self._repair_semantic_alignment_incidents(
+                            subs, translated_subs,
+                            incidents=repairable_incidents,
+                            target_language=lang_name,
+                            source_language=source_subtitle.language_name if source_subtitle else "English",
+                            show_title=title or "",
+                            job_id=job_id,
+                            apply_mutation_fn=_apply_mutation,
+                            incident_tracker=incident_tracker
+                        )
+                    latest_alignment_issues = incident_tracker.get_all_active_issues() if incident_tracker else []
+                    latest_affected_indices = set(alignment_rep.get("affected_indices", [])) if isinstance(alignment_rep, dict) else set()
+                    mutated_cue_indices.clear()
+                    alignment_dirty = False
 
                 # Final QA Evaluation against central QA policy (allow_warnings=True)
                 qa_result = qa_gate(
@@ -1851,7 +3344,9 @@ class SubtitlePipeline:
                     safe_ids=safe_ids,
                     show_title=title or "",
                     context_verified_ids=context_verified_ids,
-                    allow_warnings=True
+                    allow_warnings=True,
+                    source_language_name=source_subtitle.language_name if source_subtitle else "source",
+                    semantic_alignment_issues=latest_alignment_issues if latest_alignment_issues else None,
                 )
 
                 # Final QA Log
@@ -1915,7 +3410,13 @@ class SubtitlePipeline:
                                     if orig_t and trans_t and orig_t != "<i></i>" and trans_t != "<i></i>" and orig_t != trans_t:
                                         tm_items.append({"original": orig_t, "translated": trans_t})
                                 if tm_items:
-                                    save_translation_memory_bulk(effective_tm_key, tm_items)
+                                    _src = source_subtitle.language if source_subtitle else "en"
+                                    save_translation_memory_bulk(
+                                        effective_tm_key,
+                                        tm_items,
+                                        source_language=_src,
+                                        target_language=lang_code
+                                    )
                             except Exception as e:
                                 logger.error(f"Failed to save translation memory: {e}")
 
@@ -1927,7 +3428,7 @@ class SubtitlePipeline:
                 source_preserved_count = len(source_preserved_cues)
 
                 summary_status = qa_result.get("status", "PASS" if qa_result["passed"] else "FAIL")
-                unresolved_label = f"{unresolved_count} unresolved English {'line' if unresolved_count == 1 else 'lines'}"
+                unresolved_label = f"{unresolved_count} unresolved {source_subtitle.language_name if source_subtitle else 'source'} {'line' if unresolved_count == 1 else 'lines'}"
                 fallback_label = f"{source_preserved_count} source-preserved {'fallback' if source_preserved_count == 1 else 'fallbacks'}"
 
                 summary_lines = [
@@ -1948,10 +3449,11 @@ class SubtitlePipeline:
                 if not qa_result["passed"]:
                     append_job_log(job_id, f"BLOCKED: {lang_name} translation failed QA. File NOT published.")
 
-            # Clean up temp file
-            if os.path.exists(temp_extracted_srt):
-                try: os.remove(temp_extracted_srt)
-                except: pass
+            # Clean up temp file (only if it was an EMBEDDED extraction, not an external subtitle)
+            if source_subtitle is not None and source_subtitle.origin == SourceOrigin.EMBEDDED:
+                if os.path.exists(temp_extracted_srt):
+                    try: os.remove(temp_extracted_srt)
+                    except: pass
 
             total_duration = round(time.time() - start_time, 2)
 
@@ -1980,11 +3482,17 @@ class SubtitlePipeline:
             }
             if final_status == "FAILED":
                 unresolved_count = len(qa_result.get("real_untranslated_ids", []))
-                if is_semantic_deadlock:
+                policy_failure_type = qa_result.get("policy_details", {}).get("failure_type")
+                if policy_failure_type == "structural":
+                    issues_str = "; ".join(qa_result.get("issues", []))
+                    update_args["error_message"] = f"Structural integrity failure: {issues_str}. File NOT published."
+                    append_job_log(job_id, f"PERMANENT FAILURE: Structural integrity failure ({issues_str}). File NOT published.")
+                elif is_semantic_deadlock:
                     update_args["error_message"] = f"Semantic deadlock: {unresolved_count} unresolved cues failed QA. Bounded recovery exhausted."
                     append_job_log(job_id, f"PERMANENT FAILURE: Semantic deadlock detected. Provider succeeded but bounded recovery exhausted with 0 progress. File NOT published.")
                 else:
-                    update_args["error_message"] = f"QA Gate failed: {unresolved_count} unresolved cues. File NOT published."
+                    issues_str = "; ".join(qa_result.get("issues", []))
+                    update_args["error_message"] = f"QA Gate failed: {unresolved_count} unresolved cues ({issues_str}). File NOT published."
                     append_job_log(job_id, f"PERMANENT FAILURE: QA Gate failed with {unresolved_count} unresolved cues. File NOT published.")
                 update_args["next_retry_at"] = None
             elif final_status in ["RECOVERING", "PARTIAL"]:
@@ -2012,7 +3520,8 @@ class SubtitlePipeline:
 
             update_job(job_id, **update_args)
 
-            await self._maybe_notify_jellyfin()
+            if output_files:
+                await self._notify_media_servers(video_path)
 
             return {
                 "status": final_status.lower(),
@@ -2022,9 +3531,10 @@ class SubtitlePipeline:
             }
 
         except DailyQuotaExhaustedError as e:
-            if os.path.exists(temp_extracted_srt):
-                try: os.remove(temp_extracted_srt)
-                except: pass
+            if source_subtitle is not None and source_subtitle.origin == SourceOrigin.EMBEDDED:
+                if os.path.exists(temp_extracted_srt):
+                    try: os.remove(temp_extracted_srt)
+                    except: pass
             total_duration = round(time.time() - start_time, 2)
 
             from datetime import datetime, timezone, timedelta
@@ -2067,27 +3577,23 @@ class SubtitlePipeline:
             )
             # Phase 1: Persist structured deferred metadata for FIFO scheduling
             try:
-                from app.core.db import update_deferred_metadata, DeferReason, DeferStage, get_job_by_id as _gjbi
-                _snap = _gjbi(job_id)
-                _stage = DeferStage.ESCALATION if (
-                    _snap and (_snap.get("defer_stage") == DeferStage.ESCALATION
-                               or _snap.get("processed_lines", 0) > 0)
-                ) else DeferStage.PRIMARY
+                from app.core.db import update_deferred_metadata, DeferReason
                 update_deferred_metadata(
                     job_id,
                     defer_reason     = DeferReason.PROVIDER_QUOTA,
                     waiting_provider = e.provider.lower(),
                     waiting_model    = None,
-                    defer_stage      = _stage,
+                    defer_stage      = current_pipeline_stage,
                 )
             except Exception:
                 pass
             return {"status": "deferred", "error": str(e), "job_id": job_id}
 
         except RequestBudgetExhaustedError as e:
-            if os.path.exists(temp_extracted_srt):
-                try: os.remove(temp_extracted_srt)
-                except: pass
+            if source_subtitle is not None and source_subtitle.origin == SourceOrigin.EMBEDDED:
+                if os.path.exists(temp_extracted_srt):
+                    try: os.remove(temp_extracted_srt)
+                    except: pass
             total_duration = round(time.time() - start_time, 2)
 
             from datetime import datetime, timezone, timedelta
@@ -2114,27 +3620,29 @@ class SubtitlePipeline:
             )
             # Phase 1: Persist structured deferred metadata for FIFO scheduling
             try:
-                from app.core.db import update_deferred_metadata, DeferReason, DeferStage, get_job_by_id as _gjbi2
+                from app.core.db import update_deferred_metadata, DeferReason, get_job_by_id as _gjbi2
                 _snap2 = _gjbi2(job_id)
-                _pinned_prov = (
-                    (_snap2.get("primary_provider") or e.provider) if _snap2 else e.provider
-                ).lower()
-                _pinned_model = (_snap2.get("primary_model") or "") if _snap2 else ""
+
+                _waiting_prov = (e.provider.lower() if e.provider else "") or (
+                    _snap2.get("primary_provider", "") if _snap2 else ""
+                )
+
                 update_deferred_metadata(
                     job_id,
                     defer_reason     = DeferReason.LOCAL_RPD,
-                    waiting_provider = _pinned_prov,
-                    waiting_model    = _pinned_model or None,
-                    defer_stage      = DeferStage.PRIMARY,
+                    waiting_provider = _waiting_prov,
+                    waiting_model    = None,
+                    defer_stage      = current_pipeline_stage,
                 )
             except Exception:
                 pass
             return {"status": "deferred", "error": str(e), "job_id": job_id}
 
         except ProviderConfigurationError as e:
-            if os.path.exists(temp_extracted_srt):
-                try: os.remove(temp_extracted_srt)
-                except: pass
+            if source_subtitle is not None and source_subtitle.origin == SourceOrigin.EMBEDDED:
+                if os.path.exists(temp_extracted_srt):
+                    try: os.remove(temp_extracted_srt)
+                    except: pass
             total_duration = round(time.time() - start_time, 2)
             append_job_log(job_id, f"CRITICAL CONFIGURATION ERROR: {str(e)}")
             update_job(
@@ -2148,7 +3656,9 @@ class SubtitlePipeline:
 
 
         except ProviderUnavailableError as e:
-            if os.path.exists(temp_extracted_srt):
+            # Only delete temp file if it was an embedded extraction (not an external subtitle)
+            _src_is_temp = source_subtitle is not None and source_subtitle.origin == SourceOrigin.EMBEDDED
+            if _src_is_temp and os.path.exists(temp_extracted_srt):
                 try: os.remove(temp_extracted_srt)
                 except: pass
             total_duration = round(time.time() - start_time, 2)
@@ -2180,7 +3690,9 @@ class SubtitlePipeline:
             )
             return {"status": "waiting_provider", "error": str(e), "job_id": job_id}
         except Exception as e:
-            if os.path.exists(temp_extracted_srt):
+            # Only delete temp file if it was an embedded extraction (not an external subtitle)
+            _src_is_temp = source_subtitle is not None and source_subtitle.origin == SourceOrigin.EMBEDDED
+            if _src_is_temp and os.path.exists(temp_extracted_srt):
                 try: os.remove(temp_extracted_srt)
                 except: pass
             total_duration = round(time.time() - start_time, 2)

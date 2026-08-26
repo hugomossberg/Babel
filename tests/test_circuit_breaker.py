@@ -578,8 +578,8 @@ def test_canonical_scope_key_generation():
     key_sonnet = build_scope_key("openrouter", scope_type="model", scope_id="anthropic/claude-sonnet")
     assert key_sonnet == "openrouter:model:anthropic/claude-sonnet"
 
-    key_deepseek = build_scope_key("openrouter", scope_type="model", scope_id="deepseek/deepseek-chat")
-    assert key_deepseek == "openrouter:model:deepseek/deepseek-chat"
+    key_deepseek = build_scope_key("openrouter", scope_type="model", scope_id="deepseek/deepseek-v4-flash")
+    assert key_deepseek == "openrouter:model:deepseek/deepseek-v4-flash"
 
     # Credential scopes
     key_cred_a = build_scope_key("openrouter", scope_type="credential", scope_id="key-a")
@@ -635,12 +635,12 @@ def test_multi_models_under_same_provider_separate_storage():
 
     # 2. Model B must be completely ACTIVE and unaffected
     with patch("app.core.quota._utcnow", return_value=now):
-        info_b = get_provider_block_info("openrouter", scope_type="model", scope_id="deepseek/deepseek-chat")
+        info_b = get_provider_block_info("openrouter", scope_type="model", scope_id="deepseek/deepseek-v4-flash")
         assert info_b["blocked"] is False
         assert info_b["state"] == "ACTIVE"
 
         # Model B can claim dispatch slot and proceed
-        allowed_b, res_b = acquire_dispatch_slot("openrouter", scope_type="model", scope_id="deepseek/deepseek-chat")
+        allowed_b, res_b = acquire_dispatch_slot("openrouter", scope_type="model", scope_id="deepseek/deepseek-v4-flash")
         assert allowed_b is True
         assert res_b["state"] == "ACTIVE"
         assert res_b["is_probe"] is False

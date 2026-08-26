@@ -210,7 +210,9 @@ class TestDropdownModelCatalogSemantics:
 
     KNOWN_INVALID = {"gemini-3.5-pro", "gemini-4.0-flash", "gpt-5.6-turbo"}
     KNOWN_VALID_GEMINI = {"gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash"}
-    KNOWN_VALID_OPENAI = {"gpt-4o-mini", "gpt-4o", "o1-mini", "gpt-4-turbo"}
+    # Updated 2026-08-26: o1-mini and gpt-4-turbo removed from recommended presets (deprecated/legacy).
+    # gpt-5.6 family added as current baseline. gpt-4o-mini and gpt-4o retained as stable options.
+    KNOWN_VALID_OPENAI = {"gpt-4o-mini", "gpt-4o", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"}
 
     def test_E_no_invalid_models_in_any_dropdown(self):
         """No invalid model IDs must appear in any dropdown in the HTML"""
@@ -221,19 +223,25 @@ class TestDropdownModelCatalogSemantics:
             )
 
     def test_E_valid_gemini_models_present(self):
-        """All known valid Gemini models should be in the dropdown"""
-        options = self._get_html_options()
+        """All known valid Gemini models should be in the backend model catalog.
+        Models are served dynamically via /api/settings/models endpoint (central catalog),
+        not hardcoded in HTML static options."""
+        from app.core.ai_providers import get_provider_catalog
+        catalog_ids = {m["id"] for m in get_provider_catalog("gemini")}
         for model_id in self.KNOWN_VALID_GEMINI:
-            assert model_id in options, (
-                f"Valid Gemini model '{model_id}' missing from UI dropdowns."
+            assert model_id in catalog_ids, (
+                f"Valid Gemini model '{model_id}' missing from Gemini model catalog."
             )
 
     def test_E_valid_openai_models_present(self):
-        """All known valid OpenAI models should be in the dropdown"""
-        options = self._get_html_options()
+        """All known valid OpenAI models should be in the backend model catalog.
+        Models are served dynamically via /api/settings/models endpoint (central catalog),
+        not hardcoded in HTML static options."""
+        from app.core.ai_providers import get_provider_catalog
+        catalog_ids = {m["id"] for m in get_provider_catalog("openai")}
         for model_id in self.KNOWN_VALID_OPENAI:
-            assert model_id in options, (
-                f"Valid OpenAI model '{model_id}' missing from UI dropdowns."
+            assert model_id in catalog_ids, (
+                f"Valid OpenAI model '{model_id}' missing from OpenAI model catalog."
             )
 
 

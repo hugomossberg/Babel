@@ -414,7 +414,7 @@
     <!-- 2. MEDIA FILES TAB -->
     <section x-show="currentTab === 'media'" x-cloak>
       <div class="space-y-6">
-        
+
         <!-- Header Controls -->
         <div class="flex items-center justify-between bg-slate-900/60 border border-slate-800 rounded-2xl p-5 shadow-xl flex-wrap gap-4">
           <div class="flex items-center space-x-3">
@@ -487,10 +487,10 @@
                             :class="getSelectedSeason(show.title) === season ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30' : 'bg-slate-800/80 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
                             class="px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 whitespace-nowrap">
                       <span x-text="season === 'All' ? 'All Seasons' : season"></span>
-                      <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono" 
+                      <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
                             :class="getSelectedSeason(show.title) === season ? 'bg-purple-800 text-purple-100' : 'bg-slate-700 text-slate-300'"
                             x-text="getSeasonEpisodeCount(show, season)"></span>
-                      <span x-show="getSeasonMissingCount(show, season) > 0" 
+                      <span x-show="getSeasonMissingCount(show, season) > 0"
                             class="text-[10px] px-1.5 py-0.2 rounded-full font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 font-mono"
                             x-text="getSeasonMissingCount(show, season) + ' missing'"></span>
                     </button>
@@ -869,11 +869,11 @@
             <div class="space-y-3" x-show="usageStats.has_sufficient_history">
               <div class="grid grid-cols-2 gap-3 text-xs">
                 <div class="p-3 bg-slate-950 rounded-xl border border-slate-800">
-                  <div class="text-[11px] text-slate-400">Avg AI calls / episode</div>
+                  <div class="text-[11px] text-slate-400">Avg AI calls</div>
                   <div class="text-lg font-bold font-mono text-purple-300 mt-0.5" x-text="usageStats.average_calls_per_job ? usageStats.average_calls_per_job.toFixed(1) : '—'"></div>
                 </div>
                 <div class="p-3 bg-slate-950 rounded-xl border border-slate-800">
-                  <div class="text-[11px] text-slate-400">Avg cost / episode</div>
+                  <div class="text-[11px] text-slate-400">Avg cost</div>
                   <div class="text-lg font-bold font-mono text-emerald-400 mt-0.5" x-text="formatCost(usageStats.average_estimated_cost_per_job)"></div>
                 </div>
               </div>
@@ -949,7 +949,7 @@
     <!-- 4. SETTINGS TAB -->
     <section x-show="currentTab === 'settings'" x-cloak>
       <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
-        
+
         <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 space-y-1 h-fit">
           <button @click="settingsTab = 'ai'" :class="settingsTab === 'ai' ? 'bg-purple-600/20 text-purple-300 border-purple-500/30' : 'text-slate-400 hover:text-white'" class="w-full text-left px-4 py-2.5 rounded-xl border border-transparent text-sm font-medium transition flex items-center gap-3">
             <i class="fa-solid fa-brain w-4"></i> AI Engine
@@ -975,71 +975,83 @@
         </div>
 
         <div class="md:col-span-3 bg-slate-900/60 border border-slate-800 rounded-2xl p-6 shadow-xl">
-          
+
           <!-- SUB-TAB 1: AI ENGINE -->
           <div x-show="settingsTab === 'ai'">
             <h3 class="text-lg font-bold text-white mb-1">AI Translation Engine</h3>
-            <p class="text-xs text-slate-400 mb-6">Choose your AI provider (Google Gemini or OpenAI) and configure parameters.</p>
+            <p class="text-xs text-slate-400 mb-6">Choose your AI translation provider and configure parameters.</p>
 
             <div class="space-y-6">
               <!-- Primary Provider -->
               <div>
                 <label class="block text-sm font-medium text-slate-300 mb-1.5">AI Provider</label>
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <button type="button" @click="settingsData.ai.ai_provider = 'gemini'; aiTestResult = ''; aiTestSuccess = false;" :class="settingsData.ai.ai_provider === 'gemini' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
+                  <!-- Row 1 -->
+                  <button type="button" @click="selectAIProvider('gemini')" :class="settingsData.ai.ai_provider === 'gemini' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
                     <i class="fa-brands fa-google text-lg text-purple-400"></i>
                     <span class="text-xs font-semibold">Google Gemini</span>
                   </button>
-                  <button type="button" @click="settingsData.ai.ai_provider = 'openai'; aiTestResult = ''; aiTestSuccess = false;" :class="settingsData.ai.ai_provider === 'openai' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
+                  <button type="button" @click="selectAIProvider('openai')" :class="settingsData.ai.ai_provider === 'openai' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
                     <i class="fa-solid fa-bolt text-lg text-emerald-400"></i>
                     <span class="text-xs font-semibold">OpenAI</span>
                   </button>
-                  <button type="button" @click="settingsData.ai.ai_provider = 'deepl'; aiTestResult = ''; aiTestSuccess = false;" :class="settingsData.ai.ai_provider === 'deepl' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
+                  <button type="button" @click="selectAIProvider('deepl')" :class="settingsData.ai.ai_provider === 'deepl' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
                     <i class="fa-solid fa-language text-lg text-blue-400"></i>
                     <span class="text-xs font-semibold">DeepL</span>
                   </button>
-                  <button type="button" @click="settingsData.ai.ai_provider = 'ollama'; aiTestResult = ''; aiTestSuccess = false;" :class="settingsData.ai.ai_provider === 'ollama' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
+                  <button type="button" @click="selectAIProvider('ollama')" :class="settingsData.ai.ai_provider === 'ollama' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
                     <i class="fa-solid fa-server text-lg text-indigo-400"></i>
                     <span class="text-xs font-semibold">Ollama</span>
+                  </button>
+                  <!-- Row 2 -->
+                  <button type="button" @click="selectAIProvider('anthropic')" :class="settingsData.ai.ai_provider === 'anthropic' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
+                    <i class="fa-solid fa-brain text-lg text-amber-400"></i>
+                    <span class="text-xs font-semibold">Anthropic</span>
+                  </button>
+                  <button type="button" @click="selectAIProvider('openrouter')" :class="settingsData.ai.ai_provider === 'openrouter' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
+                    <i class="fa-solid fa-network-wired text-lg text-rose-400"></i>
+                    <span class="text-xs font-semibold">OpenRouter</span>
+                  </button>
+                  <button type="button" @click="selectAIProvider('deepseek')" :class="settingsData.ai.ai_provider === 'deepseek' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
+                    <i class="fa-solid fa-cube text-lg text-cyan-400"></i>
+                    <span class="text-xs font-semibold">DeepSeek</span>
+                  </button>
+                  <button type="button" @click="selectAIProvider('custom')" :class="settingsData.ai.ai_provider === 'custom' ? 'border-purple-500 bg-purple-500/10 text-white' : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'" class="p-3.5 rounded-xl border text-center transition flex flex-col items-center gap-2">
+                    <i class="fa-solid fa-sliders text-lg text-teal-400"></i>
+                    <span class="text-xs font-semibold">Custom</span>
                   </button>
                 </div>
               </div>
 
-              <!-- Primary Model Selection -->
-              <div>
-                <!-- Gemini Models -->
-                <div x-show="settingsData.ai.ai_provider === 'gemini'">
-                  <label class="block text-sm font-medium text-slate-300 mb-1.5">Gemini Model</label>
-                  <div class="relative">
-                    <select x-model="settingsData.ai.gemini_model" @change="aiTestResult = ''; aiTestSuccess = false;" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
-                      <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite</option>
-                      <option value="gemini-3.5-flash">gemini-3.5-flash</option>
-                      <option value="gemini-3.6-flash">gemini-3.6-flash</option>
-                      <option value="gemini-3.7-flash">gemini-3.7-flash</option>
-                    </select>
-                  </div>
-                </div>
 
-                <!-- OpenAI Models -->
-                <div x-show="settingsData.ai.ai_provider === 'openai'">
-                  <label class="block text-sm font-medium text-slate-300 mb-1.5">OpenAI Model</label>
-                  <select x-model="settingsData.ai.openai_model" @change="aiTestResult = ''; aiTestSuccess = false;" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
-                    <option value="gpt-4o-mini">gpt-4o-mini</option>
-                    <option value="gpt-4o">gpt-4o</option>
-                    <option value="o1-mini">o1-mini</option>
-                    <option value="gpt-4-turbo">gpt-4-turbo</option>
+              <!-- Primary Model Selection: DeepL -->
+              <div x-show="settingsData.ai.ai_provider === 'deepl'">
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">DeepL Model Strategy</label>
+                <select x-model="settingsData.ai.deepl_model_type" @change="aiTestResult = ''; aiTestSuccess = false;" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                  <option value="prefer_quality_optimized">Prefer Quality Optimized (Recommended)</option>
+                  <option value="quality_optimized">Quality Optimized</option>
+                  <option value="latency_optimized">Latency Optimized</option>
+                </select>
+                <span class="text-xs text-slate-500 mt-1 block">DeepL provides dedicated neural translation without general LLM prompt parameters.</span>
+              </div>
+
+              <!-- Primary Model Selection: LLM Providers -->
+              <div x-show="settingsData.ai.ai_provider !== 'deepl'">
+                <div class="flex items-center justify-between mb-1.5">
+                  <label class="block text-sm font-medium text-slate-300" x-text="getProviderLabel(settingsData.ai.ai_provider) + ' Model'"></label>
+                  <button type="button" @click="fetchProviderModels(settingsData.ai.ai_provider, true)" class="text-xs text-purple-400 hover:text-purple-300 transition flex items-center gap-1">
+                    <i class="fa-solid fa-arrows-rotate" :class="fetchingModels[settingsData.ai.ai_provider] ? 'fa-spin' : ''"></i> Refresh Models
+                  </button>
+                </div>
+                <div class="relative">
+                  <select x-model="settingsData.ai[currentModelKey(settingsData.ai.ai_provider)]" @change="aiTestResult = ''; aiTestSuccess = false;" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                    <template x-for="m in (fetchedModels[settingsData.ai.ai_provider] || [])" :key="m.id">
+                      <option :value="m.id" x-text="m.name || m.id"></option>
+                    </template>
+                    <option :value="settingsData.ai[currentModelKey(settingsData.ai.ai_provider)]" x-show="settingsData.ai[currentModelKey(settingsData.ai.ai_provider)] && !modelInList(settingsData.ai.ai_provider, settingsData.ai[currentModelKey(settingsData.ai.ai_provider)])">
+                      <span x-text="settingsData.ai[currentModelKey(settingsData.ai.ai_provider)]"></span>
+                    </option>
                   </select>
-                </div>
-
-                <!-- DeepL note -->
-                <div x-show="settingsData.ai.ai_provider === 'deepl'" class="p-4 bg-slate-950/70 border border-slate-800 rounded-xl text-xs text-slate-400">
-                  <i class="fa-solid fa-circle-info text-blue-400 mr-1.5"></i> DeepL API uses official neural translation engine with formality support.
-                </div>
-
-                <!-- Ollama Models -->
-                <div x-show="settingsData.ai.ai_provider === 'ollama'">
-                  <label class="block text-sm font-medium text-slate-300 mb-1.5">Ollama Model</label>
-                  <input type="text" x-model="settingsData.ai.ollama_model" @input="aiTestResult = ''; aiTestSuccess = false;" placeholder="llama3, mistral, qwen..." class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
                 </div>
               </div>
 
@@ -1048,7 +1060,7 @@
                 <label class="block text-sm font-medium text-slate-300 mb-1.5">Google Gemini API Key</label>
                 <div class="flex gap-2">
                   <input type="password" x-model="settingsData.ai.gemini_api_key" placeholder="Paste your Gemini API Key here..." class="flex-1 px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition">
-                  <button type="button" @click="testAIConnection()" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
+                  <button type="button" @click="testAIConnection('gemini')" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
                     <i class="fa-solid" :class="testingAI ? 'fa-spinner fa-spin' : 'fa-plug'"></i> Test Connection
                   </button>
                 </div>
@@ -1060,19 +1072,69 @@
                 <label class="block text-sm font-medium text-slate-300 mb-1.5">OpenAI API Key</label>
                 <div class="flex gap-2">
                   <input type="password" x-model="settingsData.ai.openai_api_key" placeholder="sk-proj-..." class="flex-1 px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition">
-                  <button type="button" @click="testAIConnection()" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
+                  <button type="button" @click="testAIConnection('openai')" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
                     <i class="fa-solid" :class="testingAI ? 'fa-spinner fa-spin' : 'fa-plug'"></i> Test Connection
                   </button>
                 </div>
                 <div x-show="aiTestResult" class="mt-2 text-xs font-medium" :class="aiTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="aiTestResult"></div>
               </div>
 
-              <!-- DeepL API Key -->
+              <!-- Anthropic API Key -->
+              <div x-show="settingsData.ai.ai_provider === 'anthropic' || (settingsData.ai.escalate_to_pro && settingsData.ai.escalation_provider === 'anthropic')">
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">Anthropic API Key</label>
+                <div class="flex gap-2">
+                  <input type="password" x-model="settingsData.ai.anthropic_api_key" placeholder="sk-ant-..." class="flex-1 px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition">
+                  <button type="button" @click="testAIConnection('anthropic')" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
+                    <i class="fa-solid" :class="testingAI ? 'fa-spinner fa-spin' : 'fa-plug'"></i> Test Connection
+                  </button>
+                </div>
+                <div x-show="aiTestResult" class="mt-2 text-xs font-medium" :class="aiTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="aiTestResult"></div>
+              </div>
+
+              <!-- OpenRouter API Key -->
+              <div x-show="settingsData.ai.ai_provider === 'openrouter' || (settingsData.ai.escalate_to_pro && settingsData.ai.escalation_provider === 'openrouter')">
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">OpenRouter API Key</label>
+                <div class="flex gap-2">
+                  <input type="password" x-model="settingsData.ai.openrouter_api_key" placeholder="sk-or-..." class="flex-1 px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition">
+                  <button type="button" @click="testAIConnection('openrouter')" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
+                    <i class="fa-solid" :class="testingAI ? 'fa-spinner fa-spin' : 'fa-plug'"></i> Test Connection
+                  </button>
+                </div>
+                <div x-show="aiTestResult" class="mt-2 text-xs font-medium" :class="aiTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="aiTestResult"></div>
+              </div>
+
+              <!-- DeepSeek API Key -->
+              <div x-show="settingsData.ai.ai_provider === 'deepseek' || (settingsData.ai.escalate_to_pro && settingsData.ai.escalation_provider === 'deepseek')">
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">DeepSeek API Key</label>
+                <div class="flex gap-2">
+                  <input type="password" x-model="settingsData.ai.deepseek_api_key" placeholder="sk-..." class="flex-1 px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition">
+                  <button type="button" @click="testAIConnection('deepseek')" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
+                    <i class="fa-solid" :class="testingAI ? 'fa-spinner fa-spin' : 'fa-plug'"></i> Test Connection
+                  </button>
+                </div>
+                <div x-show="aiTestResult" class="mt-2 text-xs font-medium" :class="aiTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="aiTestResult"></div>
+              </div>
+
+              <!-- Custom OpenAI Server Endpoint & Key -->
+              <div x-show="settingsData.ai.ai_provider === 'custom' || (settingsData.ai.escalate_to_pro && settingsData.ai.escalation_provider === 'custom')">
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">Custom OpenAI Server Endpoint</label>
+                <input type="text" x-model="settingsData.ai.custom_openai_url" placeholder="http://localhost:8000/v1" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm mb-3">
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">Custom API Key <span class="text-xs text-slate-500 font-normal">(Optional if local)</span></label>
+                <div class="flex gap-2">
+                  <input type="password" x-model="settingsData.ai.custom_openai_api_key" placeholder="sk-... or leave blank if none" class="flex-1 px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition">
+                  <button type="button" @click="testAIConnection('custom')" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
+                    <i class="fa-solid" :class="testingAI ? 'fa-spinner fa-spin' : 'fa-plug'"></i> Test Connection
+                  </button>
+                </div>
+                <div x-show="aiTestResult" class="mt-2 text-xs font-medium" :class="aiTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="aiTestResult"></div>
+              </div>
+
+              <!-- DeepL Authentication Key -->
               <div x-show="settingsData.ai.ai_provider === 'deepl'">
                 <label class="block text-sm font-medium text-slate-300 mb-1.5">DeepL Authentication Key</label>
                 <div class="flex gap-2">
                   <input type="password" x-model="settingsData.ai.deepl_api_key" placeholder="DeepL API Free / Pro Auth Key..." class="flex-1 px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition">
-                  <button type="button" @click="testAIConnection()" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
+                  <button type="button" @click="testAIConnection('deepl')" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
                     <i class="fa-solid" :class="testingAI ? 'fa-spinner fa-spin' : 'fa-plug'"></i> Test Connection
                   </button>
                 </div>
@@ -1080,17 +1142,16 @@
               </div>
 
               <!-- Ollama Server URL -->
-              <div x-show="settingsData.ai.ai_provider === 'ollama'">
+              <div x-show="settingsData.ai.ai_provider === 'ollama' || (settingsData.ai.escalate_to_pro && settingsData.ai.escalation_provider === 'ollama')">
                 <label class="block text-sm font-medium text-slate-300 mb-1.5">Ollama Server Endpoint</label>
                 <div class="flex gap-2">
                   <input type="text" x-model="settingsData.ai.ollama_url" placeholder="http://localhost:11434" class="flex-1 px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition">
-                  <button type="button" @click="testAIConnection()" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
+                  <button type="button" @click="testAIConnection('ollama')" :disabled="testingAI" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl text-xs font-semibold text-purple-300 border border-purple-900/40 transition flex items-center gap-1.5">
                     <i class="fa-solid" :class="testingAI ? 'fa-spinner fa-spin' : 'fa-plug'"></i> Test Connection
                   </button>
                 </div>
                 <div x-show="aiTestResult" class="mt-2 text-xs font-medium" :class="aiTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="aiTestResult"></div>
               </div>
-
 
               <!-- Escalation Model -->
               <div class="pt-4 border-t border-slate-700/50 mt-4 mb-4">
@@ -1103,36 +1164,51 @@
                       Automatically retry stubborn lines with a stronger model and previous/next dialogue context.
                     </p>
                   </div>
-                  <input type="checkbox" x-model="settingsData.ai.escalate_to_pro" class="rounded bg-slate-800 border-slate-700 text-orange-500 focus:ring-orange-400 w-5 h-5">
+                  <input type="checkbox" x-model="settingsData.ai.escalate_to_pro" @change="if(settingsData.ai.escalate_to_pro && settingsData.ai.escalation_provider && settingsData.ai.escalation_provider !== 'none') fetchProviderModels(settingsData.ai.escalation_provider);" class="rounded bg-slate-800 border-slate-700 text-orange-500 focus:ring-orange-400 w-5 h-5">
                 </div>
-                
+
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-6" x-show="settingsData.ai.escalate_to_pro">
+
                   <div class="space-y-2">
                     <label class="block text-sm font-medium text-slate-300">Fallback Provider</label>
-                    <select x-model="settingsData.ai.escalation_provider" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                    <select x-model="settingsData.ai.escalation_provider" @change="onEscalationProviderChange()" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
                       <option value="none">Same as Primary</option>
                       <option value="gemini">Google Gemini</option>
                       <option value="openai">OpenAI</option>
+                      <option value="anthropic">Anthropic</option>
+                      <option value="openrouter">OpenRouter</option>
+                      <option value="deepseek">DeepSeek</option>
+                      <option value="custom">Custom OpenAI-compatible</option>
+                      <option value="ollama">Ollama</option>
                     </select>
                   </div>
-                  <div class="space-y-2" x-show="settingsData.ai.escalation_provider === 'gemini'">
-                    <label class="block text-sm font-medium text-slate-300">Fallback Model</label>
+
+                  <div class="space-y-2" x-show="settingsData.ai.escalation_provider === 'none'">
+                    <label class="block text-sm font-medium text-slate-400">Fallback Model</label>
+                    <div class="px-4 py-2.5 bg-slate-950/60 border border-slate-800 rounded-xl text-slate-500 text-sm flex items-center gap-2">
+                      <i class="fa-solid fa-link text-slate-600 text-xs"></i>
+                      <span>Same as Primary (<strong class="text-slate-300 font-mono" x-text="settingsData.ai[currentModelKey(settingsData.ai.ai_provider)] || 'Default'"></strong>)</span>
+                    </div>
+                  </div>
+
+                  <div class="space-y-2" x-show="settingsData.ai.escalation_provider !== 'none'">
+                    <div class="flex items-center justify-between">
+                      <label class="block text-sm font-medium text-slate-300">Fallback Model</label>
+                      <button type="button" @click="fetchProviderModels(settingsData.ai.escalation_provider, true)" class="text-xs text-purple-400 hover:text-purple-300 transition flex items-center gap-1">
+                        <i class="fa-solid fa-arrows-rotate" :class="fetchingModels[settingsData.ai.escalation_provider] ? 'fa-spin' : ''"></i> Refresh Models
+                      </button>
+                    </div>
+
                     <select x-model="settingsData.ai.escalation_model" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
-                      <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite</option>
-                      <option value="gemini-3.5-flash">gemini-3.5-flash</option>
-                      <option value="gemini-3.6-flash">gemini-3.6-flash</option>
-                      <option value="gemini-3.7-flash">gemini-3.7-flash</option>
+                      <template x-for="m in (fetchedModels[settingsData.ai.escalation_provider] || [])" :key="m.id">
+                        <option :value="m.id" x-text="m.name || m.id"></option>
+                      </template>
+                      <option :value="settingsData.ai.escalation_model" x-show="settingsData.ai.escalation_model && !modelInList(settingsData.ai.escalation_provider, settingsData.ai.escalation_model)">
+                        <span x-text="settingsData.ai.escalation_model"></span>
+                      </option>
                     </select>
                   </div>
-                  <div class="space-y-2" x-show="settingsData.ai.escalation_provider === 'openai'">
-                    <label class="block text-sm font-medium text-slate-300">Fallback Model</label>
-                    <select x-model="settingsData.ai.escalation_model" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
-                      <option value="gpt-4o-mini">gpt-4o-mini</option>
-                      <option value="gpt-4o">gpt-4o</option>
-                      <option value="o1-mini">o1-mini</option>
-                      <option value="gpt-4-turbo">gpt-4-turbo</option>
-                    </select>
-                  </div>
+
                 </div>
               </div>
 
@@ -1234,7 +1310,7 @@
                     <i class="fa-solid fa-file-video text-indigo-400"></i> Extract Embedded Source Subtitles
                   </h4>
                   <p class="text-xs text-slate-400 mt-0.5">
-                    Extracts embedded English subtitles from MKV/MP4 as source (Priority 1 for best sync accuracy).
+                    Extracts embedded source subtitles from MKV/MP4 containers (Priority 1 — highest sync confidence). The best available track is selected automatically.
                   </p>
                 </div>
                 <input type="checkbox" x-model="settingsData.modules.extract_source_embedded" class="rounded bg-slate-800 border-slate-700 text-purple-600 focus:ring-purple-500 w-5 h-5">
@@ -1266,20 +1342,9 @@
                 <input type="checkbox" x-model="settingsData.modules.strict_sync_lock" class="rounded bg-slate-800 border-slate-700 text-purple-600 focus:ring-purple-500 w-5 h-5">
               </div>
 
-              <!-- Module 6: Original Language Guard -->
-              <div class="p-4 bg-slate-950 rounded-2xl border border-slate-800 flex items-center justify-between">
-                <div>
-                  <h4 class="font-bold text-sm text-white flex items-center gap-2">
-                    <i class="fa-solid fa-shield-halved text-blue-400"></i> Original Language Guard
-                  </h4>
-                  <p class="text-xs text-slate-400 mt-0.5">
-                    Prevents AI translation if the video's primary audio already matches your target language. Protects domestic movies from bad round-trip translations.
-                  </p>
-                </div>
-                <input type="checkbox" x-model="settingsData.modules.original_language_guard" class="rounded bg-slate-800 border-slate-700 text-purple-600 focus:ring-purple-500 w-5 h-5">
-              </div>
-
-
+              <!-- Module 6: Original Language Guard — REMOVED in v2.3.43
+                   Source-language detection is now handled automatically by the SourceResolver.
+                   Audio language is used as a prioritisation signal, not a blocker. -->
 
               <div class="pt-4 flex justify-end">
                 <button @click="saveModulesSettings()" class="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium shadow-lg shadow-purple-600/30 transition text-sm">
@@ -1354,7 +1419,7 @@
                 <input type="text" x-model="settingsData.folders.media_movies_path" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
                 <span class="text-xs text-slate-500 mt-1 block">Default: <code>/movies</code> (or <code>/media/movies</code>)</span>
               </div>
-              
+
               <div class="pt-4 border-t border-slate-800">
                 <h4 class="text-sm font-bold text-white mb-1">Docker Path Mapping (Sonarr/Radarr Webhooks)</h4>
                 <p class="text-xs text-slate-400 mb-4">If Sonarr and Babel use different volume mounts, map the remote path to the local path.</p>
@@ -1384,7 +1449,7 @@
             <p class="text-xs text-slate-400 mb-6">Choose how Babel handles subtitles: Hybrid Mode with Bazarr, or Pure AI Direct.</p>
 
             <div class="space-y-6">
-              
+
               <!-- SMART PIPELINE MODE CARDS -->
               <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <!-- Mode 1: Hybrid Mode -->
@@ -1417,7 +1482,7 @@
                       </div>
                       <div>
                         <h4 class="font-bold text-sm text-white">Pure AI Mode</h4>
-                        <span class="text-[10px] text-emerald-300 font-mono">Instant 0s Delay / AI First</span>
+                        <span class="text-[10px] text-emerald-300 font-mono">AI First</span>
                       </div>
                     </div>
                     <div class="w-5 h-5 rounded-full border flex items-center justify-center" :class="!settingsData.integrations.enable_bazarr_check ? 'border-emerald-500 bg-emerald-600' : 'border-slate-700 bg-slate-900'">
@@ -1425,7 +1490,7 @@
                     </div>
                   </div>
                   <p class="text-xs text-slate-400 leading-relaxed">
-                    Babel extracts embedded tracks and translates immediately, bypassing Bazarr searches entirely. Runs completely standalone (no external dependencies).
+                    Babel skips Bazarr searches and immediately uses the best available source subtitle for AI translation.
                   </p>
                 </div>
               </div>
@@ -1438,7 +1503,9 @@
                     <span>Bazarr Integration Parameters</span>
                   </div>
                   <div class="flex items-center gap-2">
-                    <span class="text-xs font-mono" :class="settingsData.integrations.bazarr_container_status && settingsData.integrations.bazarr_container_status.running ? 'text-emerald-400' : 'text-slate-500'" x-text="settingsData.integrations.bazarr_container_status && settingsData.integrations.bazarr_container_status.running ? '● Container Running' : '○ Container Stopped'"></span>
+                    <template x-if="settingsData.integrations.bazarr_container_status && settingsData.integrations.bazarr_container_status.available && settingsData.integrations.bazarr_container_status.status !== 'not_found'">
+                      <span class="text-xs font-mono" :class="settingsData.integrations.bazarr_container_status.running || bazarrTestSuccess ? 'text-emerald-400' : 'text-slate-500'" x-text="settingsData.integrations.bazarr_container_status.running || bazarrTestSuccess ? '● Container Running' : '○ Container Stopped'"></span>
+                    </template>
                   </div>
                 </div>
 
@@ -1458,12 +1525,13 @@
                   <span><strong>Zero-Wait Hybrid:</strong> Bazarr searches for human subtitles concurrently while Babel prepares the AI fallback. No fixed delay window.</span>
                 </div>
 
-                <div class="flex justify-end pt-1">
+                <div class="flex items-center justify-between pt-1">
+                  <div x-show="bazarrTestResult" class="text-xs font-medium" :class="bazarrTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="bazarrTestResult"></div>
+                  <div x-show="!bazarrTestResult"></div>
                   <button type="button" @click="testBazarrConnection()" :disabled="testingBazarr" class="text-xs text-purple-400 hover:text-purple-300 transition flex items-center gap-1">
                     <i class="fa-solid fa-plug"></i> Test Connection
                   </button>
                 </div>
-                <div x-show="bazarrTestResult" class="text-xs font-medium" :class="bazarrTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="bazarrTestResult"></div>
               </div>
 
               <!-- JELLYFIN INTEGRATION CARD -->
@@ -1478,17 +1546,89 @@
                       <p class="text-xs text-slate-400">Instantly notify Jellyfin when a new subtitle is ready</p>
                     </div>
                   </div>
-                  <input type="checkbox" x-model="settingsData.integrations.notify_jellyfin" class="rounded bg-slate-800 border-slate-700 text-purple-600 focus:ring-purple-500 w-5 h-5">
+                  <button type="button" @click="settingsData.integrations.notify_jellyfin = !settingsData.integrations.notify_jellyfin" class="w-5 h-5 rounded-full border flex items-center justify-center transition focus:outline-none" :class="settingsData.integrations.notify_jellyfin ? 'border-purple-500 bg-purple-600' : 'border-slate-700 bg-slate-900'">
+                    <i class="fa-solid fa-check text-[10px] text-white" x-show="settingsData.integrations.notify_jellyfin"></i>
+                  </button>
                 </div>
 
-                <div class="grid grid-cols-2 gap-3" x-show="settingsData.integrations.notify_jellyfin">
-                  <div>
-                    <label class="block text-xs font-medium text-slate-400 mb-1">Jellyfin Server URL</label>
-                    <input type="text" x-model="settingsData.integrations.jellyfin_url" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs">
+                <div class="space-y-3" x-show="settingsData.integrations.notify_jellyfin">
+                  <div class="grid grid-cols-2 gap-3">
+                    <div>
+                      <label class="block text-xs font-medium text-slate-400 mb-1">Jellyfin Server URL</label>
+                      <input type="text" x-model="settingsData.integrations.jellyfin_url" placeholder="http://jellyfin:8096" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs">
+                    </div>
+                    <div>
+                      <label class="block text-xs font-medium text-slate-400 mb-1">Jellyfin API Token</label>
+                      <input type="password" x-model="settingsData.integrations.jellyfin_api_key" placeholder="API Key / Token" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs">
+                    </div>
                   </div>
-                  <div>
-                    <label class="block text-xs font-medium text-slate-400 mb-1">Jellyfin API Token</label>
-                    <input type="password" x-model="settingsData.integrations.jellyfin_api_key" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs">
+
+                  <div class="flex items-center justify-between pt-1">
+                    <div x-show="jellyfinTestResult" class="text-xs font-medium" :class="jellyfinTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="jellyfinTestResult"></div>
+                    <div x-show="!jellyfinTestResult"></div>
+                    <button type="button" @click="testJellyfinConnection()" :disabled="testingJellyfin" class="text-xs text-purple-400 hover:text-purple-300 transition flex items-center gap-1">
+                      <i class="fa-solid fa-plug"></i> Test Connection
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- PLEX INTEGRATION CARD -->
+              <div class="p-5 bg-slate-950 rounded-2xl border border-slate-800 space-y-4">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-xl bg-amber-900/30 border border-amber-700/50 text-amber-400 flex items-center justify-center">
+                      <i class="fa-solid fa-play text-lg"></i>
+                    </div>
+                    <div>
+                      <h4 class="font-bold text-sm text-white">Plex Media Server</h4>
+                      <p class="text-xs text-slate-400">Scan the matching Plex library when a new subtitle is ready</p>
+                    </div>
+                  </div>
+                  <button type="button" @click="settingsData.integrations.notify_plex = !settingsData.integrations.notify_plex" class="w-5 h-5 rounded-full border flex items-center justify-center transition focus:outline-none" :class="settingsData.integrations.notify_plex ? 'border-purple-500 bg-purple-600' : 'border-slate-700 bg-slate-900'">
+                    <i class="fa-solid fa-check text-[10px] text-white" x-show="settingsData.integrations.notify_plex"></i>
+                  </button>
+                </div>
+
+                <div class="space-y-3" x-show="settingsData.integrations.notify_plex">
+                  <div class="grid grid-cols-2 gap-3">
+                    <div>
+                      <label class="block text-xs font-medium text-slate-400 mb-1">Plex Server URL</label>
+                      <input type="text" x-model="settingsData.integrations.plex_url" placeholder="http://plex:32400" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs">
+                    </div>
+                    <div>
+                      <label class="block text-xs font-medium text-slate-400 mb-1">Plex Token</label>
+                      <input type="password" x-model="settingsData.integrations.plex_token" placeholder="Plex Token" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs">
+                    </div>
+                  </div>
+
+                  <!-- Advanced Path Mapping (optional collapsible) -->
+                  <div class="pt-1">
+                    <button type="button" @click="plexPathMappingOpen = !plexPathMappingOpen" class="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 transition focus:outline-none">
+                      <i class="fa-solid text-[10px] transition-transform duration-200" :class="plexPathMappingOpen ? 'fa-chevron-down' : 'fa-chevron-right'"></i>
+                      <span class="font-medium">Advanced Path Mapping (optional)</span>
+                    </button>
+                    <div x-show="plexPathMappingOpen" class="mt-3 space-y-2 pl-3 border-l-2 border-slate-800">
+                      <div class="grid grid-cols-2 gap-3">
+                        <div>
+                          <label class="block text-xs font-medium text-slate-400 mb-1">Babel Path Prefix</label>
+                          <input type="text" x-model="settingsData.integrations.plex_path_babel_prefix" placeholder="e.g. /tv" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs">
+                        </div>
+                        <div>
+                          <label class="block text-xs font-medium text-slate-400 mb-1">Plex Path Prefix</label>
+                          <input type="text" x-model="settingsData.integrations.plex_path_plex_prefix" placeholder="e.g. /mnt/media/tv" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs">
+                        </div>
+                      </div>
+                      <p class="text-xs text-slate-500">Only needed when Plex sees your media under a different path than Babel. Leave blank if both use the same paths.</p>
+                    </div>
+                  </div>
+
+                  <div class="flex items-center justify-between pt-1">
+                    <div x-show="plexTestResult" class="text-xs font-medium" :class="plexTestSuccess ? 'text-emerald-400' : 'text-rose-400'" x-text="plexTestResult"></div>
+                    <div x-show="!plexTestResult"></div>
+                    <button type="button" @click="testPlexConnection()" :disabled="testingPlex" class="text-xs text-purple-400 hover:text-purple-300 transition flex items-center gap-1">
+                      <i class="fa-solid fa-plug"></i> Test Connection
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1686,7 +1826,7 @@ docker compose up -d babel</pre>
     </section>
 
     <!-- TOAST NOTIFICATION -->
-    <div x-cloak x-show="toastMessage" 
+    <div x-cloak x-show="toastMessage"
          x-transition:enter="transition ease-out duration-300"
          x-transition:enter-start="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
          x-transition:enter-end="opacity-100 translate-y-0 sm:scale-100"
@@ -1738,18 +1878,26 @@ docker compose up -d babel</pre>
             </div>
             <div class="bg-slate-950 p-3 rounded-xl border border-slate-800">
               <span class="text-slate-500 block mb-1">Sync Drift & Dropped</span>
-              <div class="space-y-0.5">
-                <div class="font-mono text-xs font-semibold flex items-center gap-1.5" :class="selectedJob.sync_diff_ms === 0 ? 'text-emerald-400' : 'text-amber-400'">
-                  <i class="fa-solid fa-check text-emerald-400" x-show="selectedJob.sync_diff_ms === 0"></i>
-                  <i class="fa-solid fa-triangle-exclamation text-amber-400" x-show="selectedJob.sync_diff_ms > 0"></i>
-                  <span x-text="(selectedJob.sync_diff_ms || 0) + 'ms diff'"></span>
+              <template x-if="['TRANSLATED', 'REPAIRED', 'FAILED', 'PARTIAL', 'RECOVERING', 'SUCCESS'].includes(selectedJob.status) && selectedJob.sync_diff_ms !== -1 && selectedJob.sync_diff_ms !== null && selectedJob.sync_diff_ms !== undefined">
+                <div class="space-y-0.5">
+                  <div class="font-mono text-xs font-semibold flex items-center gap-1.5" :class="selectedJob.sync_diff_ms === 0 ? 'text-emerald-400' : 'text-amber-400'">
+                    <i class="fa-solid fa-check text-emerald-400" x-show="selectedJob.sync_diff_ms === 0"></i>
+                    <i class="fa-solid fa-triangle-exclamation text-amber-400" x-show="selectedJob.sync_diff_ms > 0"></i>
+                    <span x-text="(selectedJob.sync_diff_ms || 0) + 'ms diff'"></span>
+                  </div>
+                  <div class="font-mono text-[11px] flex items-center gap-1.5" :class="selectedJob.dropped_lines === 0 ? 'text-emerald-400' : 'text-rose-400'">
+                    <i class="fa-solid fa-check text-emerald-400" x-show="selectedJob.dropped_lines === 0"></i>
+                    <i class="fa-solid fa-triangle-exclamation text-rose-400" x-show="selectedJob.dropped_lines > 0"></i>
+                    <span x-text="(selectedJob.dropped_lines || 0) + ' dropped'"></span>
+                  </div>
                 </div>
-                <div class="font-mono text-[11px] flex items-center gap-1.5" :class="selectedJob.dropped_lines === 0 ? 'text-emerald-400' : 'text-rose-400'">
-                  <i class="fa-solid fa-check text-emerald-400" x-show="selectedJob.dropped_lines === 0"></i>
-                  <i class="fa-solid fa-triangle-exclamation text-rose-400" x-show="selectedJob.dropped_lines > 0"></i>
-                  <span x-text="(selectedJob.dropped_lines || 0) + ' dropped'"></span>
+              </template>
+              <template x-if="!['TRANSLATED', 'REPAIRED', 'FAILED', 'PARTIAL', 'RECOVERING', 'SUCCESS'].includes(selectedJob.status) || selectedJob.sync_diff_ms === -1 || selectedJob.sync_diff_ms === null || selectedJob.sync_diff_ms === undefined">
+                <div class="text-slate-500 font-mono text-xs py-1">
+                  <span class="text-slate-400 font-semibold">N/A</span>
+                  <span class="block text-[10px] text-slate-600 font-sans" x-show="['ALREADY EXISTS', 'BAZARR MATCH', 'HEALTHY', 'SKIPPED', 'EXISTING / SKIPPED'].includes(selectedJob.status)">(pre-existing)</span>
                 </div>
-              </div>
+              </template>
             </div>
           </div>
 
@@ -1982,6 +2130,7 @@ docker compose up -d babel</pre>
         confirmAction: null,
         scanningFolders: false,
         testingAI: false,
+          aiTestResults: {},
         aiTestResult: '',
         aiTestSuccess: false,
         geminiDropdownOpen: false,
@@ -1989,6 +2138,13 @@ docker compose up -d babel</pre>
         testingBazarr: false,
         bazarrTestResult: '',
         bazarrTestSuccess: false,
+        testingJellyfin: false,
+        jellyfinTestResult: '',
+        jellyfinTestSuccess: false,
+        testingPlex: false,
+        plexTestResult: '',
+        plexTestSuccess: false,
+        plexPathMappingOpen: false,
         copiedWebhook: null,
         newLangSelection: '',
         processingItems: {},
@@ -1996,11 +2152,92 @@ docker compose up -d babel</pre>
         toastType: 'success',
         toastTimeout: null,
         availableLanguages: [],
+        fetchedModels: {},
+        fetchingModels: {},
+        getProviderLabel(provider) {
+          const map = {
+            gemini: 'Google Gemini',
+            openai: 'OpenAI',
+            anthropic: 'Anthropic',
+            openrouter: 'OpenRouter',
+            deepseek: 'DeepSeek',
+            custom: 'Custom OpenAI',
+            ollama: 'Ollama',
+            deepl: 'DeepL'
+          };
+          return map[provider] || provider;
+        },
+        getProviderDefaultModel(provider) {
+          const map = {
+            gemini: 'gemini-3.5-flash-lite',
+            openai: 'gpt-4o-mini',
+            anthropic: 'claude-sonnet-5',
+            openrouter: 'google/gemini-3.7-flash',
+            deepseek: 'deepseek-v4-flash',
+            custom: 'default',
+            ollama: 'llama3',
+            deepl: 'prefer_quality_optimized'
+          };
+          return map[provider] || '';
+        },
+        async selectAIProvider(provider) {
+          this.settingsData.ai.ai_provider = provider;
+          this.aiTestResult = '';
+          this.aiTestSuccess = false;
+          await this.fetchProviderModels(provider);
+        },
+        async onEscalationProviderChange() {
+          const prov = this.settingsData.ai.escalation_provider;
+          if (!prov || prov === 'none') {
+            this.settingsData.ai.escalation_model = '';
+            return;
+          }
+          await this.fetchProviderModels(prov);
+          const models = this.fetchedModels[prov] || [];
+          const currentModel = this.settingsData.ai.escalation_model;
+          if (!models.some(m => m.id === currentModel)) {
+            this.settingsData.ai.escalation_model = this.getProviderDefaultModel(prov);
+          }
+        },
+        async modelsForProvider(provider) {
+          if (!this.fetchedModels?.[provider]) {
+            await this.fetchProviderModels(provider);
+          }
+          return this.fetchedModels?.[provider] || [];
+        },
+        currentModelKey(prefix) {
+          // custom provider uses custom_openai_model, not custom_model
+          if (prefix === 'custom') return 'custom_openai_model';
+          if (prefix === 'ollama') return 'ollama_model';
+          if (prefix === 'openrouter') return 'openrouter_model';
+          if (prefix === 'deepl') return 'deepl_model_type';
+          return prefix + "_model";
+        },
+        modelInList(provider, modelId) {
+          const list = this.fetchedModels?.[provider] || [];
+          return list.some(m => m.id === modelId);
+        },
+
         settingsData: {
           ai: {
             ai_provider: 'gemini',
             gemini_api_key: '',
             gemini_model: 'gemini-3.5-flash-lite',
+            openai_api_key: '',
+            openai_model: 'gpt-4o-mini',
+            anthropic_api_key: '',
+            anthropic_model: 'claude-sonnet-5',
+            openrouter_api_key: '',
+            openrouter_model: 'google/gemini-3.7-flash',
+            deepseek_api_key: '',
+            deepseek_model: 'deepseek-v4-flash',
+            custom_openai_url: 'http://localhost:8000/v1',
+            custom_openai_api_key: '',
+            custom_openai_model: 'default',
+            deepl_api_key: '',
+            deepl_model_type: 'prefer_quality_optimized',
+            ollama_url: 'http://localhost:11434',
+            ollama_model: 'llama3',
             escalation_provider: 'none',
             escalation_model: '',
             escalate_to_pro: false,
@@ -2010,6 +2247,10 @@ docker compose up -d babel</pre>
             glossary: '',
             daily_request_budget_gemini: 0,
             daily_request_budget_openai: 0,
+            daily_request_budget_anthropic: 0,
+            daily_request_budget_openrouter: 0,
+            daily_request_budget_deepseek: 0,
+            daily_request_budget_custom: 0,
             daily_request_budget_deepl: 0,
             daily_request_budget_ollama: 0
           },
@@ -2019,7 +2260,7 @@ docker compose up -d babel</pre>
             extract_source_embedded: true,
             auto_repair_unhealthy: true,
             strict_sync_lock: true,
-            original_language_guard: true,
+            // original_language_guard removed in v2.3.43
           },
           languages: [
             {name: 'Swedish', code: 'sv', enabled: true}
@@ -2038,7 +2279,12 @@ docker compose up -d babel</pre>
             bazarr_container_status: { running: true },
             notify_jellyfin: false,
             jellyfin_url: '',
-            jellyfin_api_key: ''
+            jellyfin_api_key: '',
+            notify_plex: false,
+            plex_url: '',
+            plex_token: '',
+            plex_path_babel_prefix: '',
+            plex_path_plex_prefix: ''
           }
         },
         pollTimer: null,
@@ -2199,32 +2445,54 @@ docker compose up -d babel</pre>
           try {
             const res = await fetch('/api/jobs');
             this.jobs = await res.json();
-            if (this.modalOpen && this.selectedJob) {
-              const updatedJob = this.jobs.find(j => 
-                (this.selectedJob.id && j.id === this.selectedJob.id) || 
-                (this.selectedJob.video_path && j.video_path === this.selectedJob.video_path)
-              );
-              if (updatedJob) {
-                this.selectedJob = { ...this.selectedJob, ...updatedJob };
+            if (this.modalOpen && this.selectedJob && this.selectedJob.id) {
+              const updatedJob = this.jobs.find(j => j.id === this.selectedJob.id);
+              if (updatedJob && this.selectedJob && this.selectedJob.id === updatedJob.id) {
+                // Preserve log container scroll position before update.
+                // Query the log scroll region by its unique class combination.
+                const logEl = document.querySelector('.max-h-48.overflow-y-auto.space-y-1\\.5');
+                const wasAtBottom = logEl ? (logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 32) : true;
+
+                // Mutate the existing object IN-PLACE instead of replacing it.
+                Object.assign(this.selectedJob, updatedJob);
+
+                // Restore scroll: only auto-scroll to bottom if user was already there.
+                if (logEl && wasAtBottom) {
+                  this.$nextTick(() => { logEl.scrollTop = logEl.scrollHeight; });
+                }
               }
             }
           } catch(e) {}
         },
 
-        openJobModal(job) {
-          this.selectedJob = job;
+        async openJobModal(job) {
+          if (!job || !job.id) return;
+          const targetJobId = job.id;
+          this.selectedJob = { ...job };
           this.jobUsage = null;
+          this.loadingJobUsage = true;
           this.modalOpen = true;
-          if (job && job.id) {
-            this.loadJobUsage(job.id);
-          }
+
+          // Fetch fresh full job record directly by job_id
+          try {
+            const res = await fetch('/api/jobs/' + targetJobId);
+            if (res.ok) {
+              const freshJob = await res.json();
+              if (this.modalOpen && this.selectedJob && this.selectedJob.id === targetJobId) {
+                Object.assign(this.selectedJob, freshJob);
+              }
+            }
+          } catch(e) {}
+
+          // Load AI usage strictly for targetJobId
+          await this.loadJobUsage(targetJobId);
         },
 
         async deleteJob(id) {
           try {
             await fetch('/api/jobs/' + id, { method: 'DELETE' });
             await this.loadJobs();
-            
+
           await this.loadStats();
           this.checkUpdates();
 
@@ -2236,7 +2504,7 @@ docker compose up -d babel</pre>
             try {
               await fetch('/api/jobs', { method: 'DELETE' });
               await this.loadJobs();
-              
+
           await this.loadStats();
           this.checkUpdates();
 
@@ -2277,13 +2545,46 @@ docker compose up -d babel</pre>
             const res = await fetch('/api/settings/all');
             this.settingsData = await res.json();
             this.availableLanguages = this.settingsData.available_languages || [];
+            if (this.settingsData.ai && this.settingsData.ai.ai_provider) {
+              await this.fetchProviderModels(this.settingsData.ai.ai_provider);
+            }
+            if (this.settingsData.ai && this.settingsData.ai.escalate_to_pro && this.settingsData.ai.escalation_provider && this.settingsData.ai.escalation_provider !== 'none') {
+              await this.fetchProviderModels(this.settingsData.ai.escalation_provider);
+            }
+            if (this.settingsData.integrations && (this.settingsData.integrations.plex_path_babel_prefix || this.settingsData.integrations.plex_path_plex_prefix)) {
+              this.plexPathMappingOpen = true;
+            }
           } catch(e) {}
         },
 
-        async testAIConnection() {
+        async fetchProviderModels(prov, forceRefresh = false) {
+          if (!prov || prov === 'none' || prov === 'deepl') return;
+          this.fetchingModels[prov] = true;
+          try {
+            let url = '';
+            if (prov === 'ollama') url = this.settingsData.ai.ollama_url;
+            else if (prov === 'custom') url = this.settingsData.ai.custom_openai_url;
+            const refreshParam = forceRefresh ? '&refresh=true' : '';
+            const res = await fetch(`/api/settings/models?provider=${encodeURIComponent(prov)}&url=${encodeURIComponent(url || '')}${refreshParam}`);
+            if (res.ok) {
+              const data = await res.json();
+              this.fetchedModels[prov] = data.models || [];
+              const key = this.currentModelKey(prov);
+              if (this.settingsData.ai && (this.settingsData.ai[key] === undefined || this.settingsData.ai[key] === '')) {
+                this.settingsData.ai[key] = data.default_model || this.getProviderDefaultModel(prov);
+              }
+            }
+          } catch(e) {
+            console.error('Failed to fetch models for', prov, e);
+          } finally {
+            this.fetchingModels[prov] = false;
+          }
+        },
+
+        async testAIConnection(provParam = null) {
           this.testingAI = true;
           this.aiTestResult = '';
-          const prov = this.settingsData.ai.ai_provider || 'gemini';
+          const prov = provParam || this.settingsData.ai.ai_provider || 'gemini';
           let apiKey = '';
           let model = '';
           let url = '';
@@ -2294,6 +2595,19 @@ docker compose up -d babel</pre>
           } else if (prov === 'openai') {
             apiKey = this.settingsData.ai.openai_api_key;
             model = this.settingsData.ai.openai_model;
+          } else if (prov === 'anthropic') {
+            apiKey = this.settingsData.ai.anthropic_api_key;
+            model = this.settingsData.ai.anthropic_model;
+          } else if (prov === 'openrouter') {
+            apiKey = this.settingsData.ai.openrouter_api_key;
+            model = this.settingsData.ai.openrouter_model;
+          } else if (prov === 'deepseek') {
+            apiKey = this.settingsData.ai.deepseek_api_key;
+            model = this.settingsData.ai.deepseek_model;
+          } else if (prov === 'custom' || prov === 'custom_openai') {
+            apiKey = this.settingsData.ai.custom_openai_api_key;
+            model = this.settingsData.ai.custom_openai_model;
+            url = this.settingsData.ai.custom_openai_url;
           } else if (prov === 'deepl') {
             apiKey = this.settingsData.ai.deepl_api_key;
           } else if (prov === 'ollama') {
@@ -2354,6 +2668,62 @@ docker compose up -d babel</pre>
             this.bazarrTestResult = 'Connection failed';
           } finally {
             this.testingBazarr = false;
+          }
+        },
+
+        async testJellyfinConnection() {
+          this.testingJellyfin = true;
+          this.jellyfinTestResult = '';
+          try {
+            const res = await fetch('/api/settings/test-jellyfin', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({
+                jellyfin_url: this.settingsData.integrations.jellyfin_url,
+                jellyfin_api_key: this.settingsData.integrations.jellyfin_api_key
+              })
+            });
+            const data = await res.json();
+            if (res.ok) {
+              this.jellyfinTestSuccess = true;
+              this.jellyfinTestResult = 'Connected' + (data.version ? ' (' + data.version + ')' : '');
+            } else {
+              this.jellyfinTestSuccess = false;
+              this.jellyfinTestResult = data.detail || 'Connection failed';
+            }
+          } catch(e) {
+            this.jellyfinTestSuccess = false;
+            this.jellyfinTestResult = 'Connection failed';
+          } finally {
+            this.testingJellyfin = false;
+          }
+        },
+
+        async testPlexConnection() {
+          this.testingPlex = true;
+          this.plexTestResult = '';
+          try {
+            const res = await fetch('/api/settings/test-plex', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({
+                plex_url: this.settingsData.integrations.plex_url,
+                plex_token: this.settingsData.integrations.plex_token
+              })
+            });
+            const data = await res.json();
+            if (res.ok) {
+              this.plexTestSuccess = true;
+              this.plexTestResult = 'Connected';
+            } else {
+              this.plexTestSuccess = false;
+              this.plexTestResult = data.detail || 'Connection failed';
+            }
+          } catch(e) {
+            this.plexTestSuccess = false;
+            this.plexTestResult = 'Connection failed';
+          } finally {
+            this.testingPlex = false;
           }
         },
 
@@ -2423,7 +2793,8 @@ docker compose up -d babel</pre>
             'RECOVERY': 'Recovery',
             'ESCALATION': 'Contextual escalation',
             'CLASSIFIER': 'Language classifier',
-            'ENTITY_VERIFY': 'Entity verification'
+            'ENTITY_VERIFY': 'Entity verification',
+            'SEMANTIC_AUDIT': 'Semantic alignment audit'
           };
           if (!stage) return 'Primary translation';
           return map[stage.toUpperCase()] || stage.replace(/_/g, ' ');
@@ -2504,18 +2875,41 @@ docker compose up -d babel</pre>
 
         async loadJobUsage(jobId) {
           if (!jobId) return;
-          this.loadingJobUsage = true;
+          // Guard: do not proceed if selectedJob changed before call starts
+          if (!this.selectedJob || this.selectedJob.id !== jobId) return;
+
+          // Only show the loading spinner on the FIRST fetch (when jobUsage is null).
+          // On subsequent polling calls, jobUsage already has data so we skip the spinner.
+          // This prevents x-if templates from dismounting/remounting on every poll, which
+          // causes the "No AI usage recorded" → real data flicker.
+          const isInitialLoad = (this.jobUsage === null);
+          if (isInitialLoad) this.loadingJobUsage = true;
           try {
             const res = await fetch('/api/usage/job/' + jobId);
+            // Verify selectedJob is still the same job after async fetch returns
+            if (!this.selectedJob || this.selectedJob.id !== jobId) return;
+
             if (res.ok) {
-              this.jobUsage = await res.json();
-            } else {
+              const fresh = await res.json();
+              if (this.jobUsage && fresh && fresh.total_calls > 0) {
+                // Update in-place to avoid triggering x-if re-evaluation or remounting
+                Object.assign(this.jobUsage, fresh);
+              } else if (this.jobUsage && this.jobUsage.total_calls > 0 && (!fresh || fresh.total_calls === 0)) {
+                // Do not allow an empty or 0-call response to overwrite established usage during polling
+              } else {
+                this.jobUsage = fresh;
+              }
+            } else if (isInitialLoad) {
               this.jobUsage = null;
             }
           } catch(e) {
-            this.jobUsage = null;
+            if (isInitialLoad) {
+              this.jobUsage = null;
+            }
           } finally {
-            this.loadingJobUsage = false;
+            if (this.selectedJob && this.selectedJob.id === jobId) {
+              this.loadingJobUsage = false;
+            }
           }
         },
 
@@ -2643,13 +3037,15 @@ docker compose up -d babel</pre>
           }
           this.mediaRefreshInFlight = true;
           try {
-            const res = await fetch('/api/media-files');
+            const url = force ? '/api/media-files?force=true' : '/api/media-files';
+            const res = await fetch(url);
             if (res.ok) {
               const data = await res.json();
               this.mediaData = data;
               this.mediaLoaded = true;
             }
           } catch(e) {
+            console.error('Failed to load media files:', e);
           } finally {
             this.mediaRefreshInFlight = false;
             if (!silent) {

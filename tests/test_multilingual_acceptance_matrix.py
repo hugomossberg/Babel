@@ -493,6 +493,7 @@ async def test_multi_target_isolation_sv_bg_cs_partial_failure(tmp_path):
          patch.object(pipeline.translator, "translate_srt_content", side_effect=fake_translate), \
          patch.object(pipeline.translator, "escalate_single_line", return_value=None), \
          patch.object(pipeline.translator, "classify_and_recover_identical", return_value=[]), \
+         patch.object(pipeline.translator, "fast_final_rescue_batch", return_value=[]), \
          patch.object(pipeline.translator, "translate_batch", return_value=[]), \
          patch("app.services.pipeline.qa_gate", side_effect=fake_qa_gate):
 
@@ -555,10 +556,10 @@ def test_scandinavian_overlapping_words_disambiguation():
 @pytest.mark.asyncio
 async def test_provider_dispatch_gemini():
     """Verify Gemini provider dispatch uses configured model and target language in system prompt."""
+    from app.core.ai_providers import ProviderContext
     translator = SubtitleTranslator()
     
     def fake_settings(key, default=None):
-        if key == "ai_provider": return "gemini"
         if key == "gemini_model": return "gemini-3.5-flash-lite"
         if key == "gemini_api_key": return "dummy-gemini-key"
         return default
@@ -575,7 +576,8 @@ async def test_provider_dispatch_gemini():
         res = await translator.translate_batch(
             batch,
             target_language="Bulgarian",
-            show_title="Test Show"
+            show_title="Test Show",
+            provider_ctx=ProviderContext(provider="gemini", model="gemini-3.5-flash-lite"),
         )
         
         assert len(res) == 1
@@ -595,6 +597,7 @@ async def test_provider_dispatch_gemini():
 ])
 async def test_provider_dispatch_openai(target_lang, expected_keyword):
     """Verify OpenAI provider dispatch routes with correct model and target language."""
+    from app.core.ai_providers import ProviderContext
     translator = SubtitleTranslator()
 
     def fake_settings(key, default=None):
@@ -609,7 +612,11 @@ async def test_provider_dispatch_openai(target_lang, expected_keyword):
     mock_client.chat.completions.create.return_value = MagicMock(choices=[mock_choice])
 
     with patch("app.services.translator.get_setting", side_effect=fake_settings), \
-         patch.object(translator, "get_openai_client", return_value=mock_client):
+         patch.object(translator, "get_openai_client", return_value=mock_client), \
+         patch("app.core.ai_providers.context_from_settings",
+               return_value=ProviderContext(provider="openai", model="gpt-4o-mini")), \
+         patch("app.core.ai_providers.resolve_job_provider_context",
+               return_value=ProviderContext(provider="openai", model="gpt-4o-mini")):
         
         batch = [{"id": 1, "text": "Hello"}]
         res = await translator.translate_batch(
@@ -641,10 +648,10 @@ async def test_provider_dispatch_openai(target_lang, expected_keyword):
 ])
 async def test_provider_dispatch_deepl(target_lang, expected_deepl_code):
     """Verify DeepL provider maps target languages to canonical DeepL codes via registry without hardcoding."""
+    from app.core.ai_providers import ProviderContext
     translator = SubtitleTranslator()
 
     def fake_settings(key, default=None):
-        if key == "ai_provider": return "deepl"
         if key == "deepl_api_key": return "dummy-deepl-key"
         return default
 
@@ -660,7 +667,8 @@ async def test_provider_dispatch_deepl(target_lang, expected_deepl_code):
         batch = [{"id": 1, "text": "Hello"}]
         res = await translator.translate_batch(
             batch,
-            target_language=target_lang
+            target_language=target_lang,
+            provider_ctx=ProviderContext(provider="deepl", model="prefer_quality_optimized"),
         )
 
         assert len(res) == 1
@@ -676,10 +684,10 @@ async def test_provider_dispatch_deepl(target_lang, expected_deepl_code):
 @pytest.mark.asyncio
 async def test_provider_dispatch_ollama():
     """Verify Ollama provider dispatch routes correctly with target language, custom url and model."""
+    from app.core.ai_providers import ProviderContext
     translator = SubtitleTranslator()
 
     def fake_settings(key, default=None):
-        if key == "ai_provider": return "ollama"
         if key == "ollama_url": return "http://ollama-host:11434"
         if key == "ollama_model": return "llama3.2:latest"
         return default
@@ -697,7 +705,8 @@ async def test_provider_dispatch_ollama():
         res = await translator.translate_batch(
             batch,
             target_language="Swedish",
-            show_title="Test Show"
+            show_title="Test Show",
+            provider_ctx=ProviderContext(provider="ollama", model="llama3.2:latest"),
         )
 
         assert len(res) == 1

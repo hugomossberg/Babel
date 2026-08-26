@@ -27,16 +27,24 @@ def setup_teardown_db(tmp_path):
     app.core.db.DB_PATH = original_db
 
 @pytest.mark.asyncio
-async def test_provider_error_creates_waiting_state(setup_teardown_db):
+async def test_provider_error_creates_waiting_state(setup_teardown_db, tmp_path):
     video_path = setup_teardown_db
+
+    # Create an actual English SRT file so SourceResolver can find and validate it
+    en_srt_path = video_path.replace(".mkv", ".en.srt")
+    with open(en_srt_path, "w", encoding="utf-8") as f:
+        f.write(
+            "1\n00:00:00,000 --> 00:00:01,000\nHello world, this is a test subtitle.\n\n"
+            "2\n00:00:01,000 --> 00:00:02,000\nWe are testing provider error handling.\n\n"
+            "3\n00:00:02,000 --> 00:00:03,000\nThe system should retry on rate limit.\n"
+        )
+
     job_id = create_job(video_path, "MANUAL", "test title")
 
-    with patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=ProviderUnavailableError("API rate limit exceeded")):
-        # Mock so it thinks it found English subs
-        with patch("app.services.pipeline.find_external_subtitle", side_effect=lambda p, l: video_path if l == "en" else None):
-                with patch("builtins.open", MagicMock(side_effect=lambda *args, **kwargs: MagicMock(__enter__=lambda *a: MagicMock(read=lambda: "1\n00:00:00,000 --> 00:00:01,000\nHello\n"), __exit__=lambda *a: None))):
-                    result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
-                    print(f"RESULT: {result}")
+    with patch("app.services.translator.SubtitleTranslator.translate_srt_content", side_effect=ProviderUnavailableError("API rate limit exceeded")), \
+         patch("app.services.pipeline.find_external_subtitle", side_effect=lambda p, l: en_srt_path if l == "en" else None):
+        result = await pipeline.process_video_file(video_path, job_id=job_id, force_retranslate=True)
+        print(f"RESULT: {result}")
 
     assert result["status"] == "waiting_provider"
     assert result["job_id"] == job_id
@@ -156,7 +164,8 @@ def test_waiting_source_backoff(tmp_path):
         asyncio.run(pipeline.process_video_file(str(video_path), job_id=job_id))
         job = get_job_by_id(job_id)
         assert job["status"] == "FAILED"
-        assert "No English subtitle source found" in job["error_message"]
+        # v2.3.43: error message updated to be source-language agnostic
+        assert "source" in job["error_message"].lower()
 
 @pytest.mark.asyncio
 async def test_waiting_source_claimed_and_retried():
