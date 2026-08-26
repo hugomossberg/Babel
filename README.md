@@ -20,17 +20,16 @@ It automatically finds the best available subtitle source, translates missing la
 - **Safe:** Strict QA gate, 0 dropped cues policy, automatic recovery
 
 ---
-
 ## Screenshots
 
-See Babel in action - from automated Sonarr/Radarr jobs to a fully unattended subtitle pipeline for sourcing, translation, recovery, QA, and publishing.
+See Babel in action — from automated Sonarr/Radarr jobs to a fully unattended subtitle pipeline for sourcing, translation, recovery, QA, and publishing.
 
 ### Activity Dashboard
 
-Track automated subtitle jobs in real time, including source, status, cue count, and end-to-end processing time.
+Monitor subtitle jobs in real time, including source, status, cue count, processing time, and whether Babel translated the subtitle or found a match through Bazarr.
 
 <p align="center">
-  <img src="docs/screenshots/activity-dashboard.png" alt="Babel Activity Dashboard" width="100%">
+  <img src="docs/screenshots/activity-dashboard.png" alt="Babel Activity Dashboard" width="900">
 </p>
 
 ### Connect-and-Forget Pipeline
@@ -38,7 +37,7 @@ Track automated subtitle jobs in real time, including source, status, cue count,
 Connect your media stack once and let Babel handle the fallback flow. In Hybrid Mode, Bazarr gets the first chance to find a human-made subtitle while Babel prepares the AI fallback in parallel. If Bazarr succeeds, AI is skipped. If not, Babel continues automatically.
 
 <p align="center">
-  <img src="docs/screenshots/pipeline-settings.png" alt="Babel Connect-and-Forget Pipeline" width="100%">
+  <img src="docs/screenshots/pipeline-settings.png" alt="Babel Connect-and-Forget Pipeline" width="900">
 </p>
 
 ### Verified Output
@@ -48,17 +47,20 @@ Babel does not publish a subtitle simply because an AI provider returned a resul
 This real-world job processed **1,498 / 1,498 cues** with **0 dropped cues**, **0 ms sync drift**, **0 unresolved dialogue**, and a final **PASS score of 100/100**.
 
 <p align="center">
-  <img src="docs/screenshots/qa-job-result.png" alt="Babel QA Verified Output" width="100%">
+  <img src="docs/screenshots/qa-job-result.png" alt="Babel QA Verified Output" width="900">
 </p>
 
+### AI Usage & Queue
+
+Track AI usage across providers, estimated costs, request limits, and deferred jobs from one place.
 
 <p align="center">
   <img src="docs/screenshots/ai-usage.png" alt="Babel AI Usage and Queue" width="900">
 </p>
 
-
-Import -> search -> fallback -> translate -> recover -> QA -> publish
-
+<p align="center">
+  <strong>Import → Source Resolution → Translate → Recover → QA → Publish</strong>
+</p>
 ---
 
 ## Why Babel?
