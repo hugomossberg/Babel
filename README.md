@@ -53,7 +53,7 @@ This real-world job processed **1,498 / 1,498 cues** with **0 dropped cues**, **
 
 
 <p align="center">
-  <img src="docs/screenshots/ai-usage.png" alt="Babel QA Verified Output" width="100%">
+  <img src="docs/screenshots/ai-usage.png" alt="Babel AI Usage and Queue" width="900">
 </p>
 
 
