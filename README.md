@@ -128,8 +128,18 @@ Babel treats AI providers as **untrusted components**. Every generated subtitle 
 ---
 
 ## Quick Start
+Install Babel using **Docker Compose v2**. The standard installation includes Babel and the `babel-updater` sidecar for zero-configuration One-Click in-app updates.
 
-Install Babel using Docker Compose. The standard installation includes Babel and the `babel-updater` sidecar for zero-configuration One-Click in-app updates.
+> **Prerequisite:** Babel requires Docker with **Docker Compose v2**.
+>
+> Verify your installation before continuing:
+>
+> ```bash
+> docker --version
+> docker compose version
+> ```
+>
+> If `docker compose` is unavailable, install Docker Compose v2 before continuing. The legacy `docker-compose` 1.x package is not recommended and may be incompatible with modern Docker/Python environments.
 
 ### 1. Create directory and configuration
 
