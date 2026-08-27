@@ -52,11 +52,11 @@ async def test_updates_controller_handles_409_as_ongoing_update():
     with patch.object(ctrl, "is_locked_for_update", return_value=False), \
          patch.object(ctrl, "get_real_updater_status", return_value=(True, "pulling")), \
          patch("app.core.db.get_jobs_by_status", return_value=[]), \
-         patch.object(ctrl, "get_update_info", return_value={"update_available": True, "latest_version": "v2.3.99-beta"}), \
+         patch.object(ctrl, "get_update_info", return_value={"update_available": True, "latest_version": "v99.0.0-beta"}), \
          patch("httpx.AsyncClient.post") as mock_post:
 
         mock_post.return_value = MagicMock(status_code=409, text='{"detail": "Update already in progress (pulling)"}')
-        res = await ctrl.trigger_update("v2.3.99-beta")
+        res = await ctrl.trigger_update("v99.0.0-beta")
         assert res["success"] is False
         assert "already in progress" in res["message"]
         assert ctrl.update_status == "updating"
@@ -67,10 +67,10 @@ async def test_updates_controller_timeout_with_active_updater_treated_as_success
     with patch.object(ctrl, "is_locked_for_update", return_value=False), \
          patch.object(ctrl, "get_real_updater_status", side_effect=[(True, "idle"), (True, "inspecting")]), \
          patch("app.core.db.get_jobs_by_status", return_value=[]), \
-         patch.object(ctrl, "get_update_info", return_value={"update_available": True, "latest_version": "v2.3.99-beta"}), \
+         patch.object(ctrl, "get_update_info", return_value={"update_available": True, "latest_version": "v99.0.0-beta"}), \
          patch("httpx.AsyncClient.post", side_effect=Exception("Read timeout")):
 
-        res = await ctrl.trigger_update("v2.3.99-beta")
+        res = await ctrl.trigger_update("v99.0.0-beta")
         assert res["success"] is True
         assert "already in progress" in res["message"] or "Update initiated" in res["message"]
         assert ctrl.update_status == "updating"

@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import srt
 import time
 import pytest
@@ -237,9 +238,8 @@ def test_fast_final_rescue_batch_not_double_wrapped():
 # ─── PASS 2H & 2I: UI CONSISTENCY & MODAL JOB_ID BINDING ──────────────────────
 
 def test_ui_template_contains_strict_job_id_and_na_cards():
-    index_path = "/home/dev/babel/app/templates/index.html"
-    with open(index_path, "r", encoding="utf-8") as f:
-        html = f.read()
+    index_path = Path(__file__).resolve().parents[1] / "app" / "templates" / "index.html"
+    html = index_path.read_text(encoding="utf-8")
 
     # Pass 2H: Sync Drift & Dropped card N/A check
     assert "N/A" in html
