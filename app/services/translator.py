@@ -1578,7 +1578,24 @@ class SubtitleTranslator:
         get_provider_spec(p)  # raises ValueError("Unsupported AI provider: ...") for unknown providers
         return context_from_settings(p).model
 
-    def _convert_to_openai_json_schema(self, schema: dict) -> dict:
+    def _convert_to_strict_json_schema(self, schema: dict, force_all_required: bool = False) -> dict:
+        """
+        Convert an internally-authored schema into strict JSON Schema.
+
+        Schemas in this module are authored in Google GenAI's convention, which
+        spells types in uppercase ("OBJECT", "STRING"). That is accepted by
+        google-genai's `response_schema`, but every other provider expects real
+        JSON Schema, where types are lowercase. This normalizes:
+
+          * `type` lowercased recursively (objects, arrays, nested properties)
+          * `additionalProperties: false` on every object (required by both
+            OpenAI strict mode and Anthropic's `output_config.format`)
+
+        `force_all_required` additionally promotes every property into
+        `required`. OpenAI strict mode mandates that; Anthropic does not, and
+        enabling it there would silently make genuinely optional fields
+        (e.g. the `reason`/`details` audit fields) mandatory. So it is opt-in.
+        """
         if not isinstance(schema, dict):
             return schema
         res = {}
@@ -1586,19 +1603,26 @@ class SubtitleTranslator:
             if k == "type" and isinstance(v, str):
                 res["type"] = v.lower()
             elif k == "properties" and isinstance(v, dict):
-                res["properties"] = {pk: self._convert_to_openai_json_schema(pv) for pk, pv in v.items()}
+                res["properties"] = {
+                    pk: self._convert_to_strict_json_schema(pv, force_all_required)
+                    for pk, pv in v.items()
+                }
             elif k == "items" and isinstance(v, dict):
-                res["items"] = self._convert_to_openai_json_schema(v)
+                res["items"] = self._convert_to_strict_json_schema(v, force_all_required)
             else:
                 res[k] = v
         if res.get("type") == "object":
             if "additionalProperties" not in res:
                 res["additionalProperties"] = False
-            if "properties" in res:
+            if force_all_required and "properties" in res:
                 res["required"] = list(res.get("required", [])) + [
                     pk for pk in res["properties"].keys() if pk not in res.get("required", [])
                 ]
         return res
+
+    def _convert_to_openai_json_schema(self, schema: dict) -> dict:
+        """Strict JSON Schema for OpenAI-compatible providers (all properties required)."""
+        return self._convert_to_strict_json_schema(schema, force_all_required=True)
 
     async def _dispatch_llm_completion(
         self,
@@ -1735,6 +1759,16 @@ class SubtitleTranslator:
             # Fallback for older models: inject JSON schema into system prompt
             _use_native_output_config = bool(schema and caps.native_output_config)
 
+            # Schemas are authored in Google GenAI's uppercase convention, which is
+            # not valid JSON Schema. Anthropic rejects it outright with a 400
+            # ("Invalid JSON Schema in output format"), so normalize before use.
+            # force_all_required stays off: Anthropic only requires
+            # additionalProperties:false, and promoting every property would make
+            # deliberately optional fields mandatory.
+            _anthropic_schema = (
+                self._convert_to_strict_json_schema(schema) if schema else None
+            )
+
             _system_prompt = system_prompt
             if schema and not _use_native_output_config:
                 # Strict JSON fallback: describe schema in system prompt
@@ -1742,7 +1776,7 @@ class SubtitleTranslator:
                 _system_prompt = (
                     f"{system_prompt}\n\n"
                     "IMPORTANT: You MUST respond with ONLY valid JSON matching this schema:\n"
-                    f"{_json.dumps(schema, indent=2)}\n"
+                    f"{_json.dumps(_anthropic_schema, indent=2)}\n"
                     "No markdown, no explanation, no preamble. Raw JSON only."
                 )
 
@@ -1760,7 +1794,7 @@ class SubtitleTranslator:
                 payload["output_config"] = {
                     "format": {
                         "type": "json_schema",
-                        "schema": schema,
+                        "schema": _anthropic_schema,
                     }
                 }
             async with httpx.AsyncClient(timeout=60.0) as client:
