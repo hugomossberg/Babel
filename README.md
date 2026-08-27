@@ -40,7 +40,7 @@ Monitor automated jobs, processing status, Bazarr matches, cue counts, and trans
 
 ### Connect-and-Forget Pipeline
 
-Configure Babel once and let it automatically choose between Bazarr and AI translation.
+Configure Babel once. Babel automatically uses available Bazarr subtitles and falls back to AI translation when needed.
 
 <p align="center">
   <a href="docs/screenshots/pipeline-settings.png">
