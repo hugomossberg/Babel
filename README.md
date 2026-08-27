@@ -272,20 +272,27 @@ Target subtitle already present?
        ├── Yes ──► Validate / Keep existing
        │
        ▼
-[Hybrid Mode] Trigger Bazarr search & prepare AI fallback in parallel
+[Hybrid Mode] Trigger Bazarr search
+while preparing AI fallback in parallel
        │
-       ├─► Fallback Prep (Extract embedded source / SDH sanitize / Validate)
+       ├─► Source resolution
+       ├─► Embedded / external source preparation
+       ├─► SDH sanitize / normalization
+       └─► Source validation
        │
        ▼
-Final Target / Bazarr Check (after preparation)
+Final Target / Bazarr Check
+(immediately before first AI provider call)
        │
-       ├── Found ──► Adopt human subtitle (AI provider calls = 0)
+       ├── Found ──► Adopt human subtitle
+       │             AI provider calls = 0
        │
-       ▼ (Miss)
+       ▼ Miss
 AI Translation in batched chunks
        │
        ▼
-Multi-Stage Recovery (Micro-repair → Targeted recovery → Context escalation)
+Multi-Stage Recovery
+(Micro-repair → Targeted recovery → Context escalation)
        │
        ▼
 Quality Assurance Gate
@@ -293,10 +300,13 @@ Quality Assurance Gate
        ├── FAIL ──► Block publication & log diagnostics
        │
        ▼
-      PASS / PASS_WITH_WARNINGS
+PASS / PASS_WITH_WARNINGS
        │
        ▼
-Atomic publication (.target.srt) & Media Server Refresh
+Atomic publication (.target.srt)
+       │
+       ▼
+Media Server Refresh
 ```
 
 ---
