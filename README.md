@@ -300,7 +300,7 @@ Quality Assurance Gate
        ├── FAIL ──► Block publication & log diagnostics
        │
        ▼
-PASS / PASS_WITH_WARNINGS
+      PASS 
        │
        ▼
 Atomic publication (.target.srt)
