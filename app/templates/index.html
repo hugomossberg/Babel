@@ -2077,7 +2077,7 @@ docker compose up -d babel</pre>
         jobs: [],
         mediaLoaded: false,
 
-        updateData: { update_available: false, current_version: 'v{{VERSION}}', latest_version: '', release_notes: '', one_click_update_available: false, updater_status: 'idle' },
+        updateData: { update_available: false, current_version: 'v{{VERSION}}', latest_version: '', release_notes: '', one_click_update_available: false, updater_status: 'idle', update_check_ok: true, update_check_error: null, metadata_stale: false },
         updateInProgress: false,
         updateTargetVersion: '',
         updateJustSucceeded: false,
@@ -2305,8 +2305,8 @@ docker compose up -d babel</pre>
 
           await this.loadStats();
 
-          // 1. Await a fresh, un-cached update check upon page initialization
-          await this.checkUpdates(true);
+          // 1. Check updates using cached/runtime logic upon page initialization
+          await this.checkUpdates();
 
           // 2. Only show "Updated to X" if current verified backend version matches marker
           if (pendingMarker && pendingMarker.version && this.updateData && this.updateData.current_version) {
@@ -3389,11 +3389,21 @@ docker compose up -d babel</pre>
                 let res = await fetch('/api/updates?force=true');
                 if (res.ok) {
                     this.updateData = await res.json();
-                    this.updateCheckError = false;
-                    if (this.updateData.update_available) {
-                        this.showToast('Update available · ' + this.updateData.latest_version, 'info');
+                    if (this.updateData.update_check_ok === false) {
+                        if (this.updateData.update_available) {
+                            this.updateCheckError = false;
+                            this.showToast('Update available · ' + this.updateData.latest_version + (this.updateData.metadata_stale ? ' (cached)' : ''), 'info');
+                        } else {
+                            this.updateCheckError = true;
+                            this.showToast(this.updateData.update_check_error || 'Unable to check for updates', 'error');
+                        }
                     } else {
-                        this.showToast("You're up to date.", 'success');
+                        this.updateCheckError = false;
+                        if (this.updateData.update_available) {
+                            this.showToast('Update available · ' + this.updateData.latest_version, 'info');
+                        } else {
+                            this.showToast("You're up to date.", 'success');
+                        }
                     }
                 } else {
                     this.updateCheckError = true;
@@ -3415,6 +3425,15 @@ docker compose up -d babel</pre>
                 if (res.ok) {
                     const data = await res.json();
                     this.updateData = data;
+                    if (data.update_check_ok === false) {
+                        if (!data.update_available) {
+                            this.updateCheckError = true;
+                        } else {
+                            this.updateCheckError = false;
+                        }
+                    } else {
+                        this.updateCheckError = false;
+                    }
                     const st = data.updater_status || 'idle';
                     if (['inspecting', 'pulling', 'replacing', 'verifying', 'updating', 'rolling_back'].includes(st)) {
                         this.updateInProgress = true;
@@ -3439,8 +3458,11 @@ docker compose up -d babel</pre>
                             this.updateInProgress = false;
                         }
                     }
+                } else {
+                    this.updateCheckError = true;
                 }
             } catch(e) {
+                this.updateCheckError = true;
             } finally {
                 this.checkingUpdates = false;
             }
@@ -3508,12 +3530,12 @@ docker compose up -d babel</pre>
                     const res = await fetch('/health?t=' + Date.now());
                     if (res.ok) {
                         try {
-                            const upRes = await fetch('/api/updates?force=true&t=' + Date.now());
+                            const upRes = await fetch('/api/updates/runtime?t=' + Date.now());
                             if (upRes.ok) {
                                 const upData = await upRes.json();
 
                                 const normCurrent = (upData.current_version || '').replace(/^v/, '');
-                                const normExpected = (expectedVersion || this.updateTargetVersion || upData.latest_version || '').replace(/^v/, '');
+                                const normExpected = (expectedVersion || this.updateTargetVersion || '').replace(/^v/, '');
                                 const st = upData.updater_status || 'idle';
                                 const isExpected = (normCurrent && normExpected && normCurrent === normExpected);
 
@@ -3521,7 +3543,6 @@ docker compose up -d babel</pre>
                                     this.stopHealthPoll();
                                     this.updateInProgress = false;
                                     this.updateFailed = true;
-                                    this.updateData = upData;
                                     this.updateData.updater_status = 'failed';
                                     this.popoverOpen = true;
                                     return;
@@ -3531,7 +3552,6 @@ docker compose up -d babel</pre>
                                     this.stopHealthPoll();
                                     this.updateInProgress = false;
                                     this.updateFailed = true;
-                                    this.updateData = upData;
                                     this.updateData.updater_status = 'rolled_back';
                                     this.popoverOpen = true;
                                     return;
@@ -3563,7 +3583,9 @@ docker compose up -d babel</pre>
                                     this.updateFailed = false;
                                 }
 
-                                this.updateData = upData;
+                                this.updateData.updater_status = upData.updater_status;
+                                this.updateData.current_version = upData.current_version;
+                                this.updateData.one_click_update_available = upData.one_click_update_available;
                             }
                         } catch(e) {}
                     }

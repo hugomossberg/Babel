@@ -99,9 +99,9 @@ def test_scenario_m_mutual_exclusivity_of_all_ui_states():
     assert 'x-show="!isUpdating() && !updateJustSucceeded && !isUpdateFailed() && updateData.update_available"' in html
 
 def test_init_fresh_check_and_background_polling():
-    """8. Page load initiates fresh check and starts monitoring if status is active (e.g. verifying)."""
+    """8. Page load initiates check and starts monitoring if status is active (e.g. verifying)."""
     html = get_index_html()
-    assert "await this.checkUpdates(true);" in html
+    assert "await this.checkUpdates();" in html
     assert "if (!this.healthPollActive) {" in html
     assert "this.pollHealth(this.updateTargetVersion || data.latest_version);" in html
     assert "this.updatePollTimer = setInterval(() => {\n            this.checkUpdates();\n          }, 60000);" in html

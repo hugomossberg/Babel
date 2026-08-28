@@ -987,6 +987,10 @@ class TriggerUpdateReq(BaseModel):
 async def api_get_updates(force: bool = False):
     return await updates_controller.get_update_info(force_refresh=force)
 
+@router.get("/updates/runtime")
+async def api_get_updates_runtime():
+    return await updates_controller.get_runtime_status()
+
 @router.post("/updates/trigger")
 async def api_trigger_update(req: TriggerUpdateReq):
     res = await updates_controller.trigger_update(req.target_version)

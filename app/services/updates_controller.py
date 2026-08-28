@@ -10,11 +10,17 @@ import os
 
 logger = logging.getLogger("babel.updates")
 
+RELEASE_CACHE_TTL = 900  # 15 minutes cache for GitHub releases
+
 class UpdatesController:
     def __init__(self):
         self.github_repo = GITHUB_REPO
         self.cached_release_metadata = None
         self.cache_time = None
+        self.last_check_ok = True
+        self.last_check_error = None
+        self.next_allowed_github_check = 0.0
+        self.rate_limited = False
         self.update_status = "idle"  # idle, updating, success, failed, rolled_back
         self.is_maintenance_locked = False
         self._check_lock = asyncio.Lock()
@@ -81,38 +87,46 @@ class UpdatesController:
         except Exception:
             return False
 
+    async def get_runtime_status(self) -> Dict[str, Any]:
+        avail, st = await self.get_real_updater_status()
+        return {
+            "current_version": VERSION,
+            "updater_status": st,
+            "one_click_update_available": avail,
+        }
+
     async def get_update_info(self, force_refresh: bool = False) -> Dict[str, Any]:
         now = datetime.now(timezone.utc).timestamp()
 
         # 1. ALWAYS query live runtime updater status (never served from stale cache)
         avail, st = await self.get_real_updater_status()
 
-        # 2. Check if GitHub release metadata needs refresh (TTL: 120s)
+        # 2. Rate limit cooldown check: force_refresh MUST NOT bypass cooldown
+        is_cooldown_active = now < self.next_allowed_github_check
+
+        # Check if GitHub release metadata needs refresh (TTL: 900s / 15m)
         cache_valid = (
             not force_refresh
             and self.cached_release_metadata is not None
             and self.cache_time is not None
-            and (now - self.cache_time) < 120
+            and (now - self.cache_time) < RELEASE_CACHE_TTL
+            and self.last_check_ok
         )
 
-        if not cache_valid:
+        if not cache_valid and not is_cooldown_active:
             async with self._check_lock:
-                # Re-check under lock
-                if (
+                now = datetime.now(timezone.utc).timestamp()
+                is_cooldown_active = now < self.next_allowed_github_check
+                cache_valid = (
                     not force_refresh
                     and self.cached_release_metadata is not None
                     and self.cache_time is not None
-                    and (now - self.cache_time) < 120
-                ):
-                    pass
-                else:
+                    and (now - self.cache_time) < RELEASE_CACHE_TTL
+                    and self.last_check_ok
+                )
+
+                if not cache_valid and not is_cooldown_active:
                     is_beta_channel = "-beta" in VERSION
-                    release_meta = {
-                        "latest_version": VERSION,
-                        "release_url": "",
-                        "release_notes": "",
-                        "published_at": None,
-                    }
 
                     try:
                         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -123,8 +137,8 @@ class UpdatesController:
 
                             if res.status_code == 200:
                                 releases = res.json()
+                                latest_release = None
                                 if isinstance(releases, list):
-                                    latest_release = None
                                     for rel in releases:
                                         if not isinstance(rel, dict):
                                             continue
@@ -145,6 +159,7 @@ class UpdatesController:
                                             if latest_release is None or rel_tuple > self._parse_version(latest_release.get("tag_name", "")):
                                                 latest_release = rel
 
+                                    release_meta = {}
                                     if latest_release:
                                         release_meta["latest_version"] = latest_release.get("tag_name", "")
                                         release_meta["release_url"] = latest_release.get("html_url", "")
@@ -154,35 +169,89 @@ class UpdatesController:
                                         if len(body) > 1000:
                                             body = body[:1000] + "...\n\n[View full release on GitHub]"
                                         release_meta["release_notes"] = body
+                                    else:
+                                        release_meta["latest_version"] = VERSION
+                                        release_meta["release_url"] = ""
+                                        release_meta["release_notes"] = ""
+                                        release_meta["published_at"] = None
 
-                                self.cached_release_metadata = release_meta
-                                self.cache_time = now
+                                    self.cached_release_metadata = release_meta
+                                    self.cache_time = now
+                                    self.last_check_ok = True
+                                    self.last_check_error = None
+                                    self.next_allowed_github_check = 0.0
+                                    self.rate_limited = False
+                                else:
+                                    logger.warning(f"Unexpected GitHub releases response format: {releases}")
+                                    self.last_check_ok = False
+                                    self.last_check_error = "Unexpected response format from GitHub"
+                            elif res.status_code == 403:
+                                reset_header = res.headers.get("x-ratelimit-reset") or res.headers.get("X-RateLimit-Reset")
+                                fallback_cooldown = 300.0  # 5 minutes
+                                if reset_header:
+                                    try:
+                                        reset_ts = float(reset_header)
+                                        self.next_allowed_github_check = reset_ts if reset_ts > now else (now + fallback_cooldown)
+                                    except ValueError:
+                                        self.next_allowed_github_check = now + fallback_cooldown
+                                else:
+                                    self.next_allowed_github_check = now + fallback_cooldown
+
+                                if not self.rate_limited:
+                                    logger.warning(
+                                        f"GitHub API rate limit exceeded (403). Cooldown active until "
+                                        f"{datetime.fromtimestamp(self.next_allowed_github_check, timezone.utc).isoformat()}"
+                                    )
+                                    self.rate_limited = True
+
+                                self.last_check_ok = False
+                                self.last_check_error = "GitHub API rate limit exceeded (403)"
                             else:
                                 logger.warning(f"GitHub release check returned status {res.status_code}")
+                                self.last_check_ok = False
+                                self.last_check_error = f"GitHub API returned HTTP {res.status_code}"
                     except Exception as e:
                         logger.warning(f"Failed to check for updates: {e}")
+                        self.last_check_ok = False
+                        self.last_check_error = str(e) or "Failed to contact GitHub"
+        elif is_cooldown_active:
+            self.last_check_ok = False
+            self.last_check_error = "GitHub API rate limit cooldown active"
 
-        # 3. Construct response using live VERSION and live updater status
-        meta = self.cached_release_metadata or {
-            "latest_version": VERSION,
-            "release_url": "",
-            "release_notes": "",
-            "published_at": None,
-        }
+        # 3. Construct response
+        if self.cached_release_metadata is not None:
+            meta = self.cached_release_metadata
+            latest_tag = meta.get("latest_version") or VERSION
+            is_update_available = (self._parse_version(latest_tag) > self._parse_version(VERSION))
+            metadata_stale = not self.last_check_ok
 
-        latest_tag = meta.get("latest_version") or VERSION
-        is_update_available = (self._parse_version(latest_tag) > self._parse_version(VERSION))
-
-        return {
-            "current_version": VERSION,
-            "latest_version": latest_tag,
-            "update_available": is_update_available,
-            "release_url": meta.get("release_url", ""),
-            "release_notes": meta.get("release_notes", ""),
-            "published_at": meta.get("published_at"),
-            "one_click_update_available": avail,
-            "updater_status": st,
-        }
+            return {
+                "current_version": VERSION,
+                "latest_version": latest_tag,
+                "update_available": is_update_available,
+                "release_url": meta.get("release_url", ""),
+                "release_notes": meta.get("release_notes", ""),
+                "published_at": meta.get("published_at"),
+                "one_click_update_available": avail,
+                "updater_status": st,
+                "update_check_ok": self.last_check_ok,
+                "update_check_error": self.last_check_error,
+                "metadata_stale": metadata_stale,
+            }
+        else:
+            return {
+                "current_version": VERSION,
+                "latest_version": None,
+                "update_available": False,
+                "release_url": "",
+                "release_notes": "",
+                "published_at": None,
+                "one_click_update_available": avail,
+                "updater_status": st,
+                "update_check_ok": False,
+                "update_check_error": self.last_check_error or "Update check failed",
+                "metadata_stale": False,
+            }
 
     async def trigger_update(self, target_version: str) -> Dict[str, Any]:
         if self.is_locked_for_update():

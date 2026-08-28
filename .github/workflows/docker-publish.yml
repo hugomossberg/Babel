@@ -65,6 +65,12 @@ jobs:
             type=raw,value=beta,enable=${{ contains(github.ref_name, '-beta') }}
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
@@ -72,6 +78,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BABEL_VERSION=${{ steps.version.outputs.version }}
 
   release:
     needs: publish

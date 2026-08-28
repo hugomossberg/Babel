@@ -17,6 +17,8 @@ COPY . .
 # Create required directories
 RUN mkdir -p /app/app/static /app/data
 
+ARG BABEL_VERSION
+ENV BABEL_VERSION=${BABEL_VERSION}
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8765
 
