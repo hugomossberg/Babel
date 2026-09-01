@@ -12,14 +12,19 @@ def find_external_subtitle(video_path: str, lang_code: str) -> Optional[str]:
     directory = os.path.dirname(video_path)
     base_name = os.path.basename(base_path)
 
-    from app.core.languages import get_language
+    from app.core.languages import get_language, normalize_language_code
     lang_obj = get_language(lang_code)
+    target_norm = lang_obj.code if lang_obj else normalize_language_code(lang_code)
     
     if lang_obj:
         suffixes = [f".{a}" for a in lang_obj.aliases]
-        suffixes.append(f".{lang_code.lower()}.default")
+        suffixes.append(f".{lang_obj.code}")
+        suffixes.append(f".{lang_obj.code.lower()}")
+        suffixes.append(f".{lang_obj.code}.default")
+        suffixes.append(f".{lang_obj.code.lower()}.default")
+        suffixes = list(dict.fromkeys(suffixes))
     else:
-        suffixes = [f".{lang_code.lower()}", f".{lang_code.lower()}.default"]
+        suffixes = [f".{lang_code}", f".{lang_code.lower()}", f".{lang_code.lower()}.default"]
 
     # 1. Exact matches
     for suffix in suffixes:
@@ -32,10 +37,6 @@ def find_external_subtitle(video_path: str, lang_code: str) -> Optional[str]:
     # 2. Strict boundary directory search
     if os.path.exists(directory):
         base_name_lower = base_name.lower()
-        if lang_obj:
-            target_aliases = [a.lower() for a in lang_obj.aliases]
-        else:
-            target_aliases = [lang_code.lower()]
 
         try:
             for fname in os.listdir(directory):
@@ -57,10 +58,23 @@ def find_external_subtitle(video_path: str, lang_code: str) -> Optional[str]:
                 if any(tag in ["forced", "signs", "songs"] for tag in tokens):
                     continue
 
-                if any(lang in tokens for lang in target_aliases):
+                # Check if full middle matches target language
+                mid_lang = get_language(middle)
+                if mid_lang and mid_lang.code == target_norm:
                     full_p = os.path.join(directory, fname)
                     if os.path.getsize(full_p) > 100:
                         return full_p
+
+                # Check dot-separated segments of middle (e.g. "pt-br.default", "pt.default")
+                parts = middle.split(".")
+                for part in parts:
+                    if part in ["forced", "signs", "songs"]:
+                        break
+                    part_lang = get_language(part)
+                    if part_lang and part_lang.code == target_norm:
+                        full_p = os.path.join(directory, fname)
+                        if os.path.getsize(full_p) > 100:
+                            return full_p
         except Exception:
             pass
 

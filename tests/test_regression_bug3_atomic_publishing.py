@@ -20,6 +20,17 @@ HEALTHY_SWEDISH = [
     "Åttonde meningen gör allt godkänt."
 ]
 
+HEALTHY_ENGLISH = [
+    "This is an English sentence.",
+    "Here comes the second sentence.",
+    "And the third sentence as well.",
+    "The fourth sentence is here now.",
+    "The fifth sentence is complete.",
+    "The sixth sentence looks good.",
+    "The seventh sentence to secure text.",
+    "The eighth sentence makes it approved."
+]
+
 
 def make_subs(texts):
     return [
@@ -91,6 +102,9 @@ async def test_embedded_target_preserves_concurrent_healthy_file(tmp_path):
     # Pre-existing external healthy file
     with open(str(target_srt), "w", encoding="utf-8") as f:
         f.write(subs_to_srt_string(make_subs(HEALTHY_SWEDISH)))
+    source_ref = tmp_path / "Series.en.srt"
+    with open(str(source_ref), "w", encoding="utf-8") as f:
+        f.write(subs_to_srt_string(make_subs(HEALTHY_ENGLISH)))
 
     def fake_get_setting(key, default):
         if key == "languages": return '[{"name": "Swedish", "code": "sv", "enabled": true}]'
@@ -196,8 +210,18 @@ async def test_source_equals_target_yellow_does_not_publish_shortcut(tmp_path):
         content=valid_content,
     )
 
+    from app.core.trust_engine import TrustResult, TrustDecision, CandidateOrigin, VerificationMode
+    mock_yellow = TrustResult(
+        decision=TrustDecision.REPAIRABLE,
+        score=60,
+        confidence="HIGH",
+        reasons=["Sync skew"],
+        origin=CandidateOrigin.EMBEDDED,
+        verification_mode=VerificationMode.EMBEDDED_PROVENANCE
+    )
+
     with patch("app.services.pipeline.get_setting", side_effect=fake_get_setting), \
-         patch("app.services.pipeline.evaluate_subtitle_health", return_value={"status": "YELLOW", "reason": "Sync skew"}), \
+         patch("app.services.pipeline.SubtitleTrustEngine.evaluate_candidate", new_callable=AsyncMock, return_value=mock_yellow), \
          patch.object(pipeline, "trigger_bazarr_search"), \
          patch("app.services.source_resolver.SourceResolver.resolve", return_value=mock_source), \
          patch("app.services.pipeline.create_job", return_value=1), \
@@ -240,8 +264,18 @@ async def test_source_equals_target_red_does_not_publish_shortcut(tmp_path):
         content=valid_content,
     )
 
+    from app.core.trust_engine import TrustResult, TrustDecision, CandidateOrigin, VerificationMode
+    mock_red = TrustResult(
+        decision=TrustDecision.FAIL,
+        score=20,
+        confidence="HIGH",
+        reasons=["Corrupt timestamps"],
+        origin=CandidateOrigin.EMBEDDED,
+        verification_mode=VerificationMode.EMBEDDED_PROVENANCE
+    )
+
     with patch("app.services.pipeline.get_setting", side_effect=fake_get_setting), \
-         patch("app.services.pipeline.evaluate_subtitle_health", return_value={"status": "RED", "reason": "Corrupt timestamps"}), \
+         patch("app.services.pipeline.SubtitleTrustEngine.evaluate_candidate", new_callable=AsyncMock, return_value=mock_red), \
          patch.object(pipeline, "trigger_bazarr_search"), \
          patch("app.services.source_resolver.SourceResolver.resolve", return_value=mock_source), \
          patch("app.services.pipeline.create_job", return_value=1), \

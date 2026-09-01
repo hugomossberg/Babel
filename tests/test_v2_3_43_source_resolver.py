@@ -201,6 +201,8 @@ async def test_C_source_equals_target_skips_ai(isolated_db, tmp_path):
     """C. SOURCE==TARGET: if external source IS the target language, publish directly (no AI)."""
     video = tmp_path / "show.mkv"
     video.touch()
+    en_srt = tmp_path / "show.en.srt"
+    en_srt.write_text(EN_SRT, encoding="utf-8")
     # Swedish .sv.srt as source — target is also Swedish
     sv_srt = tmp_path / "show.sv.srt"
     sv_srt.write_text(SV_SRT, encoding="utf-8")
@@ -214,9 +216,11 @@ async def test_C_source_equals_target_skips_ai(isolated_db, tmp_path):
     pipeline = SubtitlePipeline()
 
     def find_ext(p, l):
-        # Return sv.srt for "sv" language lookups (source and target)
+        # Return sv.srt for "sv" and en.srt for "en"
         if l == "sv":
             return str(sv_srt)
+        if l == "en":
+            return str(en_srt)
         return None
 
     with patch("app.services.pipeline.get_setting",
@@ -572,6 +576,8 @@ async def test_M_source_equals_target_invariant(isolated_db, tmp_path):
     """M. source == target language must NOT dispatch AI."""
     video = tmp_path / "episode.mkv"
     video.touch()
+    en_srt = tmp_path / "episode.en.srt"
+    en_srt.write_text(EN_SRT, encoding="utf-8")
     sv_srt = tmp_path / "episode.sv.srt"
     sv_srt.write_text(SV_SRT, encoding="utf-8")
 
@@ -583,10 +589,17 @@ async def test_M_source_equals_target_invariant(isolated_db, tmp_path):
 
     pipeline = SubtitlePipeline()
 
+    def find_ext_m(p, l):
+        if l == "sv":
+            return str(sv_srt)
+        if l == "en":
+            return str(en_srt)
+        return None
+
     with patch("app.services.pipeline.get_setting",
                side_effect=default_settings({"extract_source_embedded": "false"})), \
          patch("app.services.pipeline.find_external_subtitle",
-               side_effect=lambda p, l: str(sv_srt) if l == "sv" else None), \
+               side_effect=find_ext_m), \
          patch.object(pipeline, "trigger_bazarr_search", AsyncMock()), \
          patch.object(pipeline.translator, "translate_srt_content", fake_translate):
         job_id = create_job(str(video))

@@ -112,9 +112,12 @@ class SubtitleSource:
 class BazarrResultCode(str, Enum):
     TRIGGERED       = "TRIGGERED"       # Search accepted / download queued
     ACCEPTED        = "ACCEPTED"        # Alias for TRIGGERED
-    MEDIA_NOT_FOUND = "MEDIA_NOT_FOUND" # Path could not be matched in Bazarr
+    MEDIA_NOT_FOUND = "MEDIA_NOT_FOUND" # Path could not be matched in Bazarr (definitive)
+    WAITING_FOR_MEDIA = "WAITING_FOR_MEDIA" # Media not yet indexed in Bazarr (transient/retryable)
     AUTH_ERROR      = "AUTH_ERROR"      # 401 / 403 — bad API key / forbidden
     CONFIG_ERROR    = "CONFIG_ERROR"    # Bad URL, missing key, other config error
+    CONFLICT        = "CONFLICT"        # 409 Conflict
+    CLIENT_ERROR    = "CLIENT_ERROR"    # 4xx other client errors
     TEMPORARY_ERROR = "TEMPORARY_ERROR" # 5xx / network timeout / transient
     TIMEOUT         = "TIMEOUT"         # Local poll deadline exceeded
     DISABLED        = "DISABLED"        # Bazarr integration not enabled
@@ -128,15 +131,23 @@ class BazarrResult:
     language: str = ""
     detail: str = ""
     http_status: Optional[int] = None
+    media_correlated: bool = False
 
     @property
     def is_transient(self) -> bool:
-        return self.code in (BazarrResultCode.TEMPORARY_ERROR, BazarrResultCode.TIMEOUT)
+        return self.code in (
+            BazarrResultCode.TEMPORARY_ERROR,
+            BazarrResultCode.TIMEOUT,
+            BazarrResultCode.WAITING_FOR_MEDIA,
+        )
 
     @property
     def is_permanent(self) -> bool:
-        return self.code in (BazarrResultCode.AUTH_ERROR, BazarrResultCode.CONFIG_ERROR,
-                             BazarrResultCode.MEDIA_NOT_FOUND)
+        return self.code in (
+            BazarrResultCode.AUTH_ERROR,
+            BazarrResultCode.CONFIG_ERROR,
+            BazarrResultCode.MEDIA_NOT_FOUND,
+        )
 
     @property
     def was_accepted(self) -> bool:
@@ -236,11 +247,10 @@ def _validate_source_candidate(
     if cues:
         first_start  = cues[0].start.total_seconds()
         last_end     = cues[-1].end.total_seconds()
-        span_seconds = last_end - first_start
-
+        span_seconds = max(0.0, last_end - first_start)
+        video_dur = video_duration_seconds or 0.0
         if span_seconds >= _SPARSE_MIN_SPAN_SECONDS:
-            video_dur = video_duration_seconds or 0.0
-            coverage  = (span_seconds / video_dur) if video_dur > 0 else None
+            coverage = (span_seconds / video_dur) if video_dur > 0 else None
 
             # Signal 1: coverage — independent of density
             if coverage is not None and coverage < _SPARSE_COVERAGE_MIN:
@@ -307,21 +317,19 @@ async def trigger_bazarr_search(
     bazarr_url: str,
     bazarr_api_key: str,
     timeout: float = 15.0,
+    readiness_timeout: Optional[float] = None,
+    radarr_id: Optional[int] = None,
+    sonarr_series_id: Optional[int] = None,
+    sonarr_episode_id: Optional[int] = None,
+    media_type: Optional[str] = None,
+    job_id: Optional[int] = None,
+    event_source: Optional[str] = None,
 ) -> BazarrResult:
     """
-    Trigger a Bazarr subtitle search for a specific language.
+    Trigger a Bazarr subtitle search for a specific language idempotently with bounded readiness retry.
 
     Returns a structured BazarrResult — never a bare None or fire-and-forget.
-
-    HTTP status semantics:
-      401/403 → AUTH_ERROR (actionable, permanent)
-      404     → MEDIA_NOT_FOUND (path not in Bazarr)
-      5xx     → TEMPORARY_ERROR (transient)
-      200/201 → TRIGGERED
     """
-    import httpx
-    from pathlib import Path
-
     if not bazarr_api_key:
         return BazarrResult(
             code=BazarrResultCode.CONFIG_ERROR,
@@ -329,221 +337,27 @@ async def trigger_bazarr_search(
             detail="Bazarr API key not configured",
         )
 
-    headers = {"X-API-KEY": bazarr_api_key}
-    lang_norm = normalize_language_code(language, default=language)
-
-    async def _patch(client, url, params) -> BazarrResult:
-        try:
-            r = await client.patch(url, headers=headers, params=params)
-            if r.status_code in (200, 201, 204):
-                return BazarrResult(code=BazarrResultCode.TRIGGERED, language=lang_norm,
-                                    detail="accepted", http_status=r.status_code)
-            elif r.status_code in (401, 403):
-                return BazarrResult(code=BazarrResultCode.AUTH_ERROR, language=lang_norm,
-                                    detail=f"HTTP {r.status_code}", http_status=r.status_code)
-            elif r.status_code == 404:
-                return BazarrResult(code=BazarrResultCode.MEDIA_NOT_FOUND, language=lang_norm,
-                                    detail=f"HTTP 404", http_status=r.status_code)
-            elif r.status_code >= 500:
-                return BazarrResult(code=BazarrResultCode.TEMPORARY_ERROR, language=lang_norm,
-                                    detail=f"HTTP {r.status_code}", http_status=r.status_code)
-            else:
-                return BazarrResult(code=BazarrResultCode.TRIGGERED, language=lang_norm,
-                                    detail=f"HTTP {r.status_code}", http_status=r.status_code)
-        except httpx.TimeoutException:
-            return BazarrResult(code=BazarrResultCode.TEMPORARY_ERROR, language=lang_norm,
-                                detail="timeout during patch")
-        except Exception as e:
-            return BazarrResult(code=BazarrResultCode.TEMPORARY_ERROR, language=lang_norm,
-                                detail=str(e))
-
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            # --- Movies ---
-            try:
-                m_res = await client.get(f"{bazarr_url}/api/movies", headers=headers)
-            except httpx.TimeoutException:
-                return BazarrResult(code=BazarrResultCode.TEMPORARY_ERROR, language=lang_norm,
-                                    detail="timeout fetching movies")
-            except Exception as e:
-                return BazarrResult(code=BazarrResultCode.TEMPORARY_ERROR, language=lang_norm,
-                                    detail=str(e))
-
-            if m_res.status_code in (401, 403):
-                return BazarrResult(code=BazarrResultCode.AUTH_ERROR, language=lang_norm,
-                                    detail=f"HTTP {m_res.status_code} on /api/movies",
-                                    http_status=m_res.status_code)
-            if m_res.status_code >= 500:
-                return BazarrResult(code=BazarrResultCode.TEMPORARY_ERROR, language=lang_norm,
-                                    detail=f"HTTP {m_res.status_code} on /api/movies",
-                                    http_status=m_res.status_code)
-
-            if m_res.status_code == 200:
-                try:
-                    m_json = m_res.json()
-                    movies = m_json.get("data", []) if isinstance(m_json, dict) else (
-                        m_json if isinstance(m_json, list) else [])
-                except Exception:
-                    movies = []
-                norm_target = os.path.normpath(video_path)
-                target_parts = norm_target.lstrip("/").split("/")
-                for m in movies:
-                    if not isinstance(m, dict):
-                        continue
-                    m_raw = m.get("path", "")
-                    if not m_raw:
-                        continue
-                    m_path = os.path.normpath(m_raw)
-                    m_parts = m_path.lstrip("/").split("/")
-                    # Match 1: exact normalized path
-                    # Match 2: basename only (filename unique within library)
-                    # Match 3: path-suffix — last min(3, len) components match
-                    #   Handles container vs host prefix differences, e.g.
-                    #   Babel: /mnt/movies/MovieTitle/Movie.mkv
-                    #   Bazarr: /media/Movies/MovieTitle/Movie.mkv
-                    suffix_depth = min(3, len(target_parts), len(m_parts))
-                    suffix_match = (
-                        suffix_depth >= 1 and
-                        target_parts[-suffix_depth:] == m_parts[-suffix_depth:]
-                    )
-                    if m_path == norm_target or os.path.basename(m_path) == os.path.basename(norm_target) or suffix_match:
-                        r_id = m.get("radarrId")
-                        if r_id:
-                            logger.info(f"Bazarr: triggering movie search radarrId={r_id} lang={lang_norm}")
-                            return await _patch(client, f"{bazarr_url}/api/movies/subtitles", {
-                                "radarrid": r_id,
-                                "language": lang_norm,
-                                "forced": "False",
-                                "hi": "False",
-                            })
-
-            # --- Series / Episodes ---
-            try:
-                s_res = await client.get(f"{bazarr_url}/api/series", headers=headers)
-            except httpx.TimeoutException:
-                return BazarrResult(code=BazarrResultCode.TEMPORARY_ERROR, language=lang_norm,
-                                    detail="timeout fetching series")
-            except Exception as e:
-                return BazarrResult(code=BazarrResultCode.TEMPORARY_ERROR, language=lang_norm,
-                                    detail=str(e))
-
-            if s_res.status_code in (401, 403):
-                return BazarrResult(code=BazarrResultCode.AUTH_ERROR, language=lang_norm,
-                                    detail=f"HTTP {s_res.status_code} on /api/series",
-                                    http_status=s_res.status_code)
-            if s_res.status_code >= 500:
-                return BazarrResult(code=BazarrResultCode.TEMPORARY_ERROR, language=lang_norm,
-                                    detail=f"HTTP {s_res.status_code} on /api/series",
-                                    http_status=s_res.status_code)
-
-            if s_res.status_code == 200:
-                try:
-                    s_json = s_res.json()
-                    all_series = s_json.get("data", []) if isinstance(s_json, dict) else (
-                        s_json if isinstance(s_json, list) else [])
-                except Exception:
-                    all_series = []
-
-                target_p = Path(video_path).resolve()
-                for series in all_series:
-                    if not isinstance(series, dict):
-                        continue
-                    raw_series_path = series.get("path", "")
-                    if not raw_series_path:
-                        continue
-                    series_p = Path(raw_series_path).resolve()
-                    is_match = False
-                    try:
-                        is_match = target_p.is_relative_to(series_p)
-                    except Exception:
-                        is_match = False
-
-                    if not (is_match or series_p.name == target_p.parent.name
-                            or series_p.name == target_p.parent.parent.name):
-                        continue
-
-                    s_id = series.get("sonarrSeriesId")
-                    if not s_id:
-                        continue
-
-                    # Get episodes for this series
-                    try:
-                        ep_res = await client.get(
-                            f"{bazarr_url}/api/episodes",
-                            headers=headers,
-                            params={"seriesid[]": s_id},
-                        )
-                    except httpx.TimeoutException:
-                        return BazarrResult(code=BazarrResultCode.TEMPORARY_ERROR, language=lang_norm,
-                                            detail="timeout fetching episodes")
-                    except Exception as e:
-                        return BazarrResult(code=BazarrResultCode.TEMPORARY_ERROR, language=lang_norm,
-                                            detail=str(e))
-
-                    if ep_res.status_code in (401, 403):
-                        return BazarrResult(code=BazarrResultCode.AUTH_ERROR, language=lang_norm,
-                                            detail=f"HTTP {ep_res.status_code} on /api/episodes",
-                                            http_status=ep_res.status_code)
-                    if ep_res.status_code >= 500:
-                        return BazarrResult(code=BazarrResultCode.TEMPORARY_ERROR, language=lang_norm,
-                                            detail=f"HTTP {ep_res.status_code} on /api/episodes",
-                                            http_status=ep_res.status_code)
-
-                    if ep_res.status_code == 200:
-                        try:
-                            ep_json = ep_res.json()
-                            episodes = ep_json.get("data", []) if isinstance(ep_json, dict) else (
-                                ep_json if isinstance(ep_json, list) else [])
-                        except Exception:
-                            episodes = []
-
-                        for ep in episodes:
-                            if not isinstance(ep, dict):
-                                continue
-                            ep_raw_path = ep.get("path", "")
-                            if not ep_raw_path:
-                                continue
-                            ep_p = Path(ep_raw_path).resolve()
-                            if ep_p == target_p or ep_p.name == target_p.name:
-                                e_id = ep.get("sonarrEpisodeId")
-                                if e_id:
-                                    logger.info(
-                                        f"Bazarr: triggering episode search "
-                                        f"series={s_id} episode={e_id} lang={lang_norm}"
-                                    )
-                                    return await _patch(client, f"{bazarr_url}/api/episodes/subtitles", {
-                                        "seriesid": s_id,
-                                        "episodeid": e_id,
-                                        "language": lang_norm,
-                                        "forced": "False",
-                                        "hi": "False",
-                                    })
-
-                    # Found the right series — if episode not matched, report it
-                    logger.warning(
-                        f"Bazarr: series matched ({series.get('title', '?')} id={s_id}) "
-                        f"but episode not found for path: {video_path}"
-                    )
-                    return BazarrResult(
-                        code=BazarrResultCode.MEDIA_NOT_FOUND,
-                        language=lang_norm,
-                        detail=f"Series matched (id={s_id}) but episode not found. "
-                               f"Video path: {video_path}",
-                    )
-
-            # Nothing matched
-            return BazarrResult(
-                code=BazarrResultCode.MEDIA_NOT_FOUND,
-                language=lang_norm,
-                detail=f"Video path could not be matched to any Bazarr movie or series: {video_path}",
-            )
-
-    except asyncio.CancelledError:
-        raise
+        from app.services.bazarr_coordinator import bazarr_coordinator
+        return await bazarr_coordinator.trigger_or_attach_target_search(
+            video_path=video_path,
+            target_lang=language,
+            bazarr_url=bazarr_url,
+            bazarr_api_key=bazarr_api_key,
+            radarr_id=radarr_id,
+            sonarr_series_id=sonarr_series_id,
+            sonarr_episode_id=sonarr_episode_id,
+            media_type=media_type,
+            job_id=job_id,
+            event_source=event_source,
+            timeout=timeout,
+            readiness_timeout=readiness_timeout,
+        )
     except Exception as e:
+        logger.warning(f"Bazarr coordinator search trigger failed: {e}")
         return BazarrResult(
             code=BazarrResultCode.TEMPORARY_ERROR,
-            language=lang_norm,
+            language=normalize_language_code(language, default=language),
             detail=str(e),
         )
 
@@ -581,6 +395,7 @@ class SourceResolver:
         source_search_deadline: float,      # total seconds budget for Bazarr source search
         source_poll_interval: float = 3.0,
         job_id: Optional[int] = None,
+        event_source: str = "MANUAL",
         find_external_subtitle_fn=None,     # injectable for testability (defaults to bazarr_checker impl)
     ):
         self.video_path = video_path
@@ -594,6 +409,7 @@ class SourceResolver:
         self.source_search_deadline = source_search_deadline
         self.source_poll_interval = source_poll_interval
         self.job_id = job_id
+        self.event_source = event_source
         # Cancellation event for terminating running extraction subprocesses
         self.cancel_event = threading.Event()
         # Use caller-provided find function (allows test mocking via pipeline namespace)
@@ -604,6 +420,7 @@ class SourceResolver:
             if container_tracks and container_tracks.get("duration")
             else None
         )
+        self.is_waiting_for_media: bool = False
 
     def cancel(self) -> None:
         """Signal cancellation to terminate any in-flight extraction subprocesses."""
@@ -619,6 +436,35 @@ class SourceResolver:
         """Return True if lang_code could be used as source for at least one remaining target."""
         norm = normalize_language_code(lang_code, default=lang_code)
         return not all(_languages_compatible(norm, t) for t in self.target_languages)
+
+    def _has_embedded_subtitle_for_lang(self, lang_code: str) -> bool:
+        """Check if container tracks contains at least one non-forced subtitle track matching lang_code."""
+        if self.container_tracks is None or not isinstance(self.container_tracks, dict):
+            return True
+        if "subtitles" not in self.container_tracks:
+            return True
+        sub_tracks = self.container_tracks.get("subtitles", [])
+        if not sub_tracks:
+            if not self.container_tracks.get("audio") and self.container_tracks.get("duration", 0.0) == 0.0:
+                return True
+            return False
+        from app.core.languages import get_language, normalize_language_code
+        norm_target = normalize_language_code(lang_code, default=lang_code).lower()
+        lang_obj = get_language(norm_target)
+        aliases = [norm_target]
+        if lang_obj:
+            aliases.extend([a.lower() for a in lang_obj.aliases])
+            aliases.append(lang_obj.display_name.lower())
+        for trk in sub_tracks:
+            if not isinstance(trk, dict):
+                continue
+            if trk.get("forced"):
+                continue
+            trk_lang = (trk.get("language") or "").lower()
+            norm_trk = normalize_language_code(trk_lang, default=trk_lang).lower()
+            if norm_trk == norm_target or any(a == trk_lang or trk_lang.startswith(a) for a in aliases):
+                return True
+        return False
 
     async def resolve(self) -> Optional[SubtitleSource]:
         """
@@ -637,61 +483,71 @@ class SourceResolver:
 
         # --- PRIORITY 1 & 2: Embedded subtitles ---
         if self.extract_source_embedded and self.container_tracks is not None:
-            for lang_code in candidate_langs:
-                if not self._is_usable_for_any_target(lang_code):
-                    continue
+            sub_tracks = self.container_tracks.get("subtitles", []) if isinstance(self.container_tracks, dict) else None
+            is_dummy_or_unprobed = not self.container_tracks.get("audio") and self.container_tracks.get("duration", 0.0) == 0.0
+            if sub_tracks is not None and not sub_tracks and not is_dummy_or_unprobed:
+                # Probed container has no embedded subtitle tracks at all. Skip all embedded attempts.
+                pass
+            else:
+                for lang_code in candidate_langs:
+                    if self.cancel_event.is_set():
+                        return None
+                    if not self._is_usable_for_any_target(lang_code):
+                        continue
+                    if not self._has_embedded_subtitle_for_lang(lang_code):
+                        continue
 
-                tmp = f"{base_path}.temp_src.{lang_code}.{uuid.uuid4().hex}.srt"
-                keep_tmp = False
-                try:
-                    self._log(f"Source Resolver: attempting extraction of embedded {lang_code.upper()} track...")
-                    def _safe_call_extractor(_vp=self.video_path, _out=tmp, _pl=lang_code, _ti=self.container_tracks, _ce=self.cancel_event):
-                        try:
-                            return _safe_extract_embedded_srt(_vp, _out, preferred_lang=_pl, tracks_info=_ti, cancel_event=_ce)
-                        except TypeError:
+                    tmp = f"{base_path}.temp_src.{lang_code}.{uuid.uuid4().hex}.srt"
+                    keep_tmp = False
+                    try:
+                        self._log(f"Source Resolver: attempting extraction of embedded {lang_code.upper()} track...")
+                        def _safe_call_extractor(_vp=self.video_path, _out=tmp, _pl=lang_code, _ti=self.container_tracks, _ce=self.cancel_event):
                             try:
-                                return _safe_extract_embedded_srt(_vp, _out, preferred_lang=_pl, tracks_info=_ti)
+                                return _safe_extract_embedded_srt(_vp, _out, preferred_lang=_pl, tracks_info=_ti, cancel_event=_ce)
                             except TypeError:
-                                return _safe_extract_embedded_srt(_vp, _out, preferred_lang=_pl)
+                                try:
+                                    return _safe_extract_embedded_srt(_vp, _out, preferred_lang=_pl, tracks_info=_ti)
+                                except TypeError:
+                                    return _safe_extract_embedded_srt(_vp, _out, preferred_lang=_pl)
 
-                    extracted = await asyncio.to_thread(_safe_call_extractor)
-                    if extracted and os.path.exists(tmp):
-                        ok, reason, actual_lang, cues = _validate_source_candidate(
-                            tmp, lang_code,
-                            video_duration_seconds=self.video_duration_seconds,
-                        )
-                        content = _read_file_safe(tmp)
-                        if ok and content:
-                            effective_lang = actual_lang or lang_code
-                            if reason == "mislabeled":
-                                self._log(
-                                    f"Source Resolver: embedded track declared as '{lang_code}' "
-                                    f"but detected as '{effective_lang}'. Using detected language."
-                                )
-                            else:
-                                self._log(
-                                    f"Source Resolver: embedded {effective_lang} source selected "
-                                    f"(origin=embedded, {len(cues)} cues)"
-                                )
-                            keep_tmp = True
-                            return SubtitleSource(
-                                language=effective_lang,
-                                origin=SourceOrigin.EMBEDDED,
-                                path=tmp,
-                                content=content,
-                                cues=cues,
-                                metadata={"declared_language": lang_code, "reason": reason},
+                        extracted = await asyncio.to_thread(_safe_call_extractor)
+                        if extracted and os.path.exists(tmp):
+                            ok, reason, actual_lang, cues = _validate_source_candidate(
+                                tmp, lang_code,
+                                video_duration_seconds=self.video_duration_seconds,
                             )
-                        elif not ok:
-                            self._log(
-                                f"Source Resolver: embedded {lang_code} track rejected: {reason}"
-                            )
-                finally:
-                    if not keep_tmp and os.path.exists(tmp):
-                        try:
-                            os.remove(tmp)
-                        except Exception:
-                            pass
+                            content = _read_file_safe(tmp)
+                            if ok and content:
+                                effective_lang = actual_lang or lang_code
+                                if reason == "mislabeled":
+                                    self._log(
+                                        f"Source Resolver: embedded track declared as '{lang_code}' "
+                                        f"but detected as '{effective_lang}'. Using detected language."
+                                    )
+                                else:
+                                    self._log(
+                                        f"Source Resolver: embedded {effective_lang} source selected "
+                                        f"(origin=embedded, {len(cues)} cues)"
+                                    )
+                                keep_tmp = True
+                                return SubtitleSource(
+                                    language=effective_lang,
+                                    origin=SourceOrigin.EMBEDDED,
+                                    path=tmp,
+                                    content=content,
+                                    cues=cues,
+                                    metadata={"declared_language": lang_code, "reason": reason},
+                                )
+                            elif not ok:
+                                self._log(
+                                    f"Source Resolver: embedded {lang_code} track rejected: {reason}"
+                                )
+                    finally:
+                        if not keep_tmp and os.path.exists(tmp):
+                            try:
+                                os.remove(tmp)
+                            except Exception:
+                                pass
 
         # --- PRIORITY 3, 4, 5: External subtitles on disk ---
         for lang_code in candidate_langs:
@@ -763,7 +619,7 @@ class SourceResolver:
             f"for languages: {bazarr_langs}"
         )
 
-        for lang_code in bazarr_langs:
+        for lang_idx, lang_code in enumerate(bazarr_langs):
             if time.monotonic() >= deadline:
                 self._log(
                     f"Source Resolver: Bazarr source search budget exhausted "
@@ -771,10 +627,22 @@ class SourceResolver:
                 )
                 return None
 
-            # Trigger Bazarr search for this language
+            # Calculate bounded slice budget for this language so remaining candidates aren't starved
+            remaining_langs_count = len(bazarr_langs) - lang_idx
+            remaining_total_budget = max(0.0, deadline - time.monotonic())
+            per_lang_budget = remaining_total_budget if remaining_langs_count <= 1 else min(15.0, remaining_total_budget)
+            lang_deadline = time.monotonic() + per_lang_budget
+
+            # Trigger Bazarr search for this language with readiness retry
+            readiness_wait = min(10.0, per_lang_budget)
             result = await trigger_bazarr_search(
-                self.video_path, lang_code,
-                self.bazarr_url, self.bazarr_api_key,
+                self.video_path,
+                lang_code,
+                self.bazarr_url,
+                self.bazarr_api_key,
+                job_id=self.job_id,
+                event_source=self.event_source,
+                readiness_timeout=readiness_wait,
             )
 
             if result.code == BazarrResultCode.AUTH_ERROR:
@@ -783,6 +651,14 @@ class SourceResolver:
                     f"HTTP auth error ({result.detail}). Check Bazarr API key."
                 )
                 return None  # Permanent — no point trying other languages
+
+            if result.code == BazarrResultCode.WAITING_FOR_MEDIA:
+                self.is_waiting_for_media = True
+                self._log(
+                    f"Source Resolver: media not yet indexed in Bazarr (WAITING_FOR_MEDIA). "
+                    f"Halting source search loop — video path: {self.video_path}."
+                )
+                return None
 
             if result.code == BazarrResultCode.MEDIA_NOT_FOUND:
                 self._log(
@@ -802,17 +678,17 @@ class SourceResolver:
             if result.was_accepted:
                 self._log(
                     f"Source Resolver: Bazarr source search for '{lang_code}' accepted. "
-                    f"Polling (budget remaining: {round(deadline - time.monotonic(), 1)}s)..."
+                    f"Polling (lang budget: {round(per_lang_budget, 1)}s, total remaining: {round(remaining_total_budget, 1)}s)..."
                 )
                 tried_langs.append(lang_code)
 
-                # Poll filesystem until deadline or file appears
+                # Poll filesystem until lang_deadline or file appears
                 found = None
-                while time.monotonic() < deadline:
+                while time.monotonic() < lang_deadline and time.monotonic() < deadline:
                     found = self._find_external_subtitle(self.video_path, lang_code)
                     if found:
                         break
-                    remaining = deadline - time.monotonic()
+                    remaining = min(lang_deadline, deadline) - time.monotonic()
                     await asyncio.sleep(min(self.source_poll_interval, max(0.5, remaining)))
 
                 # Final filesystem check

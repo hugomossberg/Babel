@@ -1,16 +1,30 @@
 import asyncio
+_real_asyncio_sleep = asyncio.sleep
 import os
 import time
 import json
 import logging
 import re
-from typing import Dict, Any, Optional, List, Set
+from datetime import datetime, timezone
+from dataclasses import dataclass
+from typing import Dict, Any, Optional, List, Set, Tuple
 import srt
 import httpx
 import uuid
+import hashlib
+
+
+@dataclass
+class TargetResolution:
+    satisfied: bool
+    origin: Any  # CandidateOrigin
+    path: Optional[str] = None
+    materialized: bool = False
+    reason: str = ""
+    trust_result: Optional[Any] = None
 
 from app.core.cleaner import sanitize_srt_content, sanitize_srt_content_with_provenance, subs_to_srt_string
-from app.core.extractor import extract_embedded_srt, inspect_mkv_tracks
+from app.core.extractor import extract_embedded_srt, inspect_mkv_tracks, DEFAULT_EXTRACTION_TIMEOUT
 from app.core.validator import (
     verify_sync, check_dropped_lines, evaluate_subtitle_health,
     detect_language_heuristics, check_language_representative, are_languages_compatible,
@@ -18,10 +32,18 @@ from app.core.validator import (
     SemanticIncidentTracker, cluster_alignment_findings, BatchSemanticState, PrimaryBatchInfo,
     extract_batch_alignment_samples
 )
+from app.core.trust_engine import (
+    SubtitleTrustEngine, TrustDecision, CandidateOrigin,
+    VerificationMode, SubtitleIntent, TargetSnapshot, CandidateState,
+    BazarrProvenance,
+    capture_target_snapshot, invalidate_trust_cache,
+    wait_for_file_stability, wait_for_candidate_quiescence,
+    DEFAULT_CANDIDATE_STABILITY_SEC, DEFAULT_BAZARR_QUIESCENCE_SEC, DEFAULT_HYBRID_BAZARR_MAX_WAIT_SEC
+)
 from app.core.db import (
     create_job, update_job, append_job_log, get_setting,
     get_positive_int_setting, get_int_setting, get_float_setting,
-    save_translation_memory_bulk
+    save_translation_memory_bulk, get_job_by_id
 )
 from app.services.bazarr_checker import check_existing_swedish_subtitle, check_existing_english_subtitle, find_external_subtitle
 from app.services.translator import (
@@ -42,6 +64,10 @@ from app.services.source_resolver import (
     BazarrResult, BazarrResultCode,
     trigger_bazarr_search as _module_trigger_bazarr_search,
     BAZARR_SOURCE_FALLBACK_ORDER,
+)
+from app.services.bazarr_coordinator import (
+    bazarr_coordinator, BazarrLifecycleState, PublicationOwnershipResult,
+    BazarrOperation, BazarrMediaInfo, BazarrJobPollStatus
 )
 from app.core.languages import normalize_language_code, get_language as _get_language
 
@@ -65,6 +91,73 @@ QA_STATUS_FAIL = "FAIL"
 
 DEFAULT_QA_MAX_UNRESOLVED_COUNT = 3
 DEFAULT_QA_MAX_UNRESOLVED_RATIO = 0.01  # 1.0% of total cues
+
+
+def compute_source_fingerprint(
+    source: Optional[SubtitleSource],
+    subs: Optional[List[srt.Subtitle]] = None,
+    video_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Computes a cryptographic source identity fingerprint for deferred QA caching.
+    Ensures that if external subtitle file or embedded source cues/timings/content
+    are replaced or modified, the cached QA artifact is rejected.
+    """
+    if not source:
+        return {
+            "source_path": None,
+            "source_origin": "",
+            "source_track_id": None,
+            "source_language": "",
+            "source_file_size": 0,
+            "source_file_mtime_ns": 0,
+            "source_content_hash": "",
+            "source_cue_count": 0,
+        }
+
+    cues = subs if subs is not None else (source.cues or [])
+    cue_count = len(cues) if cues else 0
+    orig_val = source.origin.value if hasattr(source.origin, "value") else str(source.origin)
+
+    # Compute deterministic cue hash covering index, timing, and text content
+    h = hashlib.sha256()
+    if cues:
+        for cue in cues:
+            s = f"{cue.start.total_seconds():.3f}"
+            e = f"{cue.end.total_seconds():.3f}"
+            c = (cue.content or "").strip()
+            h.update(f"{cue.index}:{s}:{e}:{c}\n".encode("utf-8", errors="replace"))
+    elif source.content:
+        h.update(source.content.encode("utf-8", errors="replace"))
+    content_hash = h.hexdigest()[:32] if (cues or source.content) else ""
+
+    src_fsize = 0
+    src_fmtime_ns = 0
+    src_path = source.path
+
+    if source.origin == SourceOrigin.EXTERNAL and source.path and os.path.exists(source.path):
+        try:
+            st = os.stat(source.path)
+            src_fsize = st.st_size
+            src_fmtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+            src_path = os.path.realpath(source.path)
+        except Exception:
+            pass
+    elif source.origin in (SourceOrigin.EMBEDDED, SourceOrigin.EMBEDDED_EXTRACTED):
+        # For embedded/temp extractions, path is volatile; use stable media + track identity
+        track_id = getattr(source, "track_id", None)
+        src_path = f"embedded:track_{track_id}" if track_id is not None else "embedded"
+
+    return {
+        "source_path": src_path,
+        "source_origin": orig_val,
+        "source_track_id": getattr(source, "track_id", None),
+        "source_language": source.language or "",
+        "source_file_size": src_fsize,
+        "source_file_mtime_ns": src_fmtime_ns,
+        "source_content_hash": content_hash,
+        "source_cue_count": cue_count,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +275,7 @@ def qa_gate(
         else:
             detected = lang_check["detected_lang"]
             conf = lang_check["confidence"]
-            target_norm = target_lang_code[:2].lower()
+            target_norm = normalize_language_code(target_lang_code)
             if detected != "unknown" and not are_languages_compatible(detected, target_norm) and conf < 0.8:
                 warnings.append(f"Low confidence language detection: expected {target_lang_code}, detected {detected} ({conf*100:.0f}% confidence)")
                 score -= 10
@@ -413,6 +506,12 @@ def _publish_subtitle_atomic(
     expected_cue_count: int,
     force_retranslate: bool = False,
     job_id: Optional[int] = None,
+    trust_gate_snapshot: Optional[TargetSnapshot] = None,
+    trust_gate_passed: bool = False,
+    trust_gate_decision: Optional[str] = None,
+    trust_gate_score: Optional[int] = None,
+    trust_gate_reasons: Optional[List[str]] = None,
+    allow_legacy_health: bool = True,
 ) -> Dict[str, Any]:
     """
     Atomically validates and publishes translated subtitle text to target_output_path.
@@ -420,17 +519,19 @@ def _publish_subtitle_atomic(
     Invariants:
     1. Writes to unique temp file in same directory with fsync.
     2. Reparses temp file and verifies cue count before touching any target/backup.
-    3. Handles existing targets with atomic backup and race-check:
-       - Evaluates health of moved backup file.
-       - If backup is GREEN, restores it and skips publishing (unless force_retranslate).
+    3. Handles existing targets with snapshot-bound authoritative Trust verification:
+       - If candidate snapshot unchanged and trust_gate_passed is True: preserves target and skips publishing.
+       - If candidate snapshot unchanged and trust_gate_passed is False: backs up rejected target to .babel-replaced.<uuid> and publishes.
+       - If candidate mutated or unverified without trust gate: returns reason="target_mutated" for bounded async re-evaluation.
+       - If allow_legacy_health is True (in standalone test harnesses without Trust Engine): evaluates health of moved backup.
     4. Uses no-clobber atomic link (_link_temp_no_clobber).
     5. If concurrent target appears after backup:
-       - Evaluates health of new target.
-       - If GREEN, preserves new target and skips publishing.
-       - If unhealthy, backs it up and links temp.
+       - In trust gate mode: returns reason="target_mutated" to trigger authoritative async Trust evaluation.
+       - If allow_legacy_health is True: evaluates health of new target.
     6. Unified transaction rollback state:
        - If any failure occurs after backup, rolls back backup to target (if target absent/unhealthy).
        - Cleans up temp file fail-closed.
+    7. Invalidates trust cache on replacement or publication.
     """
     parent_dir = os.path.dirname(target_output_path)
     if parent_dir:
@@ -479,18 +580,75 @@ def _publish_subtitle_atomic(
 
         if target_to_check and os.path.exists(target_to_check):
             if not force_retranslate:
-                initial_health = evaluate_subtitle_health(target_to_check, target_lang_code=lang_code)
-                if initial_health.get("status") == "GREEN":
-                    if job_id:
-                        append_job_log(job_id, f"External healthy {lang_code} subtitle appeared/exists. Skipping publish.")
+                if trust_gate_snapshot is not None:
+                    curr_snap = capture_target_snapshot(target_to_check)
+                    if curr_snap.size != trust_gate_snapshot.size or curr_snap.mtime_ns != trust_gate_snapshot.mtime_ns:
+                        # Candidate mutated between Trust preflight and atomic execution
+                        if temp_output and os.path.exists(temp_output):
+                            try:
+                                os.unlink(temp_output)
+                            except OSError:
+                                pass
+                        return {"published": False, "skipped": False, "reason": "target_mutated", "target_snapshot": curr_snap}
+
+                    if trust_gate_passed:
+                        # Authoritative Trust Engine PASS: preserve candidate
+                        lang_name = lang_code.upper()
+                        try:
+                            lang_obj = _get_language(lang_code)
+                            if lang_obj:
+                                lang_name = lang_obj.display_name
+                        except Exception:
+                            pass
+                        if job_id:
+                            score_str = f" (score={trust_gate_score}/100)" if trust_gate_score is not None else ""
+                            append_job_log(job_id, f"Final publish conflict: external {lang_name} candidate detected")
+                            append_job_log(job_id, f"Subtitle Trust Engine: PASS{score_str}")
+                            append_job_log(job_id, "Candidate unchanged since verification")
+                            append_job_log(job_id, "Preserving verified external target; Babel output not published")
+                        if temp_output and os.path.exists(temp_output):
+                            try:
+                                os.unlink(temp_output)
+                            except OSError:
+                                pass
+                        return {"published": False, "skipped": True, "reason": "authoritative_target_passed"}
+                    else:
+                        # Authoritative Trust Engine FAIL: log and proceed to backup and replace
+                        lang_name = lang_code.upper()
+                        try:
+                            lang_obj = _get_language(lang_code)
+                            if lang_obj:
+                                lang_name = lang_obj.display_name
+                        except Exception:
+                            pass
+                        if job_id:
+                            reasons_str = f" ({'; '.join(trust_gate_reasons)})" if trust_gate_reasons else ""
+                            append_job_log(job_id, f"Final publish conflict: external {lang_name} candidate detected")
+                            append_job_log(job_id, f"Subtitle Trust Engine: FAIL{reasons_str}")
+                            append_job_log(job_id, "Rejected external target backed up")
+                            append_job_log(job_id, "Publishing QA-passed Babel subtitle")
+                elif allow_legacy_health:
+                    initial_health = evaluate_subtitle_health(target_to_check, target_lang_code=lang_code)
+                    if initial_health.get("status") == "GREEN":
+                        if job_id:
+                            append_job_log(job_id, f"External healthy {lang_code} subtitle appeared/exists. Skipping publish.")
+                        if temp_output and os.path.exists(temp_output):
+                            try:
+                                os.unlink(temp_output)
+                            except OSError:
+                                pass
+                        return {"published": False, "skipped": True, "reason": "existing_healthy"}
+                else:
+                    # No trust gate provided and legacy health not allowed
+                    curr_snap = capture_target_snapshot(target_to_check)
                     if temp_output and os.path.exists(temp_output):
                         try:
                             os.unlink(temp_output)
                         except OSError:
                             pass
-                    return {"published": False, "skipped": True, "reason": "existing_healthy"}
+                    return {"published": False, "skipped": False, "reason": "target_mutated", "target_snapshot": curr_snap}
 
-            # Move unhealthy target to unique backup atomically
+            # Move target to unique backup atomically
             backup_original_path = target_to_check
             backup_path = f"{target_to_check}.babel-replaced.{uuid.uuid4().hex}"
             try:
@@ -498,8 +656,11 @@ def _publish_subtitle_atomic(
             except OSError as exc:
                 raise RuntimeError(f"Cannot safely back up existing subtitle {target_to_check}: {exc}") from exc
 
-            # TOCTOU race check on the backup file that was actually moved
-            if not force_retranslate:
+            # Invalidate trust cache for the backed up target
+            invalidate_trust_cache(target_to_check)
+
+            # TOCTOU race check on the backup file that was actually moved (only when allow_legacy_health is True)
+            if allow_legacy_health and not force_retranslate:
                 moved_health = evaluate_subtitle_health(backup_path, target_lang_code=lang_code)
                 if moved_health.get("status") == "GREEN":
                     if not os.path.exists(backup_original_path):
@@ -566,11 +727,22 @@ def _publish_subtitle_atomic(
 
         # 4. Atomic publish using no-clobber
         if _link_temp_no_clobber(temp_output, target_output_path):
+            invalidate_trust_cache(target_output_path)
             if job_id:
                 append_job_log(job_id, f"Published {os.path.basename(target_output_path)}")
             return {"published": True, "skipped": False, "reason": "published"}
 
         # Race: target_output_path appeared between backup and link
+        if trust_gate_snapshot is not None or not allow_legacy_health:
+            curr_snap = capture_target_snapshot(target_output_path)
+            if temp_output and os.path.exists(temp_output):
+                try:
+                    os.unlink(temp_output)
+                except OSError:
+                    pass
+            return {"published": False, "skipped": False, "reason": "target_mutated", "target_snapshot": curr_snap}
+
+        # Below is only reached in legacy test harness with allow_legacy_health=True:
         health = evaluate_subtitle_health(target_output_path, target_lang_code=lang_code)
         if health.get("status") == "GREEN":
             if job_id:
@@ -650,6 +822,7 @@ def _publish_subtitle_atomic(
             return {"published": False, "skipped": True, "reason": "concurrent_healthy_appeared"}
 
         if _link_temp_no_clobber(temp_output, target_output_path):
+            invalidate_trust_cache(target_output_path)
             if job_id:
                 append_job_log(job_id, f"Published {os.path.basename(target_output_path)}")
             return {"published": True, "skipped": False, "reason": "published"}
@@ -705,9 +878,192 @@ def _publish_subtitle_atomic(
         raise pub_err
 
 
+async def _publish_subtitle_with_trust_gate(
+    *,
+    video_path: str,
+    target_output_path: str,
+    lang_code: str,
+    translated_srt_text: str,
+    expected_cue_count: int,
+    source_subtitle: Optional[Any] = None,
+    container_tracks: Optional[Dict[str, Any]] = None,
+    primary_audio_lang: Optional[str] = None,
+    force_retranslate: bool = False,
+    job_id: Optional[int] = None,
+    auto_repair: bool = False,
+    max_conflict_retries: int = 3,
+    # Current-run Bazarr provenance context.  When Babel triggered Bazarr in
+    # this job and the search was accepted, these three values allow:
+    #   (a) acquire_publication_ownership to construct truthful BazarrProvenance
+    #       at the late-lifecycle KNOWN_IDLE point (enabling LOW_COVERAGE repair),
+    #   (b) the final conflict Trust evaluation to classify the candidate as
+    #       CandidateOrigin.BAZARR (with provenance) rather than EXTERNAL, so
+    #       the same LOW_COVERAGE global-offset repair path is available.
+    # Must only be supplied when this run's Bazarr search was explicitly accepted.
+    bazarr_pre_trigger_snapshot: Optional[TargetSnapshot] = None,
+    bazarr_search_accepted: bool = False,
+    bazarr_media_correlated: bool = False,
+) -> Dict[str, Any]:
+    """
+    Authoritative Two-Phase Atomic Publication Gate with Publication Ownership.
+
+    1. Checks Bazarr Publication Ownership: Babel NEVER replaces/publishes
+       movie.<target>.srt while a correlated Bazarr job is actively writing/syncing.
+       When current-run provenance context is provided, the ownership check can
+       also apply safe global-offset repair to a LOW_COVERAGE Bazarr candidate
+       and adopt it, skipping AI entirely.
+    2. Coordinates async Trust Engine preflight evaluation with synchronous atomic
+       compare-and-publish. Detects candidate mutations and retries bounded verification.
+       When current-run Bazarr provenance is established for the existing candidate,
+       evaluates as CandidateOrigin.BAZARR with full provenance so global-offset repair
+       is attempted before falling back to AI.
+    """
+    enable_bazarr = get_setting("enable_bazarr_check", "true").lower() == "true" and bool(get_setting("bazarr_api_key", ""))
+    bazarr_url = get_setting("bazarr_url", "http://bazarr:6767").rstrip("/")
+    bazarr_api_key = get_setting("bazarr_api_key", "")
+
+    ownership_res: Optional[PublicationOwnershipResult] = None
+    # Publication Ownership Invariant check
+    if enable_bazarr and not force_retranslate:
+        try:
+            ownership_res = await bazarr_coordinator.acquire_publication_ownership(
+                video_path=video_path,
+                target_lang=lang_code,
+                bazarr_url=bazarr_url,
+                bazarr_api_key=bazarr_api_key,
+                container_tracks=container_tracks,
+                primary_audio_lang=primary_audio_lang,
+                provided_source=source_subtitle,
+                job_id=job_id,
+                timeout_sec=4.0,
+                find_external_subtitle_fn=find_external_subtitle,
+                pre_trigger_snapshot=bazarr_pre_trigger_snapshot,
+                search_accepted=bazarr_search_accepted,
+                media_correlated=bazarr_media_correlated,
+            )
+            if ownership_res.adopted:
+                if job_id:
+                    append_job_log(job_id, "Publication ownership: Bazarr candidate adopted as trusted human target. Skipping AI publication.")
+                return {"published": False, "skipped": True, "reason": "authoritative_target_passed"}
+            elif ownership_res.defer or not ownership_res.granted:
+                reason = ownership_res.reason or "bazarr_actively_writing"
+                if job_id:
+                    append_job_log(job_id, f"Publication ownership: Bazarr lifecycle gate blocked ({reason}). Refusing to overwrite potential active worker.")
+                return {"published": False, "skipped": False, "reason": reason}
+        except Exception as e:
+            logger.warning(f"Error checking publication ownership: {e}")
+            return {"published": False, "skipped": False, "reason": "bazarr_lifecycle_unknown"}
+
+    trust_engine = SubtitleTrustEngine()
+    lang_norm = normalize_language_code(lang_code)
+
+    for attempt in range(max_conflict_retries):
+        existing = find_external_subtitle(video_path, lang_code)
+        target_to_check = existing or (target_output_path if os.path.exists(target_output_path) else None)
+
+        if target_to_check and os.path.exists(target_to_check) and not force_retranslate:
+            snapshot = capture_target_snapshot(target_to_check)
+
+            # Determine if this candidate is the current-run Bazarr result.
+            # INVARIANT: Provenance and quiescence are ONLY valid if the candidate's
+            # generation exactly matches the generation proven by acquire_publication_ownership().
+            # If the candidate was mutated, appeared after ownership, or ownership did not
+            # establish provenance for this exact snapshot, we do NOT synthesize is_quiescent=True.
+            _proven_prov = ownership_res.proven_bazarr_provenance if ownership_res else None
+            _proven_snap = ownership_res.proven_candidate_snapshot if ownership_res else None
+
+            _generation_matches_proof = (
+                _proven_prov is not None
+                and _proven_snap is not None
+                and _proven_snap.exists
+                and _proven_snap.generation_id == snapshot.generation_id
+            )
+
+            if _generation_matches_proof:
+                _conflict_prov = _proven_prov
+                _conflict_origin = CandidateOrigin.BAZARR
+            else:
+                _conflict_prov = None
+                _conflict_origin = CandidateOrigin.EXTERNAL
+
+            tres = await trust_engine.evaluate_candidate(
+                video_path=video_path,
+                candidate_path=target_to_check,
+                target_lang=lang_code,
+                origin=_conflict_origin,
+                container_tracks=container_tracks,
+                primary_audio_lang=primary_audio_lang,
+                provided_source=source_subtitle,
+                expected_intent=SubtitleIntent.FULL,
+                job_id=job_id,
+                auto_repair=auto_repair or _generation_matches_proof,
+                allow_ai_audit=False,
+                bazarr_provenance=_conflict_prov,
+            )
+
+            if tres.decision == TrustDecision.UNKNOWN:
+                if attempt < max_conflict_retries - 1:
+                    stable = await wait_for_file_stability(target_to_check, timeout_sec=0.8, interval_sec=0.05)
+                    if stable:
+                        continue
+                if job_id:
+                    append_job_log(job_id, f"Final publish conflict: candidate verification incomplete (UNKNOWN). Refusing publication.")
+                return {"published": False, "skipped": False, "reason": "target_unverified_conflict"}
+
+            # Re-capture snapshot in case repair or external write modified the file on disk
+            snapshot = capture_target_snapshot(target_to_check)
+            pub_res = _publish_subtitle_atomic(
+                video_path=video_path,
+                target_output_path=target_output_path,
+                lang_code=lang_code,
+                translated_srt_text=translated_srt_text,
+                expected_cue_count=expected_cue_count,
+                force_retranslate=force_retranslate,
+                job_id=job_id,
+                trust_gate_snapshot=snapshot,
+                trust_gate_passed=tres.passed,
+                trust_gate_decision=tres.decision.value,
+                trust_gate_score=tres.score,
+                trust_gate_reasons=tres.reasons,
+                allow_legacy_health=False,
+            )
+            if pub_res.get("published") or pub_res.get("skipped"):
+                return pub_res
+            if pub_res.get("reason") == "target_mutated":
+                if job_id:
+                    append_job_log(job_id, "Final publish conflict: candidate changed since previous Trust evaluation. Revalidating current target.")
+                continue
+            return pub_res
+        else:
+            snapshot = capture_target_snapshot(target_output_path)
+            pub_res = _publish_subtitle_atomic(
+                video_path=video_path,
+                target_output_path=target_output_path,
+                lang_code=lang_code,
+                translated_srt_text=translated_srt_text,
+                expected_cue_count=expected_cue_count,
+                force_retranslate=force_retranslate,
+                job_id=job_id,
+                trust_gate_snapshot=snapshot,
+                trust_gate_passed=False,
+                allow_legacy_health=False,
+            )
+            if pub_res.get("published") or pub_res.get("skipped"):
+                return pub_res
+            if pub_res.get("reason") == "target_mutated":
+                if job_id:
+                    append_job_log(job_id, "Final publish conflict: candidate appeared during atomic publish. Revalidating candidate.")
+                continue
+            return pub_res
+
+    raise RuntimeError(f"Failed to atomically publish subtitle to {target_output_path} after {max_conflict_retries} conflict resolution attempts.")
+
+
+
 class SubtitlePipeline:
     qa_gate = staticmethod(qa_gate)
     _publish_subtitle_atomic = staticmethod(_publish_subtitle_atomic)
+    _publish_subtitle_with_trust_gate = staticmethod(_publish_subtitle_with_trust_gate)
     _link_temp_no_clobber = staticmethod(_link_temp_no_clobber)
 
     def __init__(self):
@@ -754,18 +1110,36 @@ class SubtitlePipeline:
             return [{"name": "Swedish", "code": "sv", "enabled": True}]
 
     # Thin wrapper — delegates to source_resolver.trigger_bazarr_search.
-    async def trigger_bazarr_search(self, video_path: str, language: str = "sv"):
+    async def trigger_bazarr_search(
+        self,
+        video_path: str,
+        language: str = "sv",
+        job_id: Optional[int] = None,
+        event_source: Optional[str] = None,
+        readiness_timeout: Optional[float] = None,
+    ):
         bazarr_url = get_setting("bazarr_url", "http://bazarr:6767").rstrip("/")
         bazarr_api_key = get_setting("bazarr_api_key", "")
-        result = await _module_trigger_bazarr_search(video_path, language, bazarr_url, bazarr_api_key)
+        result = await _module_trigger_bazarr_search(
+            video_path,
+            language,
+            bazarr_url,
+            bazarr_api_key,
+            job_id=job_id,
+            event_source=event_source,
+            readiness_timeout=readiness_timeout,
+        )
         if result.code == BazarrResultCode.AUTH_ERROR:
             logger.warning(f"Bazarr auth error lang={language}: {result.detail}")
         elif result.code == BazarrResultCode.MEDIA_NOT_FOUND:
             logger.warning(f"Bazarr media not found lang={language}: {result.detail}")
+        elif result.code == BazarrResultCode.WAITING_FOR_MEDIA:
+            logger.info(f"Bazarr waiting for media indexing lang={language}: {result.detail}")
         elif result.code == BazarrResultCode.TEMPORARY_ERROR:
             logger.warning(f"Bazarr transient error lang={language}: {result.detail}")
         elif result.was_accepted:
             logger.info(f"Bazarr search triggered lang={language}")
+        return result
     async def check_semantic_cue_alignment(
         self,
         source_subs: List[srt.Subtitle],
@@ -2029,6 +2403,7 @@ class SubtitlePipeline:
         title: Optional[str] = None,
         series_title: Optional[str] = None
     ) -> Dict[str, Any]:
+        from datetime import datetime, timezone, timedelta
 
         enable_bazarr = get_setting("enable_bazarr_check", "true").lower() == "true"
         extract_target_embedded = get_setting("extract_target_embedded", "true").lower() == "true"
@@ -2044,6 +2419,8 @@ class SubtitlePipeline:
         source_poll_interval   = float(get_setting("source_poll_interval_seconds", "3"))
 
         start_time = time.time()
+        job_data = get_job_by_id(job_id) if job_id else None
+        prev_dur = float(job_data.get("duration_seconds") or 0.0) if job_data else 0.0
         # Sentinel vars so exception handlers don't NameError if raised before assignment
         source_subtitle = None
         temp_extracted_srt = f"{os.path.splitext(video_path)[0]}.temp_src.srt"
@@ -2053,7 +2430,7 @@ class SubtitlePipeline:
         if not os.path.exists(video_path):
             err = f"File not found: {video_path}"
             append_job_log(job_id, f"ERROR: {err}")
-            update_job(job_id, status="FAILED", error_message=err, duration_seconds=round(time.time() - start_time, 2))
+            update_job(job_id, status="FAILED", error_message=err, duration_seconds=round(prev_dur + (time.time() - start_time), 2))
             return {"status": "error", "message": err, "job_id": job_id}
 
         target_languages = self.get_configured_languages()
@@ -2065,13 +2442,13 @@ class SubtitlePipeline:
         base_path, _ = os.path.splitext(video_path)
 
         # -------------------------------------------------------------
-        # Bug #11: Reordered pipeline — check LOCAL targets FIRST
+        # Phase 1: Authoritative Target Acquisition Priority
         #
         # Order:
-        #   1. External target on disk
-        #   2. Embedded target in video
-        #   3. Bazarr target search
-        #   4. (If no target found) Resolve source → AI translate
+        #   1. Embedded TARGET in video (First priority)
+        #   2. External trusted target on disk (Second priority)
+        #   3. Bazarr target search (Third priority)
+        #   4. AI translation (Fourth priority)
         # -------------------------------------------------------------
 
         # Track which languages still need translation
@@ -2110,79 +2487,208 @@ class SubtitlePipeline:
             f" — source prioritisation only, never blocks translation")
 
         published_embedded_target = False
+        embedded_target_satisfied = False
+        trust_engine = SubtitleTrustEngine()
+        target_resolutions: Dict[str, TargetResolution] = {}
+        langs_needing_translation = []
+
+        # Capture pre-trigger baseline snapshots of external targets to guarantee truthful provenance
+        initial_target_snapshots: Dict[str, TargetSnapshot] = {}
+        initial_target_paths: Dict[str, Optional[str]] = {}
+        for _t_info in target_languages:
+            _t_code = normalize_language_code(_t_info["code"])
+            _t_ex = find_external_subtitle(video_path, _t_code)
+            initial_target_paths[_t_code] = _t_ex
+            if _t_ex:
+                initial_target_snapshots[_t_code] = capture_target_snapshot(_t_ex)
+            else:
+                initial_target_snapshots[_t_code] = TargetSnapshot(path="", exists=False, size=0, mtime_ns=0)
+
         if not force_retranslate:
             for lang_info in target_languages:
                 lang_code = lang_info["code"]
                 lang_name = lang_info["name"]
                 target_output_path = f"{base_path}.{lang_code}.srt"
 
-                # Target-first: check external subtitle on disk
-                existing_target = find_external_subtitle(video_path, lang_code)
+                # 1. PRIORITY 1: Existing trusted external subtitle on disk
+                existing_target = initial_target_paths.get(normalize_language_code(lang_code))
                 if existing_target:
-                    if auto_repair_unhealthy:
-                        health = evaluate_subtitle_health(existing_target, target_lang_code=lang_code)
-                        if health.get("status") == "RED":
-                            append_job_log(job_id, f"Existing {lang_name} subtitle found but unhealthy ({health['reason']}). Will re-translate.")
-                            langs_needing_translation.append(lang_info)
-                            continue
-                    append_job_log(job_id, f"Healthy {lang_name} subtitle already exists: {os.path.basename(existing_target)}. Skipping.")
-                    continue
+                    _init_tres = await trust_engine.evaluate_candidate(
+                        video_path=video_path,
+                        candidate_path=existing_target,
+                        target_lang=lang_code,
+                        origin=CandidateOrigin.EXTERNAL,
+                        container_tracks=container_tracks,
+                        primary_audio_lang=primary_audio_lang,
+                        job_id=job_id,
+                        auto_repair=auto_repair_unhealthy,
+                        allow_ai_audit=False,
+                    )
+                    if _init_tres.passed:
+                        append_job_log(job_id, f"Verified healthy {lang_name} subtitle already exists: {os.path.basename(existing_target)} (score={_init_tres.score}/100). Skipping.")
+                        target_resolutions[lang_code] = TargetResolution(
+                            satisfied=True,
+                            origin=CandidateOrigin.EXTERNAL,
+                            path=existing_target,
+                            materialized=True,
+                            reason=f"Verified healthy {lang_name} subtitle already exists: {os.path.basename(existing_target)}",
+                            trust_result=_init_tres,
+                        )
+                        continue
+                    elif _init_tres.decision == TrustDecision.UNKNOWN:
+                        append_job_log(job_id, f"{lang_name} target detected ({os.path.basename(existing_target)}); awaiting Trust verification. Resolving source...")
+                    else:
+                        append_job_log(job_id, f"Existing {lang_name} subtitle found but rejected by Trust Engine ({_init_tres.decision.value}: {'; '.join(_init_tres.reasons)}). Continuing with Babel fallback.")
 
-                # Bug #13: Don't return after first embedded target — continue loop
+                # 2. PRIORITY 2: Embedded TARGET in video container
                 if extract_target_embedded:
-                    if not os.path.exists(target_output_path):
-                        temp_target_path = f"{target_output_path}.tmp_embed.{uuid.uuid4().hex}"
-                        published = False
-                        try:
-                            extracted = await asyncio.to_thread(
-                                _safe_extract_embedded_srt,
-                                video_path,
-                                temp_target_path,
-                                preferred_lang=lang_code,
-                                tracks_info=container_tracks
+                    sub_tracks = (container_tracks or {}).get("subtitles", [])
+                    lang_obj = _get_language(lang_code)
+                    lang_prefixes = lang_obj.aliases if lang_obj else [lang_code.lower()]
+                    matching_embedded_tracks = []
+                    for tr in sub_tracks:
+                        tl = (tr.get("language") or "").lower()
+                        tc = (tr.get("codec") or "")
+                        tt = (tr.get("title") or "").lower()
+                        tf = tr.get("forced", False)
+                        is_text = any(
+                            tc.lower() in x.lower() or x.lower() in tc.lower()
+                            for x in [
+                                "SubRip/SRT", "S_TEXT/UTF8", "S_TEXT/ASS", "S_TEXT/SSA",
+                                "S_TEXT/WEBVTT", "SubStationAlpha", "WebVTT", "srt", "text",
+                                "ass", "ssa", "vtt", "utf", "substation"
+                            ]
+                        )
+                        if any(lp == tl or tl.startswith(lp) for lp in lang_prefixes) and is_text:
+                            if not tf and not any(kw in tt for kw in ["forced", "signs", "songs", "foreign", "parts", "descriptive", "commentary", "director", "description"]):
+                                matching_embedded_tracks.append(tr)
+
+                    is_empty_probe = (not sub_tracks and not (container_tracks or {}).get("audio") and (container_tracks or {}).get("duration", 0.0) == 0.0)
+                    if matching_embedded_tracks or (container_tracks is None and not existing_target) or (is_empty_probe and not existing_target):
+                        first_cand = matching_embedded_tracks[0] if matching_embedded_tracks else {}
+                        codec_display = first_cand.get("codec", "unknown")
+                        track_desc = f"track {first_cand.get('id')}" if first_cand.get('id') is not None else "track"
+
+                        if matching_embedded_tracks:
+                            append_job_log(job_id, f"Embedded target scan: {lang_name} {codec_display} candidate found ({track_desc})")
+
+                        materialize_embedded_target = get_setting("materialize_embedded_target", "false").lower() == "true"
+                        if not materialize_embedded_target and matching_embedded_tracks:
+                            # Part 2: Satisfy WITHOUT materialization / WITHOUT mkvextract!
+                            append_job_log(job_id, f"Embedded {lang_name} target satisfies language via container metadata ({codec_display}, {track_desc}). Materialization skipped.")
+                            target_resolutions[lang_code] = TargetResolution(
+                                satisfied=True,
+                                origin=CandidateOrigin.EMBEDDED,
+                                path=None,
+                                materialized=False,
+                                reason=f"Embedded {lang_name} target satisfies language via container metadata ({codec_display}, {track_desc})",
                             )
-                            if extracted and os.path.exists(temp_target_path):
-                                # Always validate extracted embedded target, regardless of auto_repair setting
-                                health = evaluate_subtitle_health(temp_target_path, target_lang_code=lang_code)
-                                status = health.get("status", "UNKNOWN")
-
-                                if status == "GREEN":
-                                    with open(temp_target_path, "r", encoding="utf-8-sig", errors="ignore") as _ef:
-                                        _emb_text = _ef.read()
-                                    try:
-                                        _emb_cues = list(srt.parse(_emb_text))
-                                    except Exception:
-                                        _emb_cues = []
-                                    pub_res = _publish_subtitle_atomic(
+                            embedded_target_satisfied = True
+                            continue
+                        else:
+                            parent_dir = os.path.dirname(target_output_path) or "."
+                            temp_target_path = os.path.join(
+                                parent_dir,
+                                f".{os.path.basename(target_output_path)}.tmp_embed.{uuid.uuid4().hex}.srt"
+                            )
+                            published = False
+                            t_emb_start = time.perf_counter()
+                            try:
+                                extracted = await asyncio.to_thread(
+                                    _safe_extract_embedded_srt,
+                                    video_path,
+                                    temp_target_path,
+                                    preferred_lang=lang_code,
+                                    tracks_info=container_tracks
+                                )
+                                t_emb_duration = time.perf_counter() - t_emb_start
+                                if extracted and os.path.exists(temp_target_path) and os.path.getsize(temp_target_path) > 0:
+                                    append_job_log(job_id, f"Embedded target extraction: {track_desc} → SRT ({t_emb_duration:.2f}s)")
+                                    # Always validate extracted embedded target via Trust Engine
+                                    _emb_tres = await trust_engine.evaluate_candidate(
                                         video_path=video_path,
-                                        target_output_path=target_output_path,
-                                        lang_code=lang_code,
-                                        translated_srt_text=_emb_text,
-                                        expected_cue_count=len(_emb_cues),
-                                        force_retranslate=force_retranslate,
-                                        job_id=job_id
+                                        candidate_path=temp_target_path,
+                                        target_lang=lang_code,
+                                        origin=CandidateOrigin.EMBEDDED,
+                                        container_tracks=container_tracks,
+                                        primary_audio_lang=primary_audio_lang,
+                                        expected_intent=SubtitleIntent.FULL,
+                                        job_id=job_id,
+                                        auto_repair=auto_repair_unhealthy,
+                                        allow_ai_audit=False,
                                     )
-                                    if pub_res.get("published"):
-                                        published = True
-                                        published_embedded_target = True
-                                        append_job_log(job_id, f"Extracted healthy embedded {lang_name} track to {os.path.basename(target_output_path)}.")
-                                        continue
-                                    elif pub_res.get("skipped"):
-                                        published = True
-                                        append_job_log(job_id, f"External healthy {lang_name} subtitle appeared during embedded extraction. Preserving external subtitle.")
-                                        continue
-                                elif status == "YELLOW":
-                                    append_job_log(job_id, f"Extracted embedded {lang_name} track is YELLOW ({health.get('reason')}). Queuing for deeper QA validation.")
-                                else:
-                                    append_job_log(job_id, f"Extracted embedded {lang_name} track rejected: {status} ({health.get('reason', 'Unknown error')}).")
-                        finally:
-                            if not published and os.path.exists(temp_target_path):
-                                try:
-                                    os.remove(temp_target_path)
-                                except Exception:
-                                    pass
+                                    if _emb_tres.passed:
+                                        append_job_log(job_id, f"Embedded target validation: PASS (score={_emb_tres.score}/100)")
+                                        with open(temp_target_path, "r", encoding="utf-8-sig", errors="ignore") as _ef:
+                                            _emb_text = _ef.read()
+                                        try:
+                                            _emb_cues = list(srt.parse(_emb_text))
+                                        except Exception:
+                                            _emb_cues = []
+                                        pub_res = await _publish_subtitle_with_trust_gate(
+                                            video_path=video_path,
+                                            target_output_path=target_output_path,
+                                            lang_code=lang_code,
+                                            translated_srt_text=_emb_text,
+                                            expected_cue_count=len(_emb_cues),
+                                            source_subtitle=None,
+                                            container_tracks=container_tracks,
+                                            primary_audio_lang=primary_audio_lang,
+                                            force_retranslate=force_retranslate,
+                                            job_id=job_id,
+                                            auto_repair=auto_repair_unhealthy,
+                                        )
+                                        if pub_res.get("published"):
+                                            published = True
+                                            published_embedded_target = True
+                                            embedded_target_satisfied = True
+                                            target_resolutions[lang_code] = TargetResolution(
+                                                satisfied=True,
+                                                origin=CandidateOrigin.EMBEDDED,
+                                                path=target_output_path,
+                                                materialized=True,
+                                                reason=f"Extracted healthy embedded {lang_name} track to {os.path.basename(target_output_path)} (score={_emb_tres.score}/100).",
+                                                trust_result=_emb_tres,
+                                            )
+                                            append_job_log(job_id, f"Embedded {lang_name} target selected")
+                                            append_job_log(job_id, f"Extracted healthy embedded {lang_name} track to {os.path.basename(target_output_path)} (score={_emb_tres.score}/100).")
+                                            continue
+                                        elif pub_res.get("skipped"):
+                                            published = True
+                                            embedded_target_satisfied = True
+                                            target_resolutions[lang_code] = TargetResolution(
+                                                satisfied=True,
+                                                origin=CandidateOrigin.EXTERNAL,
+                                                path=target_output_path,
+                                                materialized=True,
+                                                reason=f"External healthy {lang_name} subtitle appeared during embedded extraction.",
+                                            )
+                                            append_job_log(job_id, f"External healthy {lang_name} subtitle appeared during embedded extraction. Preserving external subtitle.")
+                                            continue
+                                        else:
+                                            embedded_target_satisfied = True
+                                            target_resolutions[lang_code] = TargetResolution(
+                                                satisfied=True,
+                                                origin=CandidateOrigin.EMBEDDED,
+                                                path=None,
+                                                materialized=False,
+                                                reason=f"Embedded {lang_name} target validated (PASS, score={_emb_tres.score}/100). External publication deferred ({pub_res.get('reason')}). Target language satisfied.",
+                                                trust_result=_emb_tres,
+                                            )
+                                            append_job_log(job_id, f"Embedded {lang_name} target validated (PASS, score={_emb_tres.score}/100). External publication deferred ({pub_res.get('reason')}). Target language satisfied.")
+                                            continue
+                                    else:
+                                        append_job_log(job_id, f"Embedded target validation: FAIL ({_emb_tres.decision.value}: {'; '.join(_emb_tres.reasons)}).")
+                                elif matching_embedded_tracks:
+                                    append_job_log(job_id, f"Embedded target extraction failed: {codec_display}")
+                            finally:
+                                if not published and os.path.exists(temp_target_path):
+                                    try:
+                                        os.remove(temp_target_path)
+                                    except Exception:
+                                        pass
 
-                # This language needs translation
+                # 3. If neither external nor embedded satisfied the language, it needs Bazarr/AI
                 langs_needing_translation.append(lang_info)
         else:
             langs_needing_translation = list(target_languages)
@@ -2190,8 +2696,28 @@ class SubtitlePipeline:
         # If all languages are covered, we're done
         if not langs_needing_translation:
             duration = round(time.time() - start_time, 2)
-            update_job(job_id, status="ALREADY EXISTS", reason="All target subtitles already exist", duration_seconds=duration)
-            if published_embedded_target:
+            has_embedded = any(r.origin == CandidateOrigin.EMBEDDED for r in target_resolutions.values())
+            has_external = any(r.origin == CandidateOrigin.EXTERNAL for r in target_resolutions.values())
+            has_materialized_embedded = any(r.origin == CandidateOrigin.EMBEDDED and r.materialized for r in target_resolutions.values())
+
+            if has_embedded:
+                append_job_log(job_id, "Bazarr skipped — embedded target satisfied language")
+                append_job_log(job_id, "AI skipped")
+                append_job_log(job_id, "AI calls: 0")
+
+            if has_embedded and not has_external:
+                if has_materialized_embedded:
+                    reason_str = "Embedded target extracted and published"
+                else:
+                    first_emb_lang = next((l["name"] for l in target_languages if l["code"] in target_resolutions and target_resolutions[l["code"]].origin == CandidateOrigin.EMBEDDED), "")
+                    reason_str = f"Embedded target satisfies language ({first_emb_lang})" if len(target_resolutions) == 1 else "Embedded targets satisfy all languages"
+            elif has_embedded and has_external:
+                reason_str = "All target subtitles already exist (embedded + external)"
+            else:
+                reason_str = "All target subtitles already exist"
+
+            update_job(job_id, status="ALREADY EXISTS", reason=reason_str, duration_seconds=duration)
+            if has_materialized_embedded:
                 await self._notify_media_servers(video_path)
             return {"status": "skipped", "reason": "already_exists", "job_id": job_id}
         # Design:
@@ -2208,9 +2734,60 @@ class SubtitlePipeline:
         # English source extraction to complete before checking.
         prep_start_time = time.time()
 
-        # Step 1: Trigger Bazarr TARGET searches (non-blocking HTTP fire-and-forget)
+        _bazarr_accepted_by_lang: Dict[str, bool] = {}
+        _bazarr_correlated_by_lang: Dict[str, bool] = {}
+
+        def is_bazarr_accepted_for_lang(lcode: str) -> bool:
+            return _bazarr_accepted_by_lang.get(normalize_language_code(lcode), False)
+
+        def is_bazarr_correlated_for_lang(lcode: str) -> bool:
+            return _bazarr_correlated_by_lang.get(normalize_language_code(lcode), False)
+
+        def get_correlated_bazarr_origin(cand_path: Optional[str], lcode: str) -> CandidateOrigin:
+            """
+            Infers candidate origin based on per-language Bazarr trigger state and pre-Bazarr snapshots.
+            If authoritative Bazarr correlation is absent (Bazarr disabled or search not accepted),
+            or if candidate generation matches the pre-Bazarr state, it is labeled EXTERNAL.
+            If a new/changed generation appeared after Bazarr search was accepted for this specific language, it is labeled BAZARR.
+            """
+            norm_code = normalize_language_code(lcode)
+            if not cand_path or not is_bazarr_accepted_for_lang(norm_code):
+                return CandidateOrigin.EXTERNAL
+            cand_snap = capture_target_snapshot(cand_path)
+            if not cand_snap.exists:
+                return CandidateOrigin.EXTERNAL
+            init_snap = initial_target_snapshots.get(norm_code)
+            if init_snap and init_snap.exists and init_snap.generation_id == cand_snap.generation_id:
+                return CandidateOrigin.EXTERNAL
+            return CandidateOrigin.BAZARR
+
+        get_authoritative_candidate_origin = get_correlated_bazarr_origin
+
+        def get_bazarr_provenance_for_lang(
+            lcode: str,
+            is_finalized: bool = False,
+            is_quiescent: bool = False,
+            poll_state: Optional[Any] = None,
+            media_correlated: bool = False,
+            candidate_snapshot: Optional[TargetSnapshot] = None,
+        ) -> BazarrProvenance:
+            norm_code = normalize_language_code(lcode)
+            accepted = is_bazarr_accepted_for_lang(norm_code)
+            init_snap = initial_target_snapshots.get(norm_code)
+            return BazarrProvenance(
+                video_path=video_path,
+                target_lang=norm_code,
+                search_accepted=accepted,
+                pre_trigger_snapshot=init_snap,
+                is_finalized=is_finalized,
+                is_quiescent=is_quiescent,
+                media_correlated=media_correlated,
+                poll_state=poll_state,
+                candidate_snapshot=candidate_snapshot,
+            )
+
+        # Step 1: Trigger Bazarr TARGET searches (non-blocking HTTP task)
         bazarr_tasks: List[asyncio.Task] = []
-        _bazarr_accepted = asyncio.Event()
         if enable_bazarr and not force_retranslate:
             for _blinfo in langs_needing_translation:
                 _blc = _blinfo["code"]
@@ -2218,21 +2795,32 @@ class SubtitlePipeline:
                 append_job_log(job_id, f"Hybrid Mode: Triggering Bazarr search for {_bln} ({_blc})...")
                 async def _do_btarget(_lc=_blc, _ln=_bln):
                     try:
-                        # Call self.trigger_bazarr_search so tests can mock it via monkeypatch.
-                        # self.trigger_bazarr_search is a thin wrapper around _module_trigger_bazarr_search.
-                        _r = await self.trigger_bazarr_search(video_path, language=_lc)
+                        import inspect
+                        sig = inspect.signature(self.trigger_bazarr_search)
+                        call_kwargs = {"language": _lc}
+                        if "job_id" in sig.parameters:
+                            call_kwargs["job_id"] = job_id
+                        if "event_source" in sig.parameters:
+                            call_kwargs["event_source"] = event_source
+                        _r = await self.trigger_bazarr_search(video_path, **call_kwargs)
                         if isinstance(_r, BazarrResult):
                             if _r.code == BazarrResultCode.AUTH_ERROR:
                                 append_job_log(job_id, f"Bazarr auth error for {_ln}: {_r.detail}")
                             elif _r.code == BazarrResultCode.MEDIA_NOT_FOUND:
                                 append_job_log(job_id, f"Bazarr: {_ln} not found in library — {_r.detail}")
+                            elif _r.code == BazarrResultCode.WAITING_FOR_MEDIA:
+                                append_job_log(job_id, f"Bazarr correlation: {_ln} WAITING_FOR_MEDIA (indexing in progress)")
                             elif _r.code == BazarrResultCode.TEMPORARY_ERROR:
                                 append_job_log(job_id, f"Bazarr transient error for {_ln}: {_r.detail}")
                             elif _r.was_accepted:
                                 append_job_log(job_id, f"Bazarr target search for {_ln} accepted.")
-                                _bazarr_accepted.set()
-                        else:
-                            _bazarr_accepted.set()
+                                _bazarr_accepted_by_lang[normalize_language_code(_lc)] = True
+                                if getattr(_r, "media_correlated", False):
+                                    _bazarr_correlated_by_lang[normalize_language_code(_lc)] = True
+                        elif _r is True:
+                            append_job_log(job_id, f"Bazarr target search for {_ln} accepted.")
+                            _bazarr_accepted_by_lang[normalize_language_code(_lc)] = True
+                            _bazarr_correlated_by_lang[normalize_language_code(_lc)] = True
                     except asyncio.CancelledError:
                         raise
                     except Exception as _e:
@@ -2256,6 +2844,7 @@ class SubtitlePipeline:
             source_search_deadline=source_search_deadline,
             source_poll_interval=source_poll_interval,
             job_id=job_id,
+            event_source=event_source,
             # Pass the function from THIS module's namespace so test mocks
             # on app.services.pipeline.find_external_subtitle are respected.
             find_external_subtitle_fn=find_external_subtitle,
@@ -2263,78 +2852,126 @@ class SubtitlePipeline:
         _source_task = asyncio.create_task(_resolver.resolve(), name=f"source_resolve_{job_id}")
 
         # Step 3: Concurrent target-presence poller.
-        # Polls the filesystem every ~2s while source is resolving.
+        # Polls the filesystem every 0.5s while source is resolving.
         # Exits immediately if Bazarr is disabled or force_retranslate is set.
-        # Has a hard deadline at source_search_deadline to prevent unbounded running.
+        # Stays active as long as source extraction is running (up to extraction timeout + margin).
         _target_found_early = asyncio.Event()
-        _target_poll_interval = 2.0  # seconds between filesystem checks
-        # Hard upper bound: poller cannot live longer than source would wait anyway
-        _poll_deadline = time.monotonic() + source_search_deadline
+        _target_poll_interval = 0.5  # Responsive 500ms polling while extraction is running
+        _max_race_timeout = DEFAULT_EXTRACTION_TIMEOUT + 30.0
+        _poll_deadline = time.monotonic() + _max_race_timeout
 
         async def _poll_target_arrival():
             """Lightweight poller: check if ALL langs now have a healthy target on disk.
             Exits immediately if Bazarr is disabled; otherwise polls every _target_poll_interval
-            seconds until a target is found or the deadline is reached.
-
-            Uses asyncio.wait_for instead of asyncio.sleep so that test mocking of
-            asyncio.sleep cannot cause this task to spin without yielding to the event loop.
+            seconds until a target is found or source resolution finishes.
             """
-            # Short-circuit immediately if Bazarr is off or force re-translate requested
             if not enable_bazarr or force_retranslate or not langs_needing_translation:
                 return
             while not _target_found_early.is_set():
+                if _source_task.done():
+                    return
                 if time.monotonic() >= _poll_deadline:
                     return
-                try:
-                    # Use a future + call_later as a timer, immune to asyncio.sleep mocking in tests.
-                    _wakeup = asyncio.get_event_loop().create_future()
-                    _h = asyncio.get_event_loop().call_later(_target_poll_interval, _wakeup.set_result, None)
+
+                # Fast disk presence check: verify if candidates exist for all target languages
+                all_found_on_disk = True
+                for _pli in langs_needing_translation:
+                    if not find_external_subtitle(video_path, _pli["code"]):
+                        all_found_on_disk = False
+                        break
+
+                if not all_found_on_disk:
                     try:
-                        await asyncio.wait_for(asyncio.shield(_wakeup), timeout=_target_poll_interval + 1)
-                    except asyncio.TimeoutError:
-                        pass  # poll interval elapsed — continue to filesystem check
-                    finally:
-                        _h.cancel()  # always clean up the call_later handle
-                        if not _wakeup.done():
-                            _wakeup.cancel()
-                except asyncio.CancelledError:
-                    raise  # always propagate — do not loop on cancellation
-                except Exception:
-                    return
+                        await _real_asyncio_sleep(_target_poll_interval)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        return
+                    continue
+
+                # Files exist on disk — check Bazarr system jobs if reachable
+                poll_res = None
+                if bazarr_api_key:
+                    try:
+                        from app.services.bazarr_coordinator import _normalize_poll_result, BazarrJobPollStatus
+                        raw_poll = await bazarr_coordinator.poll_system_jobs(bazarr_url, bazarr_api_key)
+                        poll_res = _normalize_poll_result(raw_poll)
+                    except Exception as _e:
+                        logger.warning(f"Early target poller poll_system_jobs error: {_e}")
+                        poll_res = None
+
                 all_covered = True
                 for _pli in langs_needing_translation:
                     _pex = find_external_subtitle(video_path, _pli["code"])
                     if not _pex:
                         all_covered = False
                         break
-                    if auto_repair_unhealthy:
-                        _ph = evaluate_subtitle_health(_pex, target_lang_code=_pli["code"])
-                        if _ph.get("status") == "RED":
+
+                    if poll_res is not None and poll_res.status not in (BazarrJobPollStatus.UNKNOWN, None):
+                        _search_j, _sync_j = bazarr_coordinator.classify_jobs_for_target(poll_res, video_path, _pli["code"])
+                        if _search_j or _sync_j:
+                            # Job is still active/syncing — candidate is PROVISIONAL, do not declare early win
                             all_covered = False
                             break
+
+                    _p_stable = await wait_for_file_stability(_pex, min_stability_sec=0.12, timeout_sec=0.4, interval_sec=0.025)
+                    if not _p_stable:
+                        all_covered = False
+                        break
+                    _p_snap = capture_target_snapshot(_pex)
+                    _p_poll_state = poll_res.status if (poll_res is not None and poll_res.status != BazarrJobPollStatus.UNKNOWN) else None
+                    _p_prov = get_bazarr_provenance_for_lang(
+                        _pli["code"],
+                        is_finalized=True,
+                        is_quiescent=True,
+                        poll_state=_p_poll_state,
+                        media_correlated=is_bazarr_correlated_for_lang(_pli["code"]),
+                        candidate_snapshot=_p_snap,
+                    )
+                    _ptres = await trust_engine.evaluate_candidate(
+                        video_path=video_path,
+                        candidate_path=_pex,
+                        target_lang=_pli["code"],
+                        origin=get_authoritative_candidate_origin(_pex, _pli["code"]),
+                        container_tracks=container_tracks,
+                        primary_audio_lang=primary_audio_lang,
+                        job_id=job_id,
+                        auto_repair=auto_repair_unhealthy,
+                        allow_ai_audit=False,
+                        bazarr_provenance=_p_prov,
+                    )
+                    if not _ptres.passed:
+                        all_covered = False
+                        break
                 if all_covered:
                     _target_found_early.set()
                     return
 
+                try:
+                    await _real_asyncio_sleep(_target_poll_interval)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    return
+
         _poll_task = asyncio.create_task(_poll_target_arrival(), name=f"target_poll_{job_id}")
 
-
         # Wait for EITHER source resolution OR early target detection to complete.
-        # asyncio.wait with FIRST_COMPLETED lets us react immediately.
-        # Timeout = source_search_deadline + margin to prevent unbounded waiting.
         source_subtitle = None
         _early_target_win = False
         try:
             _done, _pending = await asyncio.wait(
                 {_source_task, _poll_task},
                 return_when=asyncio.FIRST_COMPLETED,
-                timeout=source_search_deadline + 10,  # hard upper bound
+                timeout=_max_race_timeout,
             )
 
-
-            if _poll_task in _done and _target_found_early.is_set() and not _source_task.done():
-                # Target appeared on disk while source was still resolving.
-                # Cancel source extraction immediately — terminates underlying mkvextract/ffmpeg process.
+            # CANCELLATION INVARIANT:
+            # Cancelling source resolution (_resolver.cancel() / _source_task.cancel()) is strictly
+            # permitted ONLY AFTER an authoritative SubtitleTrustEngine PASS has verified the target
+            # against a valid reference or same-container provenance. A reference-less or UNKNOWN
+            # candidate must NEVER cancel in-flight source extraction.
+            if _target_found_early.is_set() or (_poll_task in _done and _target_found_early.is_set() and not _source_task.done()):
                 _resolver.cancel()
                 _source_task.cancel()
                 try:
@@ -2342,16 +2979,17 @@ class SubtitlePipeline:
                 except (asyncio.CancelledError, Exception):
                     pass
                 _early_target_win = True
+                _target_win_elapsed = round(time.time() - prep_start_time, 2)
                 append_job_log(job_id, "Target/Source race winner: Bazarr")
-                append_job_log(job_id, f"Target subtitle found after {round(time.time() - prep_start_time, 2)}s")
+                append_job_log(job_id, f"Target subtitle found after {_target_win_elapsed}s")
+                append_job_log(job_id, f"Embedded extraction cancelled: target subtitle won race after {_target_win_elapsed}s")
                 append_job_log(job_id, "Source extraction cancelled")
                 append_job_log(job_id, "AI skipped")
                 append_job_log(job_id, "AI calls: 0")
                 append_job_log(job_id, "Estimated AI cost: $0.00")
-                append_job_log(job_id, f"Total source preparation: {round(time.time() - prep_start_time, 2)}s")
+                append_job_log(job_id, f"Total source preparation: {_target_win_elapsed}s")
             else:
                 # Source finished first (or both finished simultaneously).
-                # Cancel the poll task — it's no longer needed.
                 _poll_task.cancel()
                 try:
                     await _poll_task
@@ -2385,39 +3023,108 @@ class SubtitlePipeline:
         if bazarr_tasks:
             await asyncio.gather(*bazarr_tasks, return_exceptions=True)
 
-        # ── Final Bazarr target check ─────────────────────────────────────────
+        # ── Final Bazarr / External target check ──────────────────────────────
         # Authoritative: check filesystem regardless of how we got here.
         # This also handles the early-target-win path from the concurrent poller.
         if enable_bazarr and not force_retranslate:
             _still_miss = []
+            _resolved_origins = {}
             for _blinfo in langs_needing_translation:
                 _bex = find_external_subtitle(video_path, _blinfo["code"])
                 if _bex:
-                    if auto_repair_unhealthy:
-                        _bh = evaluate_subtitle_health(_bex, target_lang_code=_blinfo["code"])
-                        if _bh.get("status") == "RED":
-                            _still_miss.append(_blinfo)
-                            continue
-                    # Log accurately: we observed the file on disk, we don't claim to
-                    # know whether it was Bazarr, the filesystem watcher, or another agent.
-                    append_job_log(job_id, f"Observed healthy {_blinfo['name']} subtitle on disk: {os.path.basename(_bex)}")
+                    _origin = get_authoritative_candidate_origin(_bex, _blinfo["code"])
+                    _b_snap = capture_target_snapshot(_bex)
+                    _post_poll_status = None
+                    if _early_target_win:
+                        _post_poll_status = BazarrJobPollStatus.KNOWN_IDLE
+                    elif bazarr_url and bazarr_api_key:
+                        try:
+                            _pjobs = await bazarr_coordinator.poll_system_jobs(bazarr_url, bazarr_api_key, timeout=3.0)
+                            if _pjobs is not None and _pjobs.status == BazarrJobPollStatus.KNOWN_IDLE:
+                                _search_j, _sync_j = bazarr_coordinator.classify_jobs_for_target(_pjobs, video_path, _blinfo["code"])
+                                if not _search_j and not _sync_j:
+                                    _post_poll_status = BazarrJobPollStatus.KNOWN_IDLE
+                        except Exception:
+                            _post_poll_status = None
+
+                    _b_prov = get_bazarr_provenance_for_lang(
+                        _blinfo["code"],
+                        is_finalized=_early_target_win or (_post_poll_status == BazarrJobPollStatus.KNOWN_IDLE),
+                        is_quiescent=True,
+                        poll_state=_post_poll_status,
+                        media_correlated=is_bazarr_correlated_for_lang(_blinfo["code"]),
+                        candidate_snapshot=_b_snap,
+                    )
+                    _btres = await trust_engine.evaluate_candidate(
+                        video_path=video_path,
+                        candidate_path=_bex,
+                        target_lang=_blinfo["code"],
+                        origin=_origin,
+                        container_tracks=container_tracks,
+                        primary_audio_lang=primary_audio_lang,
+                        provided_source=source_subtitle,
+                        job_id=job_id,
+                        auto_repair=auto_repair_unhealthy,
+                        allow_ai_audit=True,
+                        bazarr_provenance=_b_prov,
+                    )
+                    if not _btres.passed:
+                        append_job_log(job_id, f"Observed {_blinfo['name']} subtitle on disk rejected by Trust Engine ({_btres.decision.value}: {'; '.join(_btres.reasons)})")
+                        append_job_log(job_id, "No trusted target available — continuing with Babel fallback")
+                        _still_miss.append(_blinfo)
+                        continue
+                    _resolved_origins[_blinfo["code"]] = _origin
+                    if _btres.repair and _btres.repair.get("applied_shift_sec") is not None:
+                        append_job_log(job_id, f"Safe timing repair applied: shifted timestamps by {_btres.repair['applied_shift_sec']:+.2f}s")
+                        append_job_log(job_id, f"Revalidation: PASS (score={_btres.score}/100)")
+                        append_job_log(job_id, "Using repaired human subtitle")
+                    else:
+                        _ref_log = f", ref={_btres.reference.get('language', 'none')}" if _btres.reference else ""
+                        append_job_log(job_id, f"Subtitle Trust Engine: PASS (score={_btres.score}/100{_ref_log})")
+                        append_job_log(job_id, "Using verified external target")
                 else:
                     _still_miss.append(_blinfo)
             langs_needing_translation = _still_miss
             if not langs_needing_translation:
                 _bzdur = round(time.time() - start_time, 2)
-                append_job_log(job_id, "Target/Source race winner: Bazarr")
-                append_job_log(job_id, f"Bazarr target observed: {_bzdur}s")
+                _all_bazarr = bool(_resolved_origins) and all(orig == CandidateOrigin.BAZARR for orig in _resolved_origins.values())
+                _all_external = bool(_resolved_origins) and all(orig == CandidateOrigin.EXTERNAL for orig in _resolved_origins.values())
+
+                if _all_bazarr:
+                    append_job_log(job_id, "Target/Source race winner: Bazarr")
+                    append_job_log(job_id, f"Bazarr target observed: {_bzdur}s")
+                    _status = "BAZARR MATCH"
+                    _reason = "Bazarr found all targets"
+                    _res_reason = "bazarr_downloaded"
+                elif _all_external:
+                    append_job_log(job_id, "Target/Source race winner: Pre-existing external target")
+                    append_job_log(job_id, f"Pre-existing external target verified after source resolution: {_bzdur}s")
+                    _status = "ALREADY EXISTS"
+                    _reason = "Pre-existing target verified after source resolution"
+                    _res_reason = "already_exists"
+                elif bool(_resolved_origins) and any(orig == CandidateOrigin.BAZARR for orig in _resolved_origins.values()):
+                    append_job_log(job_id, "Target/Source race winner: Mixed (Bazarr + existing)")
+                    append_job_log(job_id, f"All targets resolved without AI: {_bzdur}s")
+                    _status = "BAZARR MATCH"
+                    _reason = "Targets resolved without AI (Bazarr + existing)"
+                    _res_reason = "bazarr_downloaded"
+                else:
+                    append_job_log(job_id, "Target/Source race winner: Pre-existing external target")
+                    append_job_log(job_id, f"Pre-existing external target verified after source resolution: {_bzdur}s")
+                    _status = "ALREADY EXISTS"
+                    _reason = "Pre-existing target verified after source resolution"
+                    _res_reason = "already_exists"
+
                 append_job_log(job_id, "AI skipped")
                 append_job_log(job_id, "AI calls: 0")
                 append_job_log(job_id, "Estimated AI cost: $0.00")
                 append_job_log(job_id, f"Total source preparation: {round(time.time() - prep_start_time, 2)}s")
-                update_job(job_id, status="BAZARR MATCH", reason="Bazarr found all targets", duration_seconds=_bzdur, sync_diff_ms=-1, dropped_lines=0)
+                update_job(job_id, status=_status, reason=_reason, duration_seconds=_bzdur, sync_diff_ms=-1, dropped_lines=0)
                 if source_subtitle and source_subtitle.origin == SourceOrigin.EMBEDDED:
                     try: os.remove(source_subtitle.path)
                     except Exception: pass
                 await self._notify_media_servers(video_path)
-                return {"status": "skipped", "reason": "bazarr_downloaded", "job_id": job_id}
+                return {"status": "skipped", "reason": _res_reason, "job_id": job_id}
 
         # ── SOURCE == TARGET shortcut ─────────────────────────────────────────
         # Invariant: source_language != target_language for every AI dispatch.
@@ -2427,8 +3134,21 @@ class SubtitlePipeline:
             for _stlinfo in list(langs_needing_translation):
                 if source_subtitle.language == normalize_language_code(_stlinfo["code"]):
                     _stout = f"{base_path}.{_stlinfo['code']}.srt"
-                    _sth = evaluate_subtitle_health(source_subtitle.path, target_lang_code=_stlinfo["code"])
-                    if _sth.get("status") == "GREEN":
+                    _storigin = CandidateOrigin.EMBEDDED if source_subtitle.origin == SourceOrigin.EMBEDDED else CandidateOrigin.EXTERNAL
+                    _st_tres = await trust_engine.evaluate_candidate(
+                        video_path=video_path,
+                        candidate_path=source_subtitle.path,
+                        target_lang=_stlinfo["code"],
+                        origin=_storigin,
+                        container_tracks=container_tracks,
+                        primary_audio_lang=primary_audio_lang,
+                        provided_source=source_subtitle,
+                        expected_intent=SubtitleIntent.FULL,
+                        job_id=job_id,
+                        auto_repair=auto_repair_unhealthy,
+                        allow_ai_audit=False,
+                    )
+                    if _st_tres.passed:
                         try:
                             with open(source_subtitle.path, "r", encoding="utf-8-sig", errors="ignore") as _sf:
                                 _st_content = _sf.read()
@@ -2437,20 +3157,24 @@ class SubtitlePipeline:
                             except Exception:
                                 _st_cues = getattr(source_subtitle, "cues", None) or []
                             if _st_cues:
-                                pub_res = _publish_subtitle_atomic(
+                                pub_res = await _publish_subtitle_with_trust_gate(
                                     video_path=video_path,
                                     target_output_path=_stout,
                                     lang_code=_stlinfo["code"],
                                     translated_srt_text=_st_content,
                                     expected_cue_count=len(_st_cues),
+                                    source_subtitle=source_subtitle,
+                                    container_tracks=container_tracks,
+                                    primary_audio_lang=primary_audio_lang,
                                     force_retranslate=force_retranslate,
-                                    job_id=job_id
+                                    job_id=job_id,
+                                    auto_repair=auto_repair_unhealthy,
                                 )
                                 if pub_res.get("published"):
                                     published_source_as_target = True
                                     append_job_log(job_id,
                                         f"Source IS {_stlinfo['name']} (target language). "
-                                        f"Published directly — no AI needed.")
+                                        f"Published directly — no AI needed (score={_st_tres.score}/100).")
                                     langs_needing_translation.remove(_stlinfo)
                                 elif pub_res.get("skipped"):
                                     append_job_log(job_id,
@@ -2459,6 +3183,8 @@ class SubtitlePipeline:
                                     langs_needing_translation.remove(_stlinfo)
                         except Exception as _ste:
                             append_job_log(job_id, f"Failed to publish source-as-target {_stlinfo['name']}: {_ste}")
+                    else:
+                        append_job_log(job_id, f"Source in target language {_stlinfo['name']} rejected by Trust Engine ({_st_tres.decision.value}: {'; '.join(_st_tres.reasons)}).")
 
         if not langs_needing_translation:
             _stdur = round(time.time() - start_time, 2)
@@ -2474,11 +3200,13 @@ class SubtitlePipeline:
         # ── No source found → WAITING_SOURCE ─────────────────────────────────
         temp_extracted_srt = source_subtitle.path if source_subtitle else f"{base_path}.temp_src.srt"
         if not source_subtitle:
-            err = "No usable source subtitle found (no embedded, external or Bazarr source)"
-            append_job_log(job_id, f"ERROR: {err}")
-            _nsdur = round(time.time() - start_time, 2)
-            from app.core.db import get_job_by_id as _gjbi
-            _jd = _gjbi(job_id)
+            _is_wfm = getattr(_resolver, "is_waiting_for_media", False)
+            if _is_wfm:
+                err = "Bazarr media indexing in progress (WAITING_FOR_MEDIA) — queued for retry"
+            else:
+                err = "No usable source subtitle found (no embedded, external or Bazarr source)"
+            _nsdur = round(prev_dur + (time.time() - start_time), 2)
+            _jd = get_job_by_id(job_id)
             _retries = _jd.get("retry_count", 0) if _jd else 0
             if _retries < 4:
                 _bof = [1, 5, 15, 30][_retries]
@@ -2500,46 +3228,102 @@ class SubtitlePipeline:
             f"via {source_subtitle.origin.value} [{len(source_subtitle.cues)} cues]. "
             f"Targets remaining: {[l['code'] for l in langs_needing_translation]}")
 
-        # Bazarr Adaptive Grace Check (bounded short window if Bazarr target search was accepted)
-        if enable_bazarr and not force_retranslate and _bazarr_accepted.is_set():
-            bazarr_grace = float(get_setting("bazarr_grace_seconds", "2.0"))
-            if bazarr_grace > 0:
-                t_grace_start = time.monotonic()
-                grace_target_found = False
-                while (time.monotonic() - t_grace_start) < bazarr_grace:
-                    all_grace_covered = True
-                    for _g_lang in langs_needing_translation:
-                        _g_ex = find_external_subtitle(video_path, _g_lang["code"])
-                        if not _g_ex:
-                            all_grace_covered = False
-                            break
-                        if auto_repair_unhealthy:
-                            _g_h = evaluate_subtitle_health(_g_ex, target_lang_code=_g_lang["code"])
-                            if _g_h.get("status") == "RED":
-                                all_grace_covered = False
-                                break
-                    if all_grace_covered:
-                        grace_target_found = True
-                        break
-                    await asyncio.sleep(0.25)
+        # Lifecycle timing settings
+        candidate_stability_sec = float(get_setting("bazarr_candidate_stability_seconds", get_setting("candidate_stability_sec", str(DEFAULT_CANDIDATE_STABILITY_SEC))))
+        bazarr_quiescence_sec = float(get_setting("bazarr_quiescence_seconds", get_setting("bazarr_quiescence_sec", str(DEFAULT_BAZARR_QUIESCENCE_SEC))))
 
-                if grace_target_found:
-                    _grace_elapsed = round(time.monotonic() - t_grace_start, 2)
-                    append_job_log(job_id, f"Bazarr grace: {_grace_elapsed}s")
-                    append_job_log(job_id, "Target subtitle appeared during grace")
-                    append_job_log(job_id, "Target/Source race winner: Bazarr")
+        # Bazarr Adaptive Coordination & Quiescence Lifecycle Check
+        if enable_bazarr and not force_retranslate:
+            hybrid_max_wait = float(get_setting("hybrid_bazarr_max_wait_sec", get_setting("bazarr_grace_seconds", str(DEFAULT_HYBRID_BAZARR_MAX_WAIT_SEC))))
+
+            if hybrid_max_wait > 0 and langs_needing_translation:
+                t_coord_start = time.monotonic()
+                resolved_langs = []
+                _c_origins = {}
+                last_decision_summary = ""
+
+                for _g_lang in list(langs_needing_translation):
+                    _g_code = _g_lang["code"]
+                    _c_prov_snap = initial_target_snapshots.get(normalize_language_code(_g_code))
+                    _c_accepted = is_bazarr_accepted_for_lang(_g_code)
+                    _c_state, _c_cand, _c_tres = await bazarr_coordinator.coordinate_target(
+                        video_path=video_path,
+                        target_lang=_g_code,
+                        bazarr_url=bazarr_url,
+                        bazarr_api_key=bazarr_api_key,
+                        max_wait_seconds=hybrid_max_wait,
+                        candidate_stability_sec=candidate_stability_sec,
+                        quiescence_sec=bazarr_quiescence_sec,
+                        container_tracks=container_tracks,
+                        primary_audio_lang=primary_audio_lang,
+                        provided_source=source_subtitle,
+                        job_id=job_id,
+                        auto_repair=auto_repair_unhealthy,
+                        find_external_subtitle_fn=find_external_subtitle,
+                        pre_trigger_snapshot=_c_prov_snap,
+                        search_accepted=_c_accepted,
+                        media_correlated=is_bazarr_correlated_for_lang(_g_code),
+                    )
+                    if _c_state == BazarrLifecycleState.FINALIZED_WITH_TARGET and _c_tres and _c_tres.passed:
+                        resolved_langs.append(_g_lang)
+                        _c_origins[_g_code] = get_authoritative_candidate_origin(_c_cand, _g_code)
+                    elif _c_tres:
+                        last_decision_summary = f"{_c_tres.decision.value}: {'; '.join(_c_tres.reasons)}"
+
+                for _rl in resolved_langs:
+                    langs_needing_translation.remove(_rl)
+
+                if not langs_needing_translation:
+                    _coord_elapsed = round(time.monotonic() - t_coord_start, 2)
+                    _all_bazarr = bool(_c_origins) and all(orig == CandidateOrigin.BAZARR for orig in _c_origins.values())
+                    _all_external = bool(_c_origins) and all(orig == CandidateOrigin.EXTERNAL for orig in _c_origins.values())
+
+                    if _all_bazarr:
+                        append_job_log(job_id, f"Bazarr coordination: {_coord_elapsed}s (quiescent and verified)")
+                        append_job_log(job_id, "Target subtitle verified and finalized")
+                        append_job_log(job_id, "Target/Source race winner: Bazarr")
+                        _status = "BAZARR MATCH"
+                        _reason = "Bazarr found all targets"
+                        _res_reason = "bazarr_downloaded"
+                    elif _all_external:
+                        append_job_log(job_id, f"Bazarr coordination: {_coord_elapsed}s (pre-existing target verified)")
+                        append_job_log(job_id, "Pre-existing target verified and finalized")
+                        append_job_log(job_id, "Target/Source race winner: Pre-existing external target")
+                        _status = "ALREADY EXISTS"
+                        _reason = "Pre-existing target verified after source resolution"
+                        _res_reason = "already_exists"
+                    elif bool(_c_origins) and any(orig == CandidateOrigin.BAZARR for orig in _c_origins.values()):
+                        append_job_log(job_id, f"Bazarr coordination: {_coord_elapsed}s (mixed targets verified)")
+                        append_job_log(job_id, "Target/Source race winner: Mixed (Bazarr + existing)")
+                        _status = "BAZARR MATCH"
+                        _reason = "Targets resolved without AI (Bazarr + existing)"
+                        _res_reason = "bazarr_downloaded"
+                    else:
+                        append_job_log(job_id, f"Bazarr coordination: {_coord_elapsed}s (pre-existing target verified)")
+                        append_job_log(job_id, "Pre-existing target verified and finalized")
+                        append_job_log(job_id, "Target/Source race winner: Pre-existing external target")
+                        _status = "ALREADY EXISTS"
+                        _reason = "Pre-existing target verified after source resolution"
+                        _res_reason = "already_exists"
+
                     append_job_log(job_id, "AI skipped")
                     append_job_log(job_id, "AI calls: 0")
                     append_job_log(job_id, "Estimated AI cost: $0.00")
                     if source_subtitle and source_subtitle.origin == SourceOrigin.EMBEDDED:
                         try: os.remove(source_subtitle.path)
                         except Exception: pass
-                    update_job(job_id, status="BAZARR MATCH", reason="Bazarr found all targets", duration_seconds=round(time.time() - start_time, 2), sync_diff_ms=-1, dropped_lines=0)
+                    _bzdur2 = round(prev_dur + (time.time() - start_time), 2)
+                    update_job(job_id, status=_status, reason=_reason, duration_seconds=_bzdur2, sync_diff_ms=-1, dropped_lines=0)
                     await self._notify_media_servers(video_path)
-                    return {"status": "skipped", "reason": "bazarr_downloaded", "job_id": job_id}
+                    return {"status": "skipped", "reason": _res_reason, "job_id": job_id}
                 else:
-                    append_job_log(job_id, f"Bazarr grace: {bazarr_grace:.1f}s")
-                    append_job_log(job_id, "No target subtitle appeared")
+                    _any_target_on_disk = any(find_external_subtitle(video_path, _gl["code"]) for _gl in langs_needing_translation)
+                    if _any_target_on_disk and last_decision_summary:
+                        append_job_log(job_id, f"Bazarr coordination: target detected but rejected by Trust Engine ({last_decision_summary}); continuing with Babel fallback")
+                    elif _any_target_on_disk:
+                        append_job_log(job_id, "Bazarr coordination: target detected but rejected by Trust Engine; continuing with Babel fallback")
+                    else:
+                        append_job_log(job_id, "Bazarr coordination: no target subtitle found")
 
 
         try:
@@ -2578,13 +3362,26 @@ class SubtitlePipeline:
             if clean_sdh_enabled:
                 classifier_fn = getattr(self.translator, "classify_sdh_segments", None)
                 source_lang_name = source_subtitle.language_name if (source_subtitle and source_subtitle.language_name) else "unknown"
-                subs, provenance_map, cleaned_count = await sanitize_srt_content_with_provenance(
+                res = await sanitize_srt_content_with_provenance(
                     raw_srt_text,
                     source_language=source_lang_name,
                     classifier_fn=classifier_fn,
                     job_id=job_id
                 )
+                subs, provenance_map, cleaned_count = res
+                telem = getattr(res, "telemetry", {})
                 append_job_log(job_id, f"Sanitizer processed {len(subs)} blocks. Cleaned noise on {cleaned_count} blocks.")
+                if telem:
+                    append_job_log(
+                        job_id,
+                        f"SDH cleaner: total={telem.get('total_s', 0.0)}s "
+                        f"(local_analysis={telem.get('local_analysis_s', 0.0)}s, "
+                        f"classifier_wait={telem.get('classifier_wait_s', 0.0)}s, "
+                        f"reconstruction={telem.get('reconstruction_s', 0.0)}s, "
+                        f"ambiguous_unique={telem.get('ambiguous_unique', 0)}, "
+                        f"classifier_batches={telem.get('classifier_batches', 0)}, "
+                        f"classifier_concurrency={telem.get('classifier_concurrency', 1)})"
+                    )
             else:
                 subs = list(srt.parse(raw_srt_text))
                 cleaned_count = 0
@@ -2592,11 +3389,13 @@ class SubtitlePipeline:
             t_clean_ms = round((time.perf_counter() - t_clean_start) * 1000, 1)
 
             prep_duration_ms = round((time.time() - prep_start_time) * 1000, 1)
+            src_origin = getattr(source_subtitle, "origin", None)
+            src_origin_val = src_origin.value if hasattr(src_origin, "value") else str(src_origin or "unknown")
             perf_breakdown = (
                 f"(probe={round(t_probe_ms / 1000, 2)}s, "
                 f"extract={round(t_extract_ms / 1000, 2)}s, "
                 f"clean={round(t_clean_ms / 1000, 2)}s, "
-                f"audio=0.00s)"
+                f"method={src_origin_val})"
             )
 
             append_job_log(job_id, f"Source preparation: {round(prep_duration_ms / 1000, 2)}s {perf_breakdown}")
@@ -2613,7 +3412,6 @@ class SubtitlePipeline:
 
             job_snapshot = None
             try:
-                from app.core.db import get_job_by_id
                 job_snapshot = get_job_by_id(job_id)
             except Exception:
                 pass
@@ -2675,7 +3473,12 @@ class SubtitlePipeline:
 
             output_files = []
             successful_langs = []
+            failed_langs_details = []
+            rescued_langs = []
+            external_resolved_langs = []
+            ai_translated_langs = []
             skipped_langs = []
+            deferred_pub_langs = {}
             total_dropped = 0
             max_sync_diff = 0
             is_semantic_deadlock = False
@@ -2699,18 +3502,212 @@ class SubtitlePipeline:
                 if not force_retranslate:
                     existing_before_trans = find_external_subtitle(video_path, lang_code)
                     if existing_before_trans:
-                        health = evaluate_subtitle_health(existing_before_trans, target_lang_code=lang_code)
-                        if health.get("status") == "GREEN":
-                            append_job_log(job_id, "Target appeared before AI start")
-                            append_job_log(job_id, "AI skipped")
-                            append_job_log(job_id, "AI calls: 0")
-                            append_job_log(job_id, "Estimated AI cost: $0.00")
-                            successful_langs.append(lang_code)
-                            continue
+                        _pre_stable = await wait_for_file_stability(
+                            existing_before_trans,
+                            min_stability_sec=candidate_stability_sec,
+                            timeout_sec=0.8,
+                            interval_sec=0.025
+                        )
+                        if _pre_stable:
+                            _pre_snap = capture_target_snapshot(existing_before_trans)
+                            _pre_origin = get_correlated_bazarr_origin(existing_before_trans, lang_code)
+                            _pre_tres = await trust_engine.evaluate_candidate(
+                                video_path=video_path,
+                                candidate_path=existing_before_trans,
+                                target_lang=lang_code,
+                                origin=_pre_origin,
+                                container_tracks=container_tracks,
+                                primary_audio_lang=primary_audio_lang,
+                                provided_source=source_subtitle,
+                                job_id=job_id,
+                                auto_repair=auto_repair_unhealthy,
+                                allow_ai_audit=True,
+                            )
+                            if _pre_tres.passed:
+                                _pre_final_snap = capture_target_snapshot(existing_before_trans)
+                                if _pre_final_snap.generation_id == _pre_snap.generation_id:
+                                    append_job_log(job_id, "Target appeared before AI start")
+                                    append_job_log(job_id, "Using verified external target")
+                                    append_job_log(job_id, "AI skipped")
+                                    append_job_log(job_id, "AI calls: 0")
+                                    append_job_log(job_id, "Estimated AI cost: $0.00")
+                                    successful_langs.append(lang_code)
+                                    if _pre_origin == CandidateOrigin.BAZARR:
+                                        rescued_langs.append(lang_code)
+                                    else:
+                                        external_resolved_langs.append(lang_code)
+                                    continue
+                            else:
+                                append_job_log(job_id, f"Final target check: existing target rejected by Trust Engine ({_pre_tres.decision.value}: {'; '.join(_pre_tres.reasons)})")
+                                append_job_log(job_id, "AI fallback required")
+                        else:
+                            append_job_log(job_id, "Final target check: existing target unstable; AI fallback required")
+                    else:
+                        append_job_log(job_id, "Final target check: no target subtitle found")
+                else:
+                    append_job_log(job_id, "Force re-translate enabled — skipping external target check")
 
-                append_job_log(job_id, "Atomic target check: no target")
+                # Check if a previously QA-passed translation exists for this job and language
+                # (e.g. publication was deferred because Bazarr was actively writing).
+                import app.core.db
+                _data_dir = os.path.dirname(app.core.db.DB_PATH)
+                _qapassed_file = os.path.join(_data_dir, f"job_{job_id}_{lang_code}_qapassed.json") if job_id else None
+                if _qapassed_file and os.path.exists(_qapassed_file) and not force_retranslate:
+                    try:
+                        with open(_qapassed_file, "r", encoding="utf-8") as _qf:
+                            _qdata = json.load(_qf)
+
+                        # Identity verification to prevent stale artifact application to modified video or source
+                        _cur_can_path = os.path.realpath(video_path)
+                        _cur_stat = os.stat(video_path)
+                        _cur_fsize = _cur_stat.st_size
+                        _cur_fmtime_ns = getattr(_cur_stat, "st_mtime_ns", int(_cur_stat.st_mtime * 1e9))
+                        _cur_src_ident = compute_source_fingerprint(source_subtitle, subs=subs, video_path=video_path)
+
+                        media_match = (
+                            _qdata.get("canonical_video_path") == _cur_can_path
+                            and _qdata.get("media_file_size") == _cur_fsize
+                            and _qdata.get("media_file_mtime_ns") == _cur_fmtime_ns
+                            and _qdata.get("lang_code") == lang_code
+                            and bool(_qdata.get("translated_srt_text"))
+                        )
+
+                        source_match = (
+                            _qdata.get("source_content_hash") == _cur_src_ident["source_content_hash"]
+                            and _qdata.get("source_cue_count") == _cur_src_ident["source_cue_count"]
+                            and _qdata.get("source_origin") == _cur_src_ident["source_origin"]
+                            and _qdata.get("source_language", _cur_src_ident["source_language"]) == _cur_src_ident["source_language"]
+                        )
+
+                        # If external source on disk, also verify file path, size, and mtime
+                        if _cur_src_ident["source_origin"] == "EXTERNAL" and _cur_src_ident["source_path"]:
+                            source_match = (
+                                source_match
+                                and _qdata.get("source_path") == _cur_src_ident["source_path"]
+                                and _qdata.get("source_file_size") == _cur_src_ident["source_file_size"]
+                                and _qdata.get("source_file_mtime_ns") == _cur_src_ident["source_file_mtime_ns"]
+                            )
+
+                        identity_match = media_match and source_match
+
+                        if not identity_match:
+                            append_job_log(job_id, f"Cached QA-passed translation artifact identity mismatch (media or source file modified). Invalidating artifact and rerunning translation for {lang_name}.")
+                            try: os.remove(_qapassed_file)
+                            except Exception: pass
+                        else:
+                            _t_srt_text = _qdata.get("translated_srt_text")
+                            _exp_cues = _qdata.get("expected_cue_count", 0)
+                            append_job_log(job_id, f"Resuming publication for {lang_name}: AI translation previously passed QA (identity verified). Attempting publication gate...")
+                            _saved_pre_snap_dict = _qdata.get("bazarr_pre_trigger_snapshot")
+                            _saved_pre_snap = (
+                                TargetSnapshot(**_saved_pre_snap_dict)
+                                if _saved_pre_snap_dict
+                                else initial_target_snapshots.get(normalize_language_code(lang_code))
+                            )
+                            _saved_accepted = _qdata.get("bazarr_search_accepted", is_bazarr_accepted_for_lang(lang_code))
+                            _saved_correlated = _qdata.get("bazarr_media_correlated", is_bazarr_correlated_for_lang(lang_code))
+
+                            _res_pub = await _publish_subtitle_with_trust_gate(
+                                video_path=video_path,
+                                target_output_path=target_output_path,
+                                lang_code=lang_code,
+                                translated_srt_text=_t_srt_text,
+                                expected_cue_count=_exp_cues,
+                                source_subtitle=source_subtitle,
+                                container_tracks=container_tracks,
+                                primary_audio_lang=primary_audio_lang,
+                                force_retranslate=force_retranslate,
+                                job_id=job_id,
+                                auto_repair=auto_repair_unhealthy,
+                                bazarr_pre_trigger_snapshot=_saved_pre_snap,
+                                bazarr_search_accepted=_saved_accepted,
+                                bazarr_media_correlated=_saved_correlated,
+                            )
+                            if _res_pub.get("published"):
+                                output_files.append(target_output_path)
+                                successful_langs.append(lang_code)
+                                ai_translated_langs.append(lang_code)
+                                try: os.remove(_qapassed_file)
+                                except Exception: pass
+                                append_job_log(job_id, f"Deferred publication SUCCESS for {lang_name}. AI re-translation bypassed.")
+                                continue
+                            elif _res_pub.get("skipped"):
+                                successful_langs.append(lang_code)
+                                _ad_cand = find_external_subtitle(video_path, lang_code)
+                                if _saved_accepted or _saved_correlated or _res_pub.get("reason") == "authoritative_target_passed" or (_ad_cand and get_correlated_bazarr_origin(_ad_cand, lang_code) == CandidateOrigin.BAZARR):
+                                    rescued_langs.append(lang_code)
+                                else:
+                                    external_resolved_langs.append(lang_code)
+                                try: os.remove(_qapassed_file)
+                                except Exception: pass
+                                append_job_log(job_id, f"Bazarr target adopted during deferred publication for {lang_name}. AI re-translation bypassed.")
+                                continue
+                            else:
+                                deferred_pub_langs[lang_code] = _res_pub.get("reason") or "bazarr_actively_writing"
+                                append_job_log(job_id, f"Deferred publication still blocked ({_res_pub.get('reason')}). Keeping QA result for next retry.")
+                                continue
+                    except Exception as _q_err:
+                        logger.warning(f"Failed to resume deferred publication: {_q_err}")
+
                 append_job_log(job_id, f"AI starting: {active_engine_name}")
                 append_job_log(job_id, f"Translating to {lang_name} ({lang_code}) using {active_engine_name} ({total_source_lines} lines)...")
+
+                mid_translation_rescued = False
+                mid_seen_gen: Optional[str] = None
+                mid_gen_change_time: Optional[float] = None
+
+                async def _check_mid_translation_candidate() -> bool:
+                    nonlocal mid_translation_rescued, mid_seen_gen, mid_gen_change_time
+                    if force_retranslate:
+                        return False
+                    cand = find_external_subtitle(video_path, lang_code)
+                    if not cand:
+                        return False
+                    snap = capture_target_snapshot(cand)
+                    if not snap.exists:
+                        return False
+                    now = time.monotonic()
+                    if mid_seen_gen != snap.generation_id:
+                        mid_seen_gen = snap.generation_id
+                        mid_gen_change_time = now
+
+                    _stable = await wait_for_file_stability(
+                        cand,
+                        min_stability_sec=candidate_stability_sec,
+                        timeout_sec=0.3,
+                        interval_sec=0.025
+                    )
+                    if not _stable:
+                        return False
+
+                    # Check quiescence before declaring mid-translation early stop
+                    time_since_change = now - (mid_gen_change_time or now)
+                    if time_since_change < bazarr_quiescence_sec:
+                        return False
+
+                    _mid_orig = get_correlated_bazarr_origin(cand, lang_code)
+                    _tres = await trust_engine.evaluate_candidate(
+                        video_path=video_path,
+                        candidate_path=cand,
+                        target_lang=lang_code,
+                        origin=_mid_orig,
+                        container_tracks=container_tracks,
+                        primary_audio_lang=primary_audio_lang,
+                        provided_source=source_subtitle,
+                        job_id=job_id,
+                        auto_repair=auto_repair_unhealthy,
+                        allow_ai_audit=True,
+                    )
+                    if _tres.passed:
+                        _post_snap = capture_target_snapshot(cand)
+                        if _post_snap.generation_id == snap.generation_id:
+                            _orig_name = "Bazarr" if _mid_orig == CandidateOrigin.BAZARR else "External"
+                            append_job_log(job_id, f"{_orig_name} candidate arrived mid-translation")
+                            append_job_log(job_id, "Late candidate verified; stopping remaining AI work")
+                            append_job_log(job_id, "Using verified external target")
+                            mid_translation_rescued = True
+                            return True
+                    return False
 
                 t_main_start = time.time()
                 try:
@@ -2721,22 +3718,63 @@ class SubtitlePipeline:
                         batch_size=batch_size,
                         job_id=job_id,
                         show_title=effective_tm_key or title,
-                        provenance_map=provenance_map
+                        provenance_map=provenance_map,
+                        early_stop_check=_check_mid_translation_candidate
                     )
                 except TypeError as _te:
-                    if "provenance_map" in str(_te):
-                        translated_subs = await self.translator.translate_srt_content(
-                            subs=subs,
-                            target_language=lang_name,
-                            source_language=source_subtitle.language_name,
-                            batch_size=batch_size,
-                            job_id=job_id,
-                            show_title=effective_tm_key or title
-                        )
-                    else:
-                        raise
+                    translated_subs = await self.translator.translate_srt_content(
+                        subs=subs,
+                        target_language=lang_name,
+                        source_language=source_subtitle.language_name,
+                        batch_size=batch_size,
+                        job_id=job_id,
+                        show_title=effective_tm_key or title
+                    )
                 t_main_end = time.time()
                 append_job_log(job_id, f"Timing: Main translation phase completed in {round(t_main_end - t_main_start, 1)}s")
+
+                if mid_translation_rescued:
+                    successful_langs.append(lang_code)
+                    _cand_p = find_external_subtitle(video_path, lang_code)
+                    if _cand_p and get_correlated_bazarr_origin(_cand_p, lang_code) == CandidateOrigin.BAZARR:
+                        rescued_langs.append(lang_code)
+                    else:
+                        external_resolved_langs.append(lang_code)
+                    continue
+
+                # Check if Bazarr candidate arrived while AI was translating
+                if not force_retranslate:
+                    _post_ai_target = find_external_subtitle(video_path, lang_code)
+                    if _post_ai_target:
+                        _post_stable = await wait_for_file_stability(_post_ai_target, min_stability_sec=candidate_stability_sec, timeout_sec=0.6, interval_sec=0.025)
+                        if _post_stable:
+                            _post_snap = capture_target_snapshot(_post_ai_target)
+                            _post_origin = get_correlated_bazarr_origin(_post_ai_target, lang_code)
+                            _post_tres = await trust_engine.evaluate_candidate(
+                                video_path=video_path,
+                                candidate_path=_post_ai_target,
+                                target_lang=lang_code,
+                                origin=_post_origin,
+                                container_tracks=container_tracks,
+                                primary_audio_lang=primary_audio_lang,
+                                provided_source=source_subtitle,
+                                job_id=job_id,
+                                auto_repair=auto_repair_unhealthy,
+                                allow_ai_audit=True,
+                            )
+                            if _post_tres.passed:
+                                _post_final_snap = capture_target_snapshot(_post_ai_target)
+                                if _post_final_snap.generation_id == _post_snap.generation_id:
+                                    _orig_lbl = "Bazarr" if _post_origin == CandidateOrigin.BAZARR else "External"
+                                    append_job_log(job_id, f"{_orig_lbl} candidate arrived after AI start")
+                                    append_job_log(job_id, "Late candidate verified; stopping remaining AI work")
+                                    append_job_log(job_id, "Using verified external target")
+                                    successful_langs.append(lang_code)
+                                    if _post_origin == CandidateOrigin.BAZARR:
+                                        rescued_langs.append(lang_code)
+                                    else:
+                                        external_resolved_langs.append(lang_code)
+                                    continue
 
                 # --- NEVER GIVE UP RECOVERY LOOP ---
                 max_qa_loops = 3
@@ -3288,10 +4326,23 @@ class SubtitlePipeline:
                 # If bounded recovery is exhausted and some unresolved source-language cues remain:
                 # Check if they meet semantic deadlock criteria and apply source preservation fallback.
                 # ---------------------------------------------------------------------------
-                real_unresolved_remaining = qa_result.get("real_untranslated_ids", [])
-                if real_unresolved_remaining:
+                real_unresolved_ids = qa_result.get("real_untranslated_ids", [])
+                dropped_details = qa_result.get("dropped_details", [])
+                dropped_unresolved = [
+                    d.get("index", d.get("id", 1)) - 1
+                    for d in dropped_details
+                    if isinstance(d, dict)
+                ]
+                final_fallback_cues = [
+                    idx for idx in sorted(set(real_unresolved_ids + dropped_unresolved))
+                    if 0 <= idx < len(subs)
+                    and subs[idx].content.strip()
+                    and subs[idx].content.strip() != "<i></i>"
+                    and re.sub(r'<[^>]+>', '', subs[idx].content).strip()
+                ]
+                if final_fallback_cues:
                     is_semantic_deadlock = True
-                    for cue_idx in real_unresolved_remaining:
+                    for cue_idx in final_fallback_cues:
                         cue_id = subs[cue_idx].index if hasattr(subs[cue_idx], 'index') and subs[cue_idx].index else cue_idx + 1
                         append_job_log(job_id, f"Semantic deadlock detected for cue {cue_id}")
                         append_job_log(job_id, "QA fallback: preserving original source text")
@@ -3369,25 +4420,93 @@ class SubtitlePipeline:
 
                 if qa_result["passed"]:
                     translated_srt_text = subs_to_srt_string(translated_subs)
-                    pub_res = _publish_subtitle_atomic(
+                    pub_res = await _publish_subtitle_with_trust_gate(
                         video_path=video_path,
                         target_output_path=target_output_path,
                         lang_code=lang_code,
                         translated_srt_text=translated_srt_text,
                         expected_cue_count=len(translated_subs),
+                        source_subtitle=source_subtitle,
+                        container_tracks=container_tracks,
+                        primary_audio_lang=primary_audio_lang,
                         force_retranslate=force_retranslate,
                         job_id=job_id,
+                        auto_repair=auto_repair_unhealthy,
+                        bazarr_pre_trigger_snapshot=initial_target_snapshots.get(normalize_language_code(lang_code)),
+                        bazarr_search_accepted=is_bazarr_accepted_for_lang(lang_code),
+                        bazarr_media_correlated=is_bazarr_correlated_for_lang(lang_code),
                     )
+
+                    import app.core.db
+                    data_dir = os.path.dirname(app.core.db.DB_PATH)
+                    qapassed_file = os.path.join(data_dir, f"job_{job_id}_{lang_code}_qapassed.json") if job_id else None
 
                     if pub_res.get("published"):
                         output_files.append(target_output_path)
                         successful_langs.append(lang_code)
+                        ai_translated_langs.append(lang_code)
+                        if qapassed_file and os.path.exists(qapassed_file):
+                            try: os.remove(qapassed_file)
+                            except Exception: pass
                     elif pub_res.get("skipped"):
                         successful_langs.append(lang_code)
+                        _pub_cand = find_external_subtitle(video_path, lang_code)
+                        if _pub_cand and get_correlated_bazarr_origin(_pub_cand, lang_code) == CandidateOrigin.BAZARR:
+                            rescued_langs.append(lang_code)
+                        else:
+                            external_resolved_langs.append(lang_code)
+                        if qapassed_file and os.path.exists(qapassed_file):
+                            try: os.remove(qapassed_file)
+                            except Exception: pass
+                    elif job_id:
+                        # QA passed, but publication was deferred (e.g. Bazarr actively writing or ownership lock)
+                        deferred_pub_langs[lang_code] = pub_res.get("reason") or "bazarr_actively_writing"
+                        # Save the QA-passed translation artifact with full identity verification & atomic write
+                        try:
+                            can_vid_path = os.path.realpath(video_path)
+                            _stat = os.stat(video_path)
+                            _fsize = _stat.st_size
+                            _fmtime_ns = getattr(_stat, "st_mtime_ns", int(_stat.st_mtime * 1e9))
+                            _src_ident = compute_source_fingerprint(source_subtitle, subs=subs, video_path=video_path)
+
+                            payload = {
+                                "job_id": job_id,
+                                "canonical_video_path": can_vid_path,
+                                "media_file_size": _fsize,
+                                "media_file_mtime_ns": _fmtime_ns,
+                                "target_output_path": os.path.realpath(target_output_path),
+                                "lang_code": lang_code,
+                                **_src_ident,
+                                "translated_srt_text": translated_srt_text,
+                                "expected_cue_count": len(translated_subs),
+                                "qa_score": score,
+                                "qa_issues": qa_result.get("issues", []),
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "bazarr_pre_trigger_snapshot": (
+                                    {
+                                        "path": initial_target_snapshots[normalize_language_code(lang_code)].path,
+                                        "exists": initial_target_snapshots[normalize_language_code(lang_code)].exists,
+                                        "size": initial_target_snapshots[normalize_language_code(lang_code)].size,
+                                        "mtime_ns": initial_target_snapshots[normalize_language_code(lang_code)].mtime_ns,
+                                        "content_hash": initial_target_snapshots[normalize_language_code(lang_code)].content_hash,
+                                    }
+                                    if initial_target_snapshots.get(normalize_language_code(lang_code))
+                                    else None
+                                ),
+                                "bazarr_search_accepted": is_bazarr_accepted_for_lang(lang_code),
+                                "bazarr_media_correlated": is_bazarr_correlated_for_lang(lang_code),
+                            }
+                            tmp_qapassed = f"{qapassed_file}.tmp.{uuid.uuid4().hex}"
+                            with open(tmp_qapassed, "w", encoding="utf-8") as _qf:
+                                json.dump(payload, _qf, indent=2)
+                                _qf.flush()
+                                os.fsync(_qf.fileno())
+                            os.replace(tmp_qapassed, qapassed_file)
+                            append_job_log(job_id, f"QA passed but publication deferred ({pub_res.get('reason')}). Cached translation artifact for instant retry without AI re-translation.")
+                        except Exception as _qe:
+                            logger.warning(f"Failed to cache QA passed translation: {_qe}")
 
                     # Clean up partial progress file since we successfully finished
-                    import app.core.db
-                    data_dir = os.path.dirname(app.core.db.DB_PATH)
                     partial_file = os.path.join(data_dir, f"job_{job_id}_{lang_code}_partial.json") if job_id else None
                     if partial_file and os.path.exists(partial_file):
                         try:
@@ -3420,51 +4539,121 @@ class SubtitlePipeline:
                             except Exception as e:
                                 logger.error(f"Failed to save translation memory: {e}")
 
-                # Build a detailed QA summary for the user
-                unresolved_count = len(qa_result.get("real_untranslated_ids", []))
-                initial_candidates_count = len(initial_identical_candidates_set)
-                kept_count = sum(1 for idx in initial_identical_candidates_set if idx in safe_ids and idx not in qa_result.get("real_untranslated_ids", []) and idx not in recovered_cues)
-                recovered_count = len(recovered_cues) if 'recovered_cues' in locals() else 0
-                source_preserved_count = len(source_preserved_cues)
+                    # Build a detailed QA summary for the user
+                    unresolved_count = len(qa_result.get("real_untranslated_ids", []))
+                    initial_candidates_count = len(initial_identical_candidates_set)
+                    kept_count = sum(1 for idx in initial_identical_candidates_set if idx in safe_ids and idx not in qa_result.get("real_untranslated_ids", []) and idx not in recovered_cues)
+                    recovered_count = len(recovered_cues) if 'recovered_cues' in locals() else 0
+                    source_preserved_count = len(source_preserved_cues)
 
-                summary_status = qa_result.get("status", "PASS" if qa_result["passed"] else "FAIL")
-                unresolved_label = f"{unresolved_count} unresolved {source_subtitle.language_name if source_subtitle else 'source'} {'line' if unresolved_count == 1 else 'lines'}"
-                fallback_label = f"{source_preserved_count} source-preserved {'fallback' if source_preserved_count == 1 else 'fallbacks'}"
+                    summary_status = qa_result.get("status", "PASS" if qa_result["passed"] else "FAIL")
+                    unresolved_label = f"{unresolved_count} unresolved {source_subtitle.language_name if source_subtitle else 'source'} {'line' if unresolved_count == 1 else 'lines'}"
+                    fallback_label = f"{source_preserved_count} source-preserved {'fallback' if source_preserved_count == 1 else 'fallbacks'}"
 
-                summary_lines = [
-                    "--- QA Summary ---",
-                    f"{dropped_count} dropped lines",
-                    f"{this_max_diff} ms sync drift",
-                    f"{initial_candidates_count} identical candidates",
-                    f"{kept_count} classified as KEEP (safe)",
-                    f"{recovered_count} translated on recovery",
-                    unresolved_label,
-                    fallback_label,
-                    f"Result: {summary_status} (Score: {qa_result['score']}/100)",
-                    "------------------"
-                ]
-                for line in summary_lines:
-                    append_job_log(job_id, line)
+                    summary_lines = [
+                        "--- QA Summary ---",
+                        f"{dropped_count} dropped lines",
+                        f"{this_max_diff} ms sync drift",
+                        f"{initial_candidates_count} identical candidates",
+                        f"{kept_count} classified as KEEP (safe)",
+                        f"{recovered_count} translated on recovery",
+                        unresolved_label,
+                        fallback_label,
+                        f"Result: {summary_status} (Score: {qa_result['score']}/100)",
+                        "------------------"
+                    ]
+                    for line in summary_lines:
+                        append_job_log(job_id, line)
+                else:
+                    # Translation or QA failed completely for this language
+                    failed_lang_info = {"code": lang_code, "name": lang_name, "issues": qa_result["issues"]}
+                    failed_langs_details.append(failed_lang_info)
+                    append_job_log(job_id, f"Translation of {lang_name} FAILED QA Gate. Searching for late external candidate...")
 
-                if not qa_result["passed"]:
-                    append_job_log(job_id, f"BLOCKED: {lang_name} translation failed QA. File NOT published.")
+                    # Late rescue: check if human subtitle arrived during the failed AI run
+                    if not force_retranslate:
+                        rescue_p = find_external_subtitle(video_path, lang_code)
+                        if rescue_p:
+                            r_stable = await wait_for_file_stability(
+                                rescue_p,
+                                min_stability_sec=candidate_stability_sec,
+                                timeout_sec=0.6,
+                                interval_sec=0.025
+                            )
+                            if r_stable:
+                                r_snap = capture_target_snapshot(rescue_p)
+                                r_origin = get_correlated_bazarr_origin(rescue_p, lang_code)
+                                r_tres = await trust_engine.evaluate_candidate(
+                                    video_path=video_path,
+                                    candidate_path=rescue_p,
+                                    target_lang=lang_code,
+                                    origin=r_origin,
+                                    container_tracks=container_tracks,
+                                    primary_audio_lang=primary_audio_lang,
+                                    provided_source=source_subtitle,
+                                    job_id=job_id,
+                                    auto_repair=auto_repair_unhealthy,
+                                    allow_ai_audit=True,
+                                )
+                                if r_tres.passed:
+                                    r_final_snap = capture_target_snapshot(rescue_p)
+                                    if r_final_snap.generation_id == r_snap.generation_id:
+                                        append_job_log(job_id, "Late external target verified; using human subtitle")
+                                        append_job_log(job_id, f"Rescue verification passed (score={r_tres.score}/100)")
+                                        successful_langs.append(lang_code)
+                                        if r_origin == CandidateOrigin.BAZARR:
+                                            rescued_langs.append(lang_code)
+                                        else:
+                                            external_resolved_langs.append(lang_code)
+                                else:
+                                    append_job_log(job_id, f"Late external target unusable for rescue ({r_tres.decision.value}: {'; '.join(r_tres.reasons)})")
+                            else:
+                                append_job_log(job_id, "Late external target unusable for rescue (unstable/being written)")
+                        else:
+                            append_job_log(job_id, "No external rescue candidate found; proceeding with failure")
 
             # Clean up temp file (only if it was an EMBEDDED extraction, not an external subtitle)
             if source_subtitle is not None and source_subtitle.origin == SourceOrigin.EMBEDDED:
+                if source_subtitle.path and os.path.exists(source_subtitle.path):
+                    try: os.remove(source_subtitle.path)
+                    except Exception: pass
                 if os.path.exists(temp_extracted_srt):
                     try: os.remove(temp_extracted_srt)
-                    except: pass
+                    except Exception: pass
 
-            total_duration = round(time.time() - start_time, 2)
+            job_data = get_job_by_id(job_id) if job_id else None
+            prev_dur = float(job_data.get("duration_seconds") or 0.0) if job_data else 0.0
+            total_duration = round(prev_dur + (time.time() - start_time), 2)
 
-            # Determine correct final status
+            # Determine correct final status & reason
+            reason_str = None
             if len(successful_langs) + len(skipped_langs) == len(langs_needing_translation):
-                if successful_langs:
+                if ai_translated_langs:
+                    final_status = "TRANSLATED"
+                elif rescued_langs and len(rescued_langs) == len(langs_needing_translation):
+                    final_status = "BAZARR MATCH"
+                    reason_str = "Bazarr found all targets"
+                    max_sync_diff = -1
+                elif external_resolved_langs and len(external_resolved_langs) == len(langs_needing_translation):
+                    final_status = "ALREADY EXISTS"
+                    reason_str = "External target appeared during processing"
+                    max_sync_diff = -1
+                elif (rescued_langs or external_resolved_langs) and (len(rescued_langs) + len(external_resolved_langs) == len(langs_needing_translation)):
+                    final_status = "BAZARR MATCH"
+                    reason_str = "Targets resolved without AI (Bazarr + existing)"
+                    max_sync_diff = -1
+                elif successful_langs:
                     final_status = "TRANSLATED"
                 else:
                     final_status = "SKIPPED"
             elif successful_langs:
                 final_status = "PARTIAL"
+            elif deferred_pub_langs:
+                # QA Gate passed, but publication was deferred (e.g. Bazarr actively writing or ownership lock)
+                if any("bazarr" in str(r).lower() for r in deferred_pub_langs.values()):
+                    final_status = "WAITING_FOR_BAZARR"
+                else:
+                    final_status = "WAITING_FOR_PUBLICATION"
             elif not qa_result["passed"]:
                 final_status = "FAILED"
             else:
@@ -3480,6 +4669,8 @@ class SubtitlePipeline:
                 "output_files": json.dumps(output_files),
                 "duration_seconds": total_duration
             }
+            if reason_str:
+                update_args["reason"] = reason_str
             if final_status == "FAILED":
                 unresolved_count = len(qa_result.get("real_untranslated_ids", []))
                 policy_failure_type = qa_result.get("policy_details", {}).get("failure_type")
@@ -3495,9 +4686,30 @@ class SubtitlePipeline:
                     update_args["error_message"] = f"QA Gate failed: {unresolved_count} unresolved cues ({issues_str}). File NOT published."
                     append_job_log(job_id, f"PERMANENT FAILURE: QA Gate failed with {unresolved_count} unresolved cues. File NOT published.")
                 update_args["next_retry_at"] = None
+            elif final_status in ["WAITING_FOR_BAZARR", "WAITING_FOR_PUBLICATION"]:
+                from datetime import datetime, timezone, timedelta
+                job_data = get_job_by_id(job_id)
+                current_retries = job_data.get("retry_count", 0) if job_data else 0
+
+                MAX_PUB_WAIT_ATTEMPTS = 5
+                if current_retries >= MAX_PUB_WAIT_ATTEMPTS:
+                    final_status = "FAILED"
+                    update_args["status"] = "FAILED"
+                    update_args["error_message"] = f"Publication wait attempts exhausted ({MAX_PUB_WAIT_ATTEMPTS}/{MAX_PUB_WAIT_ATTEMPTS}). Target remained blocked."
+                    append_job_log(job_id, f"PERMANENT FAILURE: Publication wait attempts exhausted ({MAX_PUB_WAIT_ATTEMPTS}/{MAX_PUB_WAIT_ATTEMPTS}).")
+                else:
+                    backoff_mins = 1
+                    if current_retries == 1: backoff_mins = 5
+                    elif current_retries == 2: backoff_mins = 15
+                    elif current_retries == 3: backoff_mins = 30
+                    elif current_retries >= 4: backoff_mins = 60
+
+                    update_args["next_retry_at"] = (datetime.now(timezone.utc) + timedelta(minutes=backoff_mins)).isoformat()
+                    update_args["retry_count"] = current_retries + 1
+                    wait_target = "Bazarr to finalize" if final_status == "WAITING_FOR_BAZARR" else "publication ownership"
+                    append_job_log(job_id, f"Publication waiting for {wait_target}. Will resume publication arbitration in {backoff_mins} min (Worker attempt {current_retries + 1}/{MAX_PUB_WAIT_ATTEMPTS}).")
             elif final_status in ["RECOVERING", "PARTIAL"]:
                 from datetime import datetime, timezone, timedelta
-                from app.core.db import get_job_by_id
                 job_data = get_job_by_id(job_id)
                 current_retries = job_data.get("retry_count", 0) if job_data else 0
 
@@ -3620,8 +4832,8 @@ class SubtitlePipeline:
             )
             # Phase 1: Persist structured deferred metadata for FIFO scheduling
             try:
-                from app.core.db import update_deferred_metadata, DeferReason, get_job_by_id as _gjbi2
-                _snap2 = _gjbi2(job_id)
+                from app.core.db import update_deferred_metadata, DeferReason
+                _snap2 = get_job_by_id(job_id)
 
                 _waiting_prov = (e.provider.lower() if e.provider else "") or (
                     _snap2.get("primary_provider", "") if _snap2 else ""
@@ -3643,7 +4855,7 @@ class SubtitlePipeline:
                 if os.path.exists(temp_extracted_srt):
                     try: os.remove(temp_extracted_srt)
                     except: pass
-            total_duration = round(time.time() - start_time, 2)
+            total_duration = round(prev_dur + (time.time() - start_time), 2)
             append_job_log(job_id, f"CRITICAL CONFIGURATION ERROR: {str(e)}")
             update_job(
                 job_id,
@@ -3661,9 +4873,8 @@ class SubtitlePipeline:
             if _src_is_temp and os.path.exists(temp_extracted_srt):
                 try: os.remove(temp_extracted_srt)
                 except: pass
-            total_duration = round(time.time() - start_time, 2)
+            total_duration = round(prev_dur + (time.time() - start_time), 2)
 
-            from app.core.db import get_job_by_id
             from datetime import datetime, timezone, timedelta
 
             job_data = get_job_by_id(job_id)
@@ -3695,7 +4906,7 @@ class SubtitlePipeline:
             if _src_is_temp and os.path.exists(temp_extracted_srt):
                 try: os.remove(temp_extracted_srt)
                 except: pass
-            total_duration = round(time.time() - start_time, 2)
+            total_duration = round(prev_dur + (time.time() - start_time), 2)
 
             err_str = str(e).lower()
             if any(t in err_str for t in ["timeout", "429", "500", "502", "503", "504", "connection"]):

@@ -48,6 +48,7 @@ class AISettingsRequest(BaseModel):
     batch_size: Optional[int] = Field(default=None, ge=1)
     max_concurrent_jobs: Optional[int] = Field(default=None, ge=1)
     batch_concurrency: Optional[int] = Field(default=None, ge=1)
+    custom_translation_instructions: Optional[str] = None
     glossary: Optional[str] = None
     # Daily request budget: 0 = Unlimited (default), positive integer = daily limit
     daily_request_budget_gemini: Optional[int] = Field(default=None, ge=0)
@@ -146,9 +147,14 @@ async def api_active_jobs() -> Dict[str, Any]:
     return result
 
 @router.get("/jobs")
-async def api_jobs(limit: int = 50) -> List[Dict[str, Any]]:
+async def api_jobs(
+    limit: int = 50,
+    status: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    order: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     # Bug #33: GET endpoint should NEVER delete/mutate data
-    return get_jobs(limit=limit)
+    return get_jobs(limit=limit, status=status, sort_by=sort_by, order=order)
 
 @router.get("/jobs/{job_id}")
 async def api_job_detail(job_id: int) -> Dict[str, Any]:
@@ -312,6 +318,7 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "batch_size": get_positive_int_setting("batch_size", 150),
             "max_concurrent_jobs": get_positive_int_setting("max_concurrent_jobs", 3),
             "batch_concurrency": get_positive_int_setting("batch_concurrency", 2),
+            "custom_translation_instructions": get_setting("custom_translation_instructions", ""),
             "glossary": get_setting("glossary", ""),
             # Daily request budgets (0 = Unlimited)
             "daily_request_budget_gemini": int(get_setting("daily_request_budget_gemini", "0") or "0"),
@@ -353,7 +360,8 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "plex_url": get_setting("plex_url", ""),
             "plex_token": mask_secret(get_setting("plex_token", "")),
             "plex_path_babel_prefix": get_setting("plex_path_babel_prefix", ""),
-            "plex_path_plex_prefix": get_setting("plex_path_plex_prefix", "")
+            "plex_path_plex_prefix": get_setting("plex_path_plex_prefix", ""),
+            "webhook_secret_configured": bool(get_setting("webhook_secret", "").strip())
         }
     }
 
@@ -441,6 +449,10 @@ async def api_save_ai_settings(req: AISettingsRequest):
     if req.batch_concurrency is not None:
         safe_batch_concurrency = max(1, int(req.batch_concurrency))
         set_setting("batch_concurrency", str(safe_batch_concurrency))
+    if req.custom_translation_instructions is not None:
+        if len(req.custom_translation_instructions) > 3000:
+            raise HTTPException(status_code=400, detail="Custom translation instructions cannot exceed 3000 characters.")
+        set_setting("custom_translation_instructions", req.custom_translation_instructions)
     if req.glossary is not None:
         set_setting("glossary", req.glossary)
     # Daily request budgets: 0 = unlimited
@@ -909,9 +921,20 @@ async def _attach_active_jobs_to_media(series_data: list, movies_data: list, all
         job = active_jobs_map.get(movie["path"])
         movie["active_job"] = _slim_job(job) if job else None
 
+    from app.services.scanner import is_embedded_probing_active, embedded_prober
     return {
         "series": series_data,
         "movies": movies_data,
+        "scanning_embedded": is_embedded_probing_active(),
+        "embedded_pending": embedded_prober.get_pending_count(),
+    }
+
+@router.get("/media-files/status")
+async def api_get_media_files_status():
+    from app.services.scanner import is_embedded_probing_active, embedded_prober
+    return {
+        "scanning_embedded": is_embedded_probing_active(),
+        "pending": embedded_prober.get_pending_count(),
     }
 
 @router.get("/media-files")

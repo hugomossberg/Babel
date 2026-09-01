@@ -70,9 +70,15 @@ async def test_bug_b_concurrent_target_race_preservation(tmp_path, monkeypatch):
     def mock_extract(vpath, outpath, preferred_lang="eng"):
         with open(outpath, "w", encoding="utf-8") as f:
             f.write("1\n00:00:01,000 --> 00:00:03,000\nInbäddad svensk text som är helt frisk och komplett.\n")
-        # Concurrently create external target
+        # Concurrently create external target (> 5 cues, > 200 bytes)
         with open(target_path, "w", encoding="utf-8") as f:
-            f.write("1\n00:00:01,000 --> 00:00:03,000\nExtern Bazarr-nedladdad svensk text som skapades under extraktionen.\n")
+            f.write(
+                "1\n00:00:01,000 --> 00:00:03,000\nExtern Bazarr-nedladdad svensk text som skapades under extraktionen.\n\n"
+                "2\n00:00:04,000 --> 00:00:06,000\nDetta är den andra raden med bra text.\n\n"
+                "3\n00:00:07,000 --> 00:00:09,000\nTredje raden i filen för att den ska vara giltig.\n\n"
+                "4\n00:00:10,000 --> 00:00:12,000\nFjärde raden med svensk text.\n\n"
+                "5\n00:00:13,000 --> 00:00:15,000\nFemte raden är helt komplett och fin.\n"
+            )
         return True
 
     monkeypatch.setattr("app.services.pipeline.extract_embedded_srt", mock_extract)

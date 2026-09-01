@@ -224,6 +224,9 @@ async def test_already_exists_no_publish_does_not_notify(pipeline_settings, tmp_
     """When target subtitle already exists on disk and no new file is published, _notify_media_servers is NOT called."""
     video_path = tmp_path / "existing_movie.mkv"
     video_path.touch()
+    en_srt = tmp_path / "existing_movie.en.srt"
+    with open(en_srt, "w", encoding="utf-8") as f:
+        f.write(make_valid_srt(lang="en", count=10))
     sv_srt = tmp_path / "existing_movie.sv.srt"
     with open(sv_srt, "w", encoding="utf-8") as f:
         f.write(make_valid_srt(lang="sv", count=10))

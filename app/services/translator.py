@@ -6,7 +6,7 @@ import functools
 import unicodedata
 import re
 import contextvars
-from typing import List, Optional, Dict, Any, Tuple, Set
+from typing import List, Optional, Dict, Any, Tuple, Set, Callable, Awaitable
 
 import threading
 
@@ -434,6 +434,8 @@ def _infer_usage_stage(func_name: str, kwargs: dict) -> str:
         return str(explicit)
 
     fn = func_name.lower()
+    if "trust" in fn or "trust_audit" in fn or "subtitle_trust" in fn:
+        return UsageStage.SUBTITLE_TRUST_AUDIT
     if "repair_alignment" in fn or "alignment_repair" in fn or "repair_batch" in fn:
         return UsageStage.RECOVERY
     if "audit" in fn or "alignment" in fn or "confirm_batch" in fn or "verify_repaired_batch" in fn:
@@ -513,20 +515,35 @@ def is_safe_keep_prefilter(text: str) -> bool:
 
     return False
 
-def get_system_instruction(target_language: str, glossary: str = "", show_title: str = "", source_language: str = "English") -> str:
-    glossary_section = ""
+def format_custom_instructions_section(custom_instructions: str) -> str:
+    if custom_instructions and custom_instructions.strip():
+        return "\n\nAdditional user translation preferences:\n---\n" + custom_instructions.strip() + "\n---\n"
+    return ""
+
+
+def format_glossary_section(glossary: str) -> str:
     if glossary and glossary.strip():
-        glossary_section = "\n\nGLOSSARY - Always use these exact translations:\n" + glossary.strip() + "\n"
+        return "\n\nGLOSSARY - Always use these exact translations:\n" + glossary.strip() + "\n"
+    return ""
+
+
+def get_system_instruction(target_language: str, glossary: str = "", show_title: str = "", source_language: str = "English", custom_instructions: str = "") -> str:
+    from app.core.languages import get_display_language_name
+    tgt_name = get_display_language_name(target_language)
+    src_name = get_display_language_name(source_language)
+
+    custom_section = format_custom_instructions_section(custom_instructions)
+    glossary_section = format_glossary_section(glossary)
 
     show_context = ""
     if show_title:
         show_context = f"\nYou are translating subtitles for: \"{show_title}\". Adapt tone and terminology accordingly.\n"
 
-    return f"""You are a professional film/TV subtitle translator translating from {source_language} to {target_language}.{show_context}
-Translate the numbered subtitle blocks to natural, idiomatic {target_language}.
-{glossary_section}
+    return f"""You are a professional film/TV subtitle translator translating from {src_name} to {tgt_name}.{show_context}
+Translate the numbered subtitle blocks to natural, idiomatic {tgt_name}.
+{custom_section}{glossary_section}
 STRICT RULES:
-1. Translate accurately and idiomatically into natural {target_language}. Translate every real dialogue line into {target_language}; do not copy {source_language} dialogue unchanged.
+1. Translate accurately and idiomatically into natural {tgt_name}. Translate every real dialogue line into {tgt_name}; do not copy {src_name} dialogue unchanged.
 2. Do not classify or explain. Return translations only.
 3. Preserve character names and proper nouns where appropriate, but translate all surrounding dialogue naturally.
 4. Preserve all subtitle formatting tags exactly as they appear (e.g. <i>, </i>, and ASS tags like {{\\an8}}). Do not encode them into HTML entities.
@@ -555,59 +572,57 @@ def extract_json_safely(raw_text: str) -> List[dict]:
         if lines and lines[-1].startswith("```"): lines = lines[:-1]
         raw_text = "\n".join(lines).strip()
 
-    # 1. Direct parse
     try:
         data = json.loads(raw_text)
         if isinstance(data, dict):
-            if "translations" in data and isinstance(data["translations"], list):
-                return data["translations"]
-            if "results" in data and isinstance(data["results"], list):
-                return data["results"]
-            if "items" in data and isinstance(data["items"], list):
-                return data["items"]
+            # Check standard top-level array keys
+            for key in ["translations", "items", "subtitles", "data", "results"]:
+                if key in data and isinstance(data[key], list):
+                    return data[key]
+            # Handle Single-Line Escalation schema: {"translation": "..."} -> return pseudo-array
+            if "translation" in data and isinstance(data["translation"], str):
+                return [{"id": 1, "text": data["translation"]}]
         if isinstance(data, list):
             return data
     except Exception:
         pass
 
-    # Repair common JSON issues without stripping \t, \n, \r
-    try:
-        repaired_text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]+', '', raw_text)
-        repaired_text = re.sub(r',\s*([\]}])', r'\1', repaired_text)
-        data = json.loads(repaired_text)
-        if isinstance(data, dict):
-            if "translations" in data and isinstance(data["translations"], list):
-                return data["translations"]
-            if "results" in data and isinstance(data["results"], list):
-                return data["results"]
-            if "items" in data and isinstance(data["items"], list):
-                return data["items"]
-        if isinstance(data, list):
-            return data
-    except Exception:
-        pass
-
-    # 2. Regex match for "translations": [...] or "results": [...] or "items": [...]
-    match = re.search(r'"(?:translations|results|items)"\s*:\s*(\[[\s\S]*?\])\s*\}?', raw_text)
+    # Regex extraction of JSON structure
+    match = re.search(r'\{\s*"(?:translations|items|subtitles|data|results)"\s*:\s*(\[.*?\])\s*\}', raw_text, re.DOTALL)
     if match:
         try:
             return json.loads(match.group(1))
         except Exception:
             pass
 
-    # 3. Fallback: individual regex search
-    items = []
-    pattern = re.compile(r'\{\s*"id"\s*:\s*(\d+)\s*,\s*"text"\s*:\s*"(.*?)"\s*\}', re.DOTALL)
-    for m in pattern.finditer(raw_text):
+    # Generic bracket array extraction
+    match = re.search(r'(\[\s*\{.*?\}\s*\])', raw_text, re.DOTALL)
+    if match:
         try:
-            item_id = int(m.group(1))
-            item_text = m.group(2)
-            items.append({"id": item_id, "text": item_text})
+            return json.loads(match.group(1))
         except Exception:
             pass
 
-    if items:
-        return items
+    # Match single escalation key {"translation": "..."}
+    match = re.search(r'\{\s*"translation"\s*:\s*"((?:\\.|[^"\\])*)"\s*\}', raw_text, re.DOTALL)
+    if match:
+        try:
+            val = match.group(1).encode().decode('unicode_escape')
+            return [{"id": 1, "text": val}]
+        except Exception:
+            return [{"id": 1, "text": match.group(1)}]
+
+    # Loose dictionary recovery: find all {"id": ..., "text": ...} individually
+    loose_matches = re.findall(r'\{\s*"id"\s*:\s*(\d+)\s*,\s*"text"\s*:\s*"((?:\\.|[^"\\])*)"\s*\}', raw_text)
+    if loose_matches:
+        recovered = []
+        for m_id, m_text in loose_matches:
+            try:
+                clean_text = m_text.encode().decode('unicode_escape')
+            except Exception:
+                clean_text = m_text
+            recovered.append({"id": int(m_id), "text": clean_text})
+        return recovered
 
     raise ValueError(f"Could not extract JSON translation array from response: {raw_text[:100]}...")
 
@@ -616,10 +631,12 @@ def build_translation_prompt(items: List[dict], target_language: str, context_se
     """
     Builds the authoritative 1-to-1 contiguous-ID translation prompt contract.
     """
+    from app.core.languages import get_display_language_name
+    tgt_name = get_display_language_name(target_language)
     first_id = items[0]["id"] if items else 0
     last_id = items[-1]["id"] if items else 0
     return (
-        f"Translate the following {len(items)} subtitle lines into {target_language}.\n"
+        f"Translate the following {len(items)} subtitle lines into {tgt_name}.\n"
         f"INPUT CONTRACT: Input items have IDs from {first_id} to {last_id} (total {len(items)} items).\n"
         f"You MUST return exactly {len(items)} translation objects in \"translations\", one for each input item, "
         f"strictly preserving the exact matching integer \"id\" for each item in ascending numerical order.\n"
@@ -634,6 +651,8 @@ def build_translation_output_schema(items: List[dict], target_language: str = "S
     """
     Builds the canonical structured output schema for translation batches.
     """
+    from app.core.languages import get_display_language_name
+    tgt_name = get_display_language_name(target_language)
     first_id = items[0]["id"] if items else 0
     last_id = items[-1]["id"] if items else 0
     return {
@@ -646,7 +665,7 @@ def build_translation_output_schema(items: List[dict], target_language: str = "S
                     "type": "OBJECT",
                     "properties": {
                         "id": {"type": "INTEGER", "description": "The exact integer ID from the input item"},
-                        "text": {"type": "STRING", "description": f"The translated {target_language} subtitle text, preserving tags or exact '<i></i>'"}
+                        "text": {"type": "STRING", "description": f"The translated {tgt_name} subtitle text, preserving tags or exact '<i></i>'"}
                     },
                     "required": ["id", "text"]
                 }
@@ -1869,21 +1888,25 @@ class SubtitleTranslator:
         if provider in ("gemini", "openai", "openrouter", "deepseek", "anthropic") and not get_setting(f"{provider}_api_key", ""):
             return []
 
-        system_prompt = f"""You are a subtitle localization quality assurance AI for {target_language}.
-The following lines were identical between {source_language} and candidate {target_language} output.
-Evaluate whether each line is legitimately INVARIANT in {target_language} (KEEP) or is translatable dialogue/SDH that MUST be translated into natural {target_language} (TRANSLATE).
+        from app.core.languages import get_display_language_name
+        _tgt_name = get_display_language_name(target_language)
+        _src_name = get_display_language_name(source_language)
+
+        system_prompt = f"""You are a subtitle localization quality assurance AI for {_tgt_name}.
+The following lines were identical between {_src_name} and candidate {_tgt_name} output.
+Evaluate whether each line is legitimately INVARIANT in {_tgt_name} (KEEP) or is translatable dialogue/SDH that MUST be translated into natural {_tgt_name} (TRANSLATE).
 
 KEEP is ONLY valid when:
-- 'proper_noun': character name, place name, or named entity conventionally unchanged in {target_language}.
+- 'proper_noun': character name, place name, or named entity conventionally unchanged in {_tgt_name}.
 - 'brand' / 'acronym': technical term, organization, or brand.
 - 'number' / 'symbol': numerical values, timestamps, or symbols.
-- 'non_verbal': untranslatable acoustic sound effect or onomatopoeia identical in {target_language}.
-- 'shared_word' / 'cognate': universal loanword or interjection with the exact same spelling and meaning in BOTH {source_language} and {target_language}.
+- 'non_verbal': untranslatable acoustic sound effect or onomatopoeia identical in {_tgt_name}.
+- 'shared_word' / 'cognate': universal loanword or interjection with the exact same spelling and meaning in BOTH {_src_name} and {_tgt_name}.
 
 CRITICAL RULES:
-- Ordinary conversational dialogue, phrases, commands, and sentences in {source_language} MUST NEVER be classified as KEEP.
-- Descriptive non-verbal / SDH cues that describe an action or event (e.g. "[SIGHING]", "(door closes)", "[music playing]") MUST ALWAYS be TRANSLATE with the actual translated text in {target_language}.
-- Invariant non-verbal cues are ONLY genuine acoustic sound effects / onomatopoeia that have the exact same written representation in {target_language}.
+- Ordinary conversational dialogue, phrases, commands, and sentences in {_src_name} MUST NEVER be classified as KEEP.
+- Descriptive non-verbal / SDH cues that describe an action or event (e.g. "[SIGHING]", "(door closes)", "[music playing]") MUST ALWAYS be TRANSLATE with the actual translated text in {_tgt_name}.
+- Invariant non-verbal cues are ONLY genuine acoustic sound effects / onomatopoeia that have the exact same written representation in {_tgt_name}.
 
 Return ONLY a JSON object with a single key 'results' containing an array of objects.
 """
@@ -2023,23 +2046,27 @@ Return ONLY a JSON object with a single key 'results' containing an array of obj
         if provider in ("gemini", "openai", "openrouter", "deepseek", "anthropic") and not get_setting(f"{provider}_api_key", ""):
             return set()
 
-        system_prompt = f"""You are an independent localization quality auditor for {source_language} -> {target_language}.
-You are verifying subtitle cues where the proposed {target_language} translation is identically spelled to the {source_language} source text.
+        from app.core.languages import get_display_language_name
+        _tgt_name = get_display_language_name(target_language)
+        _src_name = get_display_language_name(source_language)
 
-Your task is to determine whether the proposed text is a valid, faithful, and natural {target_language} rendering in this dialogue context, OR if it is an error (untranslated {source_language} text left in the subtitle).
+        system_prompt = f"""You are an independent localization quality auditor for {_src_name} -> {_tgt_name}.
+You are verifying subtitle cues where the proposed {_tgt_name} translation is identically spelled to the {_src_name} source text.
+
+Your task is to determine whether the proposed text is a valid, faithful, and natural {_tgt_name} rendering in this dialogue context, OR if it is an error (untranslated {_src_name} text left in the subtitle).
 
 DECISION CRITERIA:
 Set "invariant_in_target": true IF:
-1. The text is an entity, proper name, brand, acronym, number, symbol, or non-verbal sound effect that is naturally kept identical in {target_language}, OR
-2. The text is a valid and natural translation/localization in {target_language} for this dialogue context, even if identically spelled to the source text (e.g. shared cognates, identical loanwords, affirmations, greetings, short calls, proper names with shared particles, or short commands/verbs that are identical in both languages in this context).
+1. The text is an entity, proper name, brand, acronym, number, symbol, or non-verbal sound effect that is naturally kept identical in {_tgt_name}, OR
+2. The text is a valid and natural translation/localization in {_tgt_name} for this dialogue context, even if identically spelled to the source text (e.g. shared cognates, identical loanwords, affirmations, greetings, short calls, proper names with shared particles, or short commands/verbs that are identical in both languages in this context).
 
 Set "invariant_in_target": false IF:
 1. The text is descriptive SDH (e.g. '[SIGHING]', '(door closes)', '[music playing]'), OR
-2. The text is UNTRANSLATED {source_language} conversational dialogue that requires a different, non-identical translation in {target_language} (e.g. sentences, questions, or vocabulary where {target_language} uses different words).
+2. The text is UNTRANSLATED {_src_name} conversational dialogue that requires a different, non-identical translation in {_tgt_name} (e.g. sentences, questions, or vocabulary where {_tgt_name} uses different words).
 
 Output strict structured JSON with key 'results' containing an array of verification objects:
 - id: integer
-- invariant_in_target: boolean (true if valid in {target_language}, false if untranslated/invalid)
+- invariant_in_target: boolean (true if valid in {_tgt_name}, false if untranslated/invalid)
 - explanation: non-empty string explaining the linguistic reason
 """
 
@@ -2300,19 +2327,28 @@ CRITICAL RULES:
             if exhausted_strategies is not None and strategy_key in exhausted_strategies:
                 continue
 
+            custom_instructions = get_setting("custom_translation_instructions", "")
+            custom_section = format_custom_instructions_section(custom_instructions)
+            glossary = get_setting("glossary", "")
+            glossary_section = format_glossary_section(glossary)
+
+            from app.core.languages import get_display_language_name
+            _tgt_name = get_display_language_name(target_language)
+            _src_name = get_display_language_name(source_language)
+
             if attempt_type == "contextual":
                 if is_real_untranslated:
-                    _src_label = source_language if source_language != "source" else "source-language"
-                    system_prompt = f"You MUST translate TARGET into {target_language}.\nTARGET is known to still be untranslated {_src_label} dialogue.\nDo NOT return the original {_src_label} text.\nDo NOT return an empty string.\nPrevious/Next are context only.\nReturn a JSON object with a single key 'translation' containing only the translated TARGET."
+                    _src_label = _src_name if _src_name != "source" else "source-language"
+                    system_prompt = f"You MUST translate TARGET into {_tgt_name}.\nTARGET is known to still be untranslated {_src_label} dialogue.\nDo NOT return the original {_src_label} text.\nDo NOT return an empty string.\nPrevious/Next are context only.{custom_section}{glossary_section}\nReturn a JSON object with a single key 'translation' containing only the translated TARGET."
                 else:
-                    system_prompt = f"You are a subtitle translator. Translate the TARGET line to {target_language}. The Previous and Next lines are for context only. Return a JSON object with a single key 'translation' containing the translated string."
+                    system_prompt = f"You are a subtitle translator. Translate the TARGET line to {_tgt_name}. The Previous and Next lines are for context only.{custom_section}{glossary_section}\nReturn a JSON object with a single key 'translation' containing the translated string."
                 prompt = f"Context: {show_title}\n\nPrevious: {prev_text}\nTARGET: {target_text}\nNext: {next_text}\n\nTranslate TARGET:"
             elif attempt_type == "strict":
-                system_prompt = f"You are a strict translation engine."
-                prompt = f"This cue has already failed QA because source-language dialogue remains.\n\nTranslate TARGET into {target_language}.\n\nTARGET:\n\"{target_text}\"\n\nPrevious/Next may only help disambiguation.\n\nYou MUST NOT:\n- classify TARGET\n- decide KEEP\n- return TARGET unchanged\n- return blank text\n\nReturn the actual translated TARGET.\n\nContext:\nPrevious: {prev_text}\nNext: {next_text}"
+                system_prompt = f"You are a strict translation engine.{custom_section}{glossary_section}"
+                prompt = f"This cue has already failed QA because source-language dialogue remains.\n\nTranslate TARGET into {_tgt_name}.\n\nTARGET:\n\"{target_text}\"\n\nPrevious/Next may only help disambiguation.\n\nYou MUST NOT:\n- classify TARGET\n- decide KEEP\n- return TARGET unchanged\n- return blank text\n\nReturn the actual translated TARGET.\n\nContext:\nPrevious: {prev_text}\nNext: {next_text}"
             else:
-                system_prompt = f"You are a strict translation engine."
-                prompt = f"Translate this subtitle dialogue into {target_language}.\n\nSOURCE:\n\"{target_text}\"\n\nReturn only the translated dialogue.\nDo not return the source text.\nDo not explain or classify."
+                system_prompt = f"You are a strict translation engine.{custom_section}{glossary_section}"
+                prompt = f"Translate this subtitle dialogue into {_tgt_name}.\n\nSOURCE:\n\"{target_text}\"\n\nReturn only the translated dialogue.\nDo not return the source text.\nDo not explain or classify."
 
             schema = {
                 "type": "OBJECT",
@@ -2444,10 +2480,11 @@ CRITICAL RULES:
         schema = build_translation_output_schema(items, target_language)
 
         glossary = get_setting("glossary", "")
+        custom_instructions = get_setting("custom_translation_instructions", "")
         from app.core.ai_providers import get_model_capabilities
         caps = get_model_capabilities("gemini", model_name)
         config_kwargs = {
-            "system_instruction": get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language),
+            "system_instruction": get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions),
             "response_mime_type": "application/json",
             "response_schema": schema,
             "max_output_tokens": 8192,
@@ -2486,6 +2523,7 @@ CRITICAL RULES:
         schema = build_translation_output_schema(items, target_language)
 
         glossary = get_setting("glossary", "")
+        custom_instructions = get_setting("custom_translation_instructions", "")
         from app.core.ai_providers import get_model_capabilities
         caps = get_model_capabilities("openai", model_name)
 
@@ -2494,7 +2532,7 @@ CRITICAL RULES:
             kwargs = {
                 "model": model_to_use,
                 "messages": [
-                    {"role": "system", "content": get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language)},
+                    {"role": "system", "content": get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)},
                     {"role": "user", "content": prompt}
                 ],
             }
@@ -2567,7 +2605,8 @@ CRITICAL RULES:
                     context_section += f'  Original: "{ctx["original"]}"\n'
 
         glossary = get_setting("glossary", "")
-        prompt = f"{get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language)}\n\n{build_translation_prompt(items, target_language, context_section)}"
+        custom_instructions = get_setting("custom_translation_instructions", "")
+        prompt = f"{get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)}\n\n{build_translation_prompt(items, target_language, context_section)}"
 
         from app.core.ai_providers import get_model_capabilities
         caps = get_model_capabilities(provider or "ollama", model_name)
@@ -3127,7 +3166,8 @@ CRITICAL RULES:
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
         glossary = get_setting("glossary", "")
-        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language)
+        custom_instructions = get_setting("custom_translation_instructions", "")
+        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)
 
         raw = await self._dispatch_llm_completion(
             provider="anthropic",
@@ -3154,7 +3194,8 @@ CRITICAL RULES:
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
         glossary = get_setting("glossary", "")
-        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language)
+        custom_instructions = get_setting("custom_translation_instructions", "")
+        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)
 
         raw = await self._dispatch_llm_completion(
             provider="openrouter",
@@ -3181,7 +3222,8 @@ CRITICAL RULES:
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
         glossary = get_setting("glossary", "")
-        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language)
+        custom_instructions = get_setting("custom_translation_instructions", "")
+        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)
 
         raw = await self._dispatch_llm_completion(
             provider="deepseek",
@@ -3208,7 +3250,8 @@ CRITICAL RULES:
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
         glossary = get_setting("glossary", "")
-        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language)
+        custom_instructions = get_setting("custom_translation_instructions", "")
+        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)
 
         raw = await self._dispatch_llm_completion(
             provider="custom",
@@ -3256,7 +3299,8 @@ CRITICAL RULES:
         batch_size: int = 150,
         job_id: Optional[int] = None,
         show_title: Optional[str] = None,
-        provenance_map: Optional[dict] = None
+        provenance_map: Optional[dict] = None,
+        early_stop_check: Optional[Callable[[], Awaitable[bool]]] = None
     ) -> List[srt.Subtitle]:
         total_lines = len(subs)
         batches = []
@@ -3272,10 +3316,9 @@ CRITICAL RULES:
 
         import os
         import app.core.db
-        from app.core.languages import get_language
+        from app.core.languages import normalize_language_code
         data_dir = os.path.dirname(app.core.db.DB_PATH)
-        lang_obj = get_language(target_language)
-        lang_code = lang_obj.code if lang_obj else target_language.lower()[:2]
+        lang_code = normalize_language_code(target_language)
         partial_file = os.path.join(data_dir, f"job_{job_id}_{lang_code}_partial.json") if job_id else None
 
         import hashlib
@@ -3521,9 +3564,28 @@ CRITICAL RULES:
                         update_job(job_id, processed_lines=processed_count)
 
 
+        stop_event = asyncio.Event()
+
         async def run_batch_with_sem(batch_idx, start_idx, chunk, payload):
+            if stop_event.is_set():
+                return
+            if early_stop_check:
+                try:
+                    if await early_stop_check():
+                        stop_event.set()
+                        return
+                except Exception:
+                    pass
             async with sem:
+                if stop_event.is_set():
+                    return
                 await process_batch(batch_idx, start_idx, chunk, payload)
+                if early_stop_check:
+                    try:
+                        if await early_stop_check():
+                            stop_event.set()
+                    except Exception:
+                        pass
 
         tasks = []
         for batch_idx, (start_idx, chunk, payload) in enumerate(batches):
@@ -3531,6 +3593,9 @@ CRITICAL RULES:
 
         if tasks:
             await asyncio.gather(*tasks)
+
+        if stop_event.is_set():
+            return translated_subs
 
         # ------------------------------------------------------------------
         # Consolidated Global First-Pass Micro Repair
@@ -3656,12 +3721,17 @@ CRITICAL RULES:
         _ctx = provider_ctx or (resolve_job_provider_context(job_id) if job_id else context_from_settings())
         provider = _ctx.provider
 
+        custom_instructions = get_setting("custom_translation_instructions", "")
+        custom_section = format_custom_instructions_section(custom_instructions)
+        glossary = get_setting("glossary", "")
+        glossary_section = format_glossary_section(glossary)
+
         system_prompt = f"""You are a professional subtitle translator translating {source_language} dialogue to {target_language}.
 
 The following dialogue TARGET lines failed the initial translation pass because they were copied unchanged or returned with incomplete translation.
 
 Translate every TARGET line into natural, idiomatic {target_language} now.
-
+{custom_section}{glossary_section}
 STRICT RULES:
 - Translate every TARGET into natural {target_language}.
 - Do NOT copy the {source_language} TARGET unchanged.
@@ -3760,11 +3830,15 @@ STRICT RULES:
         _ctx = provider_ctx or (resolve_job_provider_context(job_id) if job_id else context_from_settings())
         provider = _ctx.provider
         show_context = f"\nShow / Context: \"{show_title}\"" if show_title else ""
+        custom_instructions = get_setting("custom_translation_instructions", "")
+        custom_section = format_custom_instructions_section(custom_instructions)
+        glossary = get_setting("glossary", "")
+        glossary_section = format_glossary_section(glossary)
 
         system_prompt = f"""You are a professional film/TV subtitle translator translating dialogue from {source_language} into natural, idiomatic {target_language}.{show_context}
 
 The following dialogue TARGET lines need recovery translation. Use the surrounding dialogue context (before/after) to understand the scene, speaker tone, and conversational flow.
-
+{custom_section}{glossary_section}
 STRICT RULES:
 1. Translate every TARGET line accurately and idiomatically into natural {target_language}.
 2. Use the CONTEXT BEFORE and CONTEXT AFTER for tone, character gender, and scene coherence.
@@ -3862,11 +3936,15 @@ STRICT RULES:
         _ctx = provider_ctx or (resolve_job_provider_context(job_id) if job_id else context_from_settings())
         provider = _ctx.provider
         show_context = f"\nShow / Context: \"{show_title}\"" if show_title else ""
+        custom_instructions = get_setting("custom_translation_instructions", "")
+        custom_section = format_custom_instructions_section(custom_instructions)
+        glossary = get_setting("glossary", "")
+        glossary_section = format_glossary_section(glossary)
 
         system_prompt = f"""You are a strict subtitle translation engine translating from {source_language} to {target_language}.{show_context}
 
 The following dialogue lines must be translated into {target_language}.
-
+{custom_section}{glossary_section}
 STRICT RULES:
 1. Provide a direct, idiomatic translation into {target_language} for every requested line.
 2. Do not copy untranslated {source_language} text unchanged unless it is an invariant proper name or identical word in {target_language}.
@@ -3992,6 +4070,10 @@ STRICT RULES:
         _ctx = resolve_job_provider_context(job_id) if job_id else context_from_settings()
         provider = _ctx.provider
         show_context = f'\nShow / Context: "{show_title}"' if show_title else ""
+        custom_instructions = get_setting("custom_translation_instructions", "")
+        custom_section = format_custom_instructions_section(custom_instructions)
+        glossary = get_setting("glossary", "")
+        glossary_section = format_glossary_section(glossary)
 
         repair_set = set(repair_cue_ids)
         min_id = min(repair_cue_ids)
@@ -4020,7 +4102,7 @@ STRICT RULES:
 
 A semantic alignment anomaly was detected in the target subtitles.
 Your task is to perform a HARD SOURCE REMAP: translate each canonical SOURCE cue directly and independently to its matching ID.
-
+{custom_section}{glossary_section}
 STRICT CONTRACT:
 1. HARD SOURCE REMAP: Provide the direct, idiomatic 1-to-1 {target_language} translation for EVERY requested cue ID in {repair_cue_ids}.
 2. Each translated cue MUST correspond strictly and exclusively to its matching single source cue ID (no delay, no advance, no omission, no merging across IDs).

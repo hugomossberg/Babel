@@ -345,27 +345,25 @@ Babel validates every subtitle before writing to disk using a three-tier decisio
 
 ## Sonarr & Radarr Integration
 
-Babel can process media automatically upon download or upgrade.
+Babel can process media automatically upon file import or upgrade.
 
 > **Docker Networking Note:** Using `http://YOUR-SERVER-IP:PORT` is the safest option when Sonarr/Radarr and Babel are running in separate Docker stacks.
 
-If `BABEL_WEBHOOK_SECRET` is configured, add the following custom header to the Sonarr/Radarr webhook:
+If `BABEL_WEBHOOK_SECRET` is configured, you can either pass `?secret=YOUR_SECRET` in the URL or add the following custom header:
 
 `X-Webhook-Secret: YOUR_SECRET`
 
-Keep the webhook URL unchanged. The secret does not need to be added to the URL.
-
 ### Sonarr Configuration
 1. In Sonarr, navigate to **Settings > Connect > + (Add Webhook)**.
-2. Set **URL** to: `http://YOUR-SERVER-IP:8765/webhook/sonarr`.
-3. If using `BABEL_WEBHOOK_SECRET`, add the `X-Webhook-Secret` custom header under the webhook's advanced settings.
-4. Check triggers: **On Download** and **On Upgrade**.
+2. Set **URL** to: `http://YOUR-SERVER-IP:8765/webhook/sonarr` (or the dynamic URL shown in Babel settings).
+3. If using `BABEL_WEBHOOK_SECRET`, add `?secret=...` to the URL or add the `X-Webhook-Secret` custom header under the webhook's advanced settings.
+4. Check triggers: **On File Import** and **On File Upgrade** *(do not use On Grab, as media must be imported to disk first)*.
 
 ### Radarr Configuration
 1. In Radarr, navigate to **Settings > Connect > + (Add Webhook)**.
-2. Set **URL** to: `http://YOUR-SERVER-IP:8765/webhook/radarr`.
-3. If using `BABEL_WEBHOOK_SECRET`, add the `X-Webhook-Secret` custom header under the webhook's advanced settings.
-4. Check triggers: **On Download** and **On Upgrade**.
+2. Set **URL** to: `http://YOUR-SERVER-IP:8765/webhook/radarr` (or the dynamic URL shown in Babel settings).
+3. If using `BABEL_WEBHOOK_SECRET`, add `?secret=...` to the URL or add the `X-Webhook-Secret` custom header under the webhook's advanced settings.
+4. Check triggers: **On File Import** and **On File Upgrade** *(do not use On Grab, as media must be imported to disk first)*.
 
 ### Remote Path Mapping
 

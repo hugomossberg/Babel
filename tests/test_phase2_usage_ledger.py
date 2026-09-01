@@ -960,6 +960,7 @@ def _fake_get_setting(key: str, default: str = "") -> str:
         "openai_api_key": "test-openai-key",
         "openai_model": "gpt-4o-mini",
         "ai_provider": "gemini",
+        "custom_translation_instructions": "",
         "glossary": "",
     }
     return settings.get(key, default)

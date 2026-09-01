@@ -29,7 +29,10 @@ async def test_a_target_appears_after_extraction(mock_db_settings, tmp_path, mon
     video_path.touch()
     en_srt = tmp_path / "test.en.srt"
     with open(en_srt, "w") as f:
-        f.write("1\n00:00:00,000 --> 00:00:01,000\nHello\n")
+        lines = []
+        for i in range(1, 10):
+            lines.append(f"{i}\n00:00:0{i},000 --> 00:00:0{i},500\nThis is a very good English text line {i}\n")
+        f.write("\n".join(lines))
 
     pipeline = SubtitlePipeline()
 
@@ -74,7 +77,10 @@ async def test_a_target_appears_after_extraction(mock_db_settings, tmp_path, mon
     assert translate_calls == 0  # AI translation skipped
 
     job = get_job_by_id(res["job_id"])
-    assert job["status"] == "TRANSLATED" or job["status"] == "ALREADY_EXISTS" or job["status"] == "COMPLETED"
+    assert job["status"] != "BAZARR MATCH"
+    assert job["status"] != "TRANSLATED"
+    assert job["status"] == "ALREADY EXISTS"
+    assert job["reason"] == "External target appeared during processing"
 
 @pytest.mark.asyncio
 async def test_b_target_appears_before_publish(mock_db_settings, tmp_path, monkeypatch):
@@ -170,7 +176,10 @@ async def test_d_final_no_clobber_race(mock_db_settings, tmp_path, monkeypatch):
     video_path.touch()
     en_srt = tmp_path / "test.en.srt"
     with open(en_srt, "w") as f:
-        f.write("1\n00:00:00,000 --> 00:00:01,000\nHello\n")
+        lines = []
+        for i in range(1, 10):
+            lines.append(f"{i}\n00:00:0{i},000 --> 00:00:0{i},500\nThis is a very good English text line {i}\n")
+        f.write("\n".join(lines))
 
     pipeline = SubtitlePipeline()
 
@@ -178,7 +187,7 @@ async def test_d_final_no_clobber_race(mock_db_settings, tmp_path, monkeypatch):
     async def mock_translate_batch(*args, **kwargs):
         nonlocal translate_calls
         translate_calls += 1
-        return [{"id": 0, "text": "Hej"}]
+        return [{"id": i, "text": f"Svensk rad {i+1}"} for i in range(9)]
     monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
 
     sv_srt_path = str(tmp_path / "test.sv.srt")
@@ -195,7 +204,7 @@ async def test_d_final_no_clobber_race(mock_db_settings, tmp_path, monkeypatch):
             with open(sv_srt_path, "w") as f:
                 lines = []
                 for i in range(1, 10):
-                    lines.append(f"{i}\n00:00:0{i},000 --> 00:00:0{i},500\nSvensk text extern rad {i}\n")
+                    lines.append(f"{i}\n00:00:0{i},000 --> 00:00:0{i},500\nDetta är en mycket bra svensk text rad {i}\n")
                 f.write("\n".join(lines))
             raise FileExistsError(f"File exists: {dst}")
         return original_link(src, dst)
@@ -210,9 +219,8 @@ async def test_d_final_no_clobber_race(mock_db_settings, tmp_path, monkeypatch):
     # Check that the external target was NOT overwritten
     with open(sv_srt_path, "r") as f:
         content = f.read()
-    assert "Svensk text extern" in content
-    assert "Hej" not in content
+    assert "Detta är en mycket bra svensk text" in content
 
     job = get_job_by_id(res["job_id"])
     logs = "".join(job["logs"])
-    assert "External healthy sv subtitle appeared during publish. Skipping publish." in logs
+    assert "Preserving verified external target" in logs or "Subtitle Trust Engine: PASS" in logs

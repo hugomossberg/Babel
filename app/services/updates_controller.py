@@ -278,7 +278,10 @@ class UpdatesController:
 
                 # 3. Check active jobs (with maintenance lock held, no new jobs can enter)
                 from app.core.db import get_jobs_by_status
-                active_jobs = get_jobs_by_status(["EXTRACTING", "TRANSLATING", "QUEUED", "WAITING_PROVIDER", "RECOVERING", "PARTIAL", "WAITING_SOURCE"])
+                active_jobs = get_jobs_by_status([
+                    "EXTRACTING", "TRANSLATING", "QUEUED", "WAITING_PROVIDER", "RECOVERING",
+                    "PARTIAL", "WAITING_SOURCE", "WAITING_FOR_BAZARR", "WAITING_FOR_PUBLICATION"
+                ])
                 if len(active_jobs) > 0:
                     self.is_maintenance_locked = False
                     return {"success": False, "message": "Active jobs are running. Update blocked."}

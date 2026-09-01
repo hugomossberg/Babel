@@ -1,5 +1,7 @@
 import re
 import unicodedata
+import asyncio
+import time
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional, Set, Any
@@ -7,6 +9,28 @@ import srt
 
 # Placeholder that preserves the block structure for parsers and locks timestamps
 EMPTY_PLACEHOLDER = "<i></i>"
+
+
+class SanitizerResult(tuple):
+    subs: List[srt.Subtitle]
+    provenance_map: Dict[int, Any]
+    cleaned_count: int
+    telemetry: Dict[str, Any]
+
+    def __new__(
+        cls,
+        subs: List[srt.Subtitle],
+        provenance_map: Dict[int, Any],
+        cleaned_count: int,
+        telemetry: Optional[Dict[str, Any]] = None,
+    ):
+        inst = super().__new__(cls, (subs, provenance_map, cleaned_count))
+        inst.subs = subs
+        inst.provenance_map = provenance_map
+        inst.cleaned_count = cleaned_count
+        inst.telemetry = telemetry or {}
+        return inst
+
 
 # Regex for music notes and signs: ♪, ♫, ♬, ♩
 MUSIC_NOTES_REGEX = re.compile(r'[♪♫♬♩]+')
@@ -434,22 +458,26 @@ async def sanitize_srt_content_with_provenance(
     source_language: str = "English",
     classifier_fn: Optional[Any] = None,
     job_id: Optional[int] = None,
-) -> Tuple[List[srt.Subtitle], Dict[int, CueProvenance], int]:
+    concurrency: Optional[int] = None,
+) -> SanitizerResult:
     """
     Asynchronous, fully dynamic, language-agnostic SRT sanitizer with complete provenance tracking.
     1. Extracts file-level structural evidence (e.g. repeated speaker prefixes).
     2. Performs structural segmentation into structural candidates.
     3. Runs deterministic syntax/typography pre-classification.
-    4. Globally collects ambiguous candidates across the file and performs bounded bulk semantic classification.
+    4. Globally collects ambiguous candidates across the file and performs bounded concurrent semantic classification.
     5. Fails safe: if classifier fails, times out, or returns UNCERTAIN, dialogue is preserved.
-    6. Returns sanitized subs, per-cue CueProvenance mapping, and count of cleaned cues.
+    6. Returns sanitized subs, per-cue CueProvenance mapping, count of cleaned cues, and diagnostic telemetry.
     """
+    t_total_start = time.perf_counter()
+
+    # Phase 1: Local Analysis (SRT parsing, structural segmentation, deterministic heuristics)
+    t_analysis_start = time.perf_counter()
     subs = list(srt.parse(srt_content))
     file_speaker_labels = extract_file_speaker_labels(subs)
     provenance_map: Dict[int, CueProvenance] = {}
     cleaned_count = 0
 
-    # Phase 1: Cue analysis & collection of ambiguous segments
     ambiguous_items: List[Dict[str, Any]] = []
     # Map from normalized text to list of (cue_idx, seg_idx) for global deduplication
     text_to_segments: Dict[str, List[Tuple[int, int]]] = {}
@@ -470,19 +498,60 @@ async def sanitize_srt_content_with_provenance(
                         })
                     text_to_segments[norm_text].append((cue_idx, seg_idx))
 
-    # Phase 2: Bounded bulk semantic classification (if ambiguous items exist and classifier_fn available)
-    if ambiguous_items and classifier_fn is not None:
-        batch_size = 50  # Strict bounded batching
-        id_to_classification: Dict[int, SegmentClassification] = {}
+    t_local_analysis = time.perf_counter() - t_analysis_start
 
-        for b_start in range(0, len(ambiguous_items), batch_size):
-            chunk = ambiguous_items[b_start:b_start + batch_size]
+    # Phase 2: Bounded bulk semantic classification (if ambiguous items exist and classifier_fn available)
+    t_classifier_start = time.perf_counter()
+    batch_size = 50  # Strict bounded batch size invariant
+    effective_concurrency = 1
+    chunks: List[List[Dict[str, Any]]] = []
+
+    if ambiguous_items and classifier_fn is not None:
+        if concurrency is None:
             try:
-                results = await classifier_fn(
-                    chunk,
-                    source_language=source_language,
-                    job_id=job_id
-                )
+                from app.core.db import get_positive_int_setting
+                concurrency_setting = get_positive_int_setting("batch_concurrency", 2)
+            except Exception:
+                concurrency_setting = 2
+        else:
+            concurrency_setting = concurrency
+
+        effective_concurrency = max(1, min(int(concurrency_setting), 4))
+        chunks = [ambiguous_items[i:i + batch_size] for i in range(0, len(ambiguous_items), batch_size)]
+        id_to_classification: Dict[int, SegmentClassification] = {}
+        sem = asyncio.Semaphore(effective_concurrency)
+
+        async def _classify_chunk_task(chk: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Any, Optional[BaseException]]:
+            async with sem:
+                try:
+                    res = await classifier_fn(
+                        chk,
+                        source_language=source_language,
+                        job_id=job_id
+                    )
+                    return chk, res, None
+                except asyncio.CancelledError:
+                    raise
+                except Exception as ex:
+                    return chk, None, ex
+
+        # Run chunks concurrently with bounded semaphore
+        tasks = [asyncio.create_task(_classify_chunk_task(c)) for c in chunks]
+        try:
+            chunk_results = await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+        for chk, results, exc in chunk_results:
+            if exc is not None or results is None:
+                # Fail-safe per chunk: provider error -> treat all items in chunk as UNCERTAIN (preserved dialogue)
+                for item in chk:
+                    id_to_classification[item["id"]] = SegmentClassification.UNCERTAIN
+            else:
                 if isinstance(results, list):
                     for r in results:
                         if isinstance(r, dict) and "id" in r and "classification" in r:
@@ -493,12 +562,12 @@ async def sanitize_srt_content_with_provenance(
                                 id_to_classification[r["id"]] = SegmentClassification.DIALOGUE
                             else:
                                 id_to_classification[r["id"]] = SegmentClassification.UNCERTAIN
-            except Exception:
-                # Fail-safe: provider error -> treat all items in chunk as UNCERTAIN (preserved dialogue)
-                for item in chunk:
-                    id_to_classification[item["id"]] = SegmentClassification.UNCERTAIN
+                # Any item in chunk not explicitly mapped defaults to UNCERTAIN
+                for item in chk:
+                    if item["id"] not in id_to_classification:
+                        id_to_classification[item["id"]] = SegmentClassification.UNCERTAIN
 
-        # Apply classification results back to segments
+        # Apply classification results back to segments deterministically
         for item in ambiguous_items:
             item_id = item["id"]
             item_text = item["text"]
@@ -520,7 +589,7 @@ async def sanitize_srt_content_with_provenance(
                     seg.provenance = ClassificationProvenance.FAIL_SAFE_PRESERVED
                     seg.reason = "fail_safe_uncertain_preserved"
     else:
-        # No classifier provided -> fail-safe: all ambiguous items become preserved dialogue
+        # No classifier provided or no ambiguous items -> fail-safe: all ambiguous items become preserved dialogue
         for norm_text, seg_refs in text_to_segments.items():
             for cue_idx, seg_idx in seg_refs:
                 seg = provenance_map[cue_idx].segments[seg_idx]
@@ -528,7 +597,10 @@ async def sanitize_srt_content_with_provenance(
                 seg.provenance = ClassificationProvenance.FAIL_SAFE_PRESERVED
                 seg.reason = "fail_safe_no_classifier"
 
+    t_classifier_wait = time.perf_counter() - t_classifier_start
+
     # Phase 3: Final content reconstruction and provenance assembly
+    t_recon_start = time.perf_counter()
     for cue_idx, sub in enumerate(subs):
         prov = provenance_map[cue_idx]
         line_parts: Dict[int, List[str]] = {}
@@ -574,7 +646,21 @@ async def sanitize_srt_content_with_provenance(
             cleaned_count += 1
         sub.content = cleaned_text
 
-    return subs, provenance_map, cleaned_count
+    t_reconstruction = time.perf_counter() - t_recon_start
+    t_total = time.perf_counter() - t_total_start
+
+    telemetry = {
+        "total_s": round(t_total, 2),
+        "local_analysis_s": round(t_local_analysis, 2),
+        "classifier_wait_s": round(t_classifier_wait, 2),
+        "reconstruction_s": round(t_reconstruction, 2),
+        "ambiguous_unique": len(ambiguous_items),
+        "classifier_batches": len(chunks),
+        "classifier_concurrency": effective_concurrency if chunks else 1,
+    }
+
+    return SanitizerResult(subs, provenance_map, cleaned_count, telemetry=telemetry)
+
 
 
 def subs_to_srt_string(subs: List[srt.Subtitle]) -> str:

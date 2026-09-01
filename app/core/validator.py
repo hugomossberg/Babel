@@ -448,7 +448,7 @@ ENGLISH_COMMON_WORDS = {
 
 import langdetect
 from langdetect import DetectorFactory
-from app.core.languages import get_language
+from app.core.languages import get_language, normalize_language_code
 
 # Seed for deterministic tests/results
 DetectorFactory.seed = 0
@@ -463,12 +463,13 @@ def are_languages_compatible(lang_a: Optional[str], lang_b: Optional[str]) -> bo
     """Checks if two language codes are identical or belong to the same closely-related family."""
     if not lang_a or not lang_b:
         return False
-    a = lang_a.lower()[:2]
-    b = lang_b.lower()[:2]
-    if a == b:
+    from app.core.languages import normalize_language_code
+    norm_a = normalize_language_code(lang_a).lower()
+    norm_b = normalize_language_code(lang_b).lower()
+    if norm_a == norm_b:
         return True
     for group in SIMILAR_LANGUAGE_GROUPS:
-        if a in group and b in group:
+        if norm_a in group and norm_b in group:
             return True
     return False
 
@@ -661,12 +662,22 @@ def detect_language_heuristics(text: str, expected_language: Optional[str] = Non
         expected_norm = None
         if expected_language:
             exp_lang_obj = get_language(expected_language)
-            expected_norm = exp_lang_obj.code if exp_lang_obj else expected_language.lower().strip()[:2]
+            expected_norm = exp_lang_obj.code if exp_lang_obj else normalize_language_code(expected_language)
 
         words_list = re.findall(r"\b\w+\b", cleaned.lower())
         words = set(words_list)
         swedish_word_matches = words & SWEDISH_COMMON_WORDS
         english_word_matches = words & ENGLISH_COMMON_WORDS
+        # Expected target canonicalization for regional dialects:
+        # Generic language detectors classify regional dialects under their base language (e.g. pt-BR -> pt).
+        # When expected is a canonical regional dialect and detector identifies its base language,
+        # preserve the requested canonical target code for downstream validation without altering statistical confidence.
+        if expected_norm and detected_code:
+            expected_obj = get_language(expected_norm)
+            detected_obj = get_language(detected_code)
+            if expected_obj and detected_obj and expected_obj.code != detected_obj.code:
+                if expected_obj.code.split("-")[0].lower() == detected_obj.code.split("-")[0].lower():
+                    detected_code = expected_obj.code
 
         # Swedish heuristic assistance:
         # Only assist Swedish if expected_norm is 'sv' OR expected_norm is None
@@ -830,8 +841,8 @@ def classify_cue_language_mismatch(
     if not t_clean or t_clean == "<i></i>" or not any(c.isalpha() for c in t_clean):
         return {"status": "SAFE_INVARIANT", "target_lang": "unknown", "source_lang": "unknown", "details": "Non-verbal/empty/symbols"}
 
-    target_norm = target_lang_code[:2].lower()
-    source_norm = source_lang_code[:2].lower()
+    target_norm = normalize_language_code(target_lang_code)
+    source_norm = normalize_language_code(source_lang_code)
 
     t_info = detect_language_heuristics(target_text, expected_language=target_norm)
     t_lang = t_info["lang"]
@@ -873,7 +884,7 @@ def check_language_representative(
     and erroneous AI translations into the wrong language.
     """
     samples = extract_representative_dialogue_samples(sub_blocks)
-    target_norm = target_lang_code[:2].lower()
+    target_norm = normalize_language_code(target_lang_code)
 
     if not samples["all"]:
         return {
@@ -1117,7 +1128,7 @@ def evaluate_subtitle_health(
             "detected_language": detected_lang
         }
 
-    target_norm = target_lang_code[:2].lower()
+    target_norm = normalize_language_code(target_lang_code)
     if detected_lang != "unknown" and not are_languages_compatible(detected_lang, target_norm) and confidence < 0.8:
         return {
             "status": "YELLOW",

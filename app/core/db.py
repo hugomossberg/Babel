@@ -38,6 +38,8 @@ class DeferStage:
 #  • PARTIAL         — partial result, finishing up
 #  • WAITING_SOURCE  — waiting for source subtitle
 #  • DEFERRED        — daily budget exhausted; will auto-resume same job
+#  • WAITING_FOR_BAZARR — QA passed, publication deferred waiting for Bazarr
+#  • WAITING_FOR_PUBLICATION — QA passed, publication deferred waiting for ownership
 #
 # Terminal statuses (TRANSLATED, FAILED, CANCELLED, ALREADY EXISTS) are NOT
 # included — they do not block a new legitimate job or force-retranslate.
@@ -51,6 +53,8 @@ ACTIVE_JOB_STATUSES: tuple = (
     "PARTIAL",
     "WAITING_SOURCE",
     "DEFERRED",
+    "WAITING_FOR_BAZARR",
+    "WAITING_FOR_PUBLICATION",
 )
 
 logger = logging.getLogger(__name__)
@@ -186,6 +190,44 @@ def init_db():
         )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_extraction_cache_path ON embedded_extraction_cache (video_path)")
+
+        # Persistent metadata cache for Library embedded subtitle tracks inspection
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS media_embedded_tracks_cache (
+            video_path            TEXT PRIMARY KEY,
+            file_size             INTEGER NOT NULL,
+            mtime_ns              INTEGER NOT NULL,
+            subtitle_tracks_json  TEXT NOT NULL,
+            updated_at            TEXT NOT NULL
+        )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_media_embedded_cache_lookup ON media_embedded_tracks_cache (video_path, file_size, mtime_ns)")
+
+        # Check if existing subtitle_trust_cache lacks origin column
+        cursor.execute("PRAGMA table_info(subtitle_trust_cache)")
+        trust_cols = [row[1] for row in cursor.fetchall()]
+        if trust_cols and "origin" not in trust_cols:
+            cursor.execute("DROP TABLE subtitle_trust_cache")
+
+        # Persistent cache for Subtitle Trust Engine verification results
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS subtitle_trust_cache (
+            candidate_path   TEXT NOT NULL,
+            file_size        INTEGER NOT NULL,
+            mtime_ns         INTEGER NOT NULL,
+            target_language  TEXT NOT NULL,
+            origin           TEXT NOT NULL,
+            ref_fingerprint  TEXT NOT NULL,
+            schema_version   INTEGER NOT NULL DEFAULT 1,
+            decision         TEXT NOT NULL,
+            score            INTEGER NOT NULL,
+            confidence       TEXT NOT NULL,
+            result_json      TEXT NOT NULL,
+            created_at       TEXT NOT NULL,
+            PRIMARY KEY (candidate_path, file_size, mtime_ns, target_language, origin, ref_fingerprint, schema_version)
+        )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trust_cache_lookup ON subtitle_trust_cache (candidate_path, file_size, mtime_ns, origin)")
         # ---------------------------------------------------------------
         # Add columns if not existing yet on old database files.
         # IMPORTANT: This must run BEFORE the UPDATE statements below
@@ -331,6 +373,7 @@ def init_db():
             "batch_size": "150",
             "max_concurrent_jobs": "3",
             "batch_concurrency": "2",
+            "custom_translation_instructions": "",
             "glossary": "",
             "enable_bazarr_check": "true",
             "bazarr_url": "http://bazarr:6767",
@@ -353,6 +396,7 @@ def init_db():
             "languages": json.dumps([
                 {"name": "Swedish", "code": "sv", "enabled": True}
             ]),
+            "materialize_embedded_target": "false",
             # Daily request budget defaults — "0" means Unlimited (backward compatible)
             "daily_request_budget_gemini": "0",
             "daily_request_budget_openai": "0",
@@ -742,7 +786,7 @@ def claim_job_for_retry(job_id: int) -> bool:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE jobs SET status = 'QUEUED' WHERE id = ? AND status IN "
-            "('WAITING_PROVIDER', 'RETRY_PENDING', 'RECOVERING', 'PARTIAL', 'WAITING_SOURCE', 'DEFERRED')",
+            "('WAITING_PROVIDER', 'RETRY_PENDING', 'RECOVERING', 'PARTIAL', 'WAITING_SOURCE', 'DEFERRED', 'WAITING_FOR_BAZARR', 'WAITING_FOR_PUBLICATION')",
             (job_id,)
         )
         conn.commit()
@@ -766,11 +810,99 @@ def get_job_by_id(job_id: int) -> Optional[Dict[str, Any]]:
             data["logs"] = []
         return data
 
-def get_jobs(limit: int = 50) -> List[Dict[str, Any]]:
+STATUS_SORT_CASE = """
+CASE status
+    -- 1. Currently active work
+    WHEN 'TRANSLATING' THEN 10
+    WHEN 'PROCESSING' THEN 11
+    WHEN 'RUNNING' THEN 12
+    WHEN 'EXTRACTING' THEN 13
+    WHEN 'ESCALATING' THEN 14
+    WHEN 'QUEUED' THEN 15
+    WHEN 'PENDING' THEN 16
+    -- 2. Waiting / deferred states
+    WHEN 'WAITING_PROVIDER' THEN 20
+    WHEN 'WAITING_SOURCE' THEN 21
+    WHEN 'WAITING_FOR_BAZARR' THEN 22
+    WHEN 'WAITING_FOR_PUBLICATION' THEN 23
+    WHEN 'DEFERRED' THEN 24
+    WHEN 'RETRY_PENDING' THEN 25
+    WHEN 'RECOVERING' THEN 26
+    WHEN 'PARTIAL' THEN 27
+    WHEN 'ACTION_REQUIRED' THEN 28
+    WHEN 'BLOCKED_QA' THEN 29
+    -- 3. FAILED
+    WHEN 'FAILED' THEN 30
+    -- 4. Finished / success states
+    WHEN 'TRANSLATED' THEN 40
+    WHEN 'SUCCESS' THEN 41
+    WHEN 'REPAIRED' THEN 42
+    WHEN 'BAZARR MATCH' THEN 43
+    WHEN 'BAZARR' THEN 44
+    WHEN 'ALREADY EXISTS' THEN 45
+    WHEN 'HEALTHY' THEN 46
+    WHEN 'SKIPPED' THEN 47
+    WHEN 'EXISTING / SKIPPED' THEN 48
+    -- 5. Other / unknown statuses
+    WHEN 'CANCELLED' THEN 50
+    ELSE 99
+END
+"""
+
+SORT_COLUMN_WHITELIST = {
+    "source": "COALESCE(event_source, '')",
+    "status": STATUS_SORT_CASE,
+    "lines": "COALESCE(total_lines, 0)",
+    "duration": "COALESCE(duration_seconds, 0.0)",
+    "time": "created_at",
+    "id": "id",
+}
+
+
+def get_jobs(
+    limit: int = 50,
+    status: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    order: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    # Validate and normalize sort_by against internal whitelist
+    norm_sort_by = (sort_by or "").lower().strip()
+    sort_expr = SORT_COLUMN_WHITELIST.get(norm_sort_by)
+
+    # Validate and normalize order (only 'asc' or 'desc' permitted)
+    norm_order = (order or "").lower().strip()
+    if norm_order not in ("asc", "desc"):
+        norm_order = "desc" if norm_sort_by in ("duration", "lines", "time", "id", "") else "asc"
+
+    # Construct safe ORDER BY clause from internal whitelist only
+    if sort_expr:
+        sql_order = norm_order.upper()
+        if norm_sort_by == "time":
+            order_clause = f"created_at {sql_order}, id {sql_order}"
+        elif norm_sort_by == "id":
+            order_clause = f"id {sql_order}"
+        else:
+            order_clause = f"{sort_expr} {sql_order}, id DESC"
+    else:
+        order_clause = "id DESC"
+
+    # Build query and parameter list
+    query = "SELECT * FROM jobs"
+    params: List[Any] = []
+
+    # Optional status filter (bound safely as SQL parameter)
+    if status and status.strip() and status.strip().upper() != "ALL":
+        query += " WHERE status = ?"
+        params.append(status.strip())
+
+    query += f" ORDER BY {order_clause} LIMIT ?"
+    safe_limit = max(1, int(limit)) if isinstance(limit, (int, float, str)) and str(limit).isdigit() else 50
+    params.append(safe_limit)
+
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,))
+        cursor.execute(query, tuple(params))
         rows = cursor.fetchall()
         results = []
         for r in rows:
@@ -799,11 +931,15 @@ def get_job_stats() -> Dict[str, Any]:
             f"SELECT COUNT(*) FROM jobs WHERE status IN ({_status_placeholders})",
             ACTIVE_JOB_STATUSES
         ).fetchone()[0]
+        existing_skipped = cursor.execute(
+            "SELECT COUNT(*) FROM jobs WHERE status IN ('ALREADY EXISTS', 'BAZARR MATCH', 'HEALTHY', 'SKIPPED', 'EXISTING / SKIPPED')"
+        ).fetchone()[0]
         avg_dur = cursor.execute("SELECT AVG(duration_seconds) FROM jobs WHERE status IN ('TRANSLATED', 'REPAIRED', 'SUCCESS')").fetchone()[0] or 0.0
         return {
             "total": total,
             "translated": translated,
             "healthy": healthy,
+            "existing_skipped": existing_skipped,
             "repaired": repaired,
             "failed": failed,
             "deferred": deferred,
@@ -1123,3 +1259,131 @@ def has_older_eligible_deferred_backlog(
             LIMIT 1
         """, (p, newer_than_created_at)).fetchone()
         return row is not None
+
+
+# ---------------------------------------------------------------------------
+# Persistent Library Embedded Subtitle Tracks Metadata Cache
+# ---------------------------------------------------------------------------
+
+def get_cached_embedded_subtitle_tracks(
+    video_path: str,
+    file_size: int,
+    mtime_ns: int,
+) -> Optional[Dict[str, Any]]:
+    """
+    Look up cached embedded subtitle tracks for a video container.
+    Returns None if cache entry does not exist or if file_size/mtime_ns do not match.
+    Returns dict like {"status": "ok", "tracks": [...]} or {"status": "failed", ...}.
+    """
+    try:
+        norm_path = os.path.normpath(video_path)
+        with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
+            cursor = conn.cursor()
+            row = cursor.execute(
+                "SELECT file_size, mtime_ns, subtitle_tracks_json, updated_at FROM media_embedded_tracks_cache WHERE video_path = ?",
+                (norm_path,),
+            ).fetchone()
+            if not row:
+                return None
+            cached_size, cached_mtime_ns, tracks_json, updated_at_str = row
+            if cached_size != file_size or cached_mtime_ns != mtime_ns:
+                return None
+            parsed = json.loads(tracks_json)
+            if isinstance(parsed, list):
+                res = {"status": "ok", "tracks": parsed}
+            elif isinstance(parsed, dict):
+                res = parsed
+            else:
+                res = {"status": "ok", "tracks": []}
+            if updated_at_str and "updated_at" not in res:
+                res["updated_at"] = updated_at_str
+            return res
+    except Exception as exc:
+        logger.debug("Failed looking up cached embedded tracks for %s: %s", video_path, exc)
+        return None
+
+
+def set_cached_embedded_subtitle_tracks(
+    video_path: str,
+    file_size: int,
+    mtime_ns: int,
+    tracks: Any,
+) -> None:
+    """
+    Store or update cached embedded subtitle tracks for a video container.
+    `tracks` can be a list of track dicts or a status dict {"status": "ok|failed", "tracks": [...]}.
+    """
+    try:
+        norm_path = os.path.normpath(video_path)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if isinstance(tracks, dict):
+            payload = tracks
+        elif isinstance(tracks, list):
+            payload = {"status": "ok", "tracks": tracks}
+        else:
+            payload = {"status": "ok", "tracks": []}
+        if "updated_at" not in payload:
+            payload["updated_at"] = now_iso
+        tracks_json = json.dumps(payload)
+        with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO media_embedded_tracks_cache (video_path, file_size, mtime_ns, subtitle_tracks_json, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(video_path) DO UPDATE SET
+                    file_size = excluded.file_size,
+                    mtime_ns = excluded.mtime_ns,
+                    subtitle_tracks_json = excluded.subtitle_tracks_json,
+                    updated_at = excluded.updated_at
+                """,
+                (norm_path, file_size, mtime_ns, tracks_json, now_iso),
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.debug("Failed saving cached embedded tracks for %s: %s", video_path, exc)
+
+
+def bulk_get_cached_embedded_subtitle_tracks(
+    items: List[tuple[str, int, int]],
+) -> Dict[str, Any]:
+    """
+    Bulk lookup cached embedded subtitle tracks for a list of (video_path, file_size, mtime_ns).
+    Returns mapping of {video_path: cached_entry_dict} for all valid cache hits.
+    """
+    if not items:
+        return {}
+    res: Dict[str, Any] = {}
+    path_map = {os.path.normpath(path): (size, mtime_ns) for path, size, mtime_ns in items}
+    paths = list(path_map.keys())
+    batch_size = 500
+    try:
+        with sqlite3.connect(DB_PATH, timeout=30.0) as conn:
+            cursor = conn.cursor()
+            for i in range(0, len(paths), batch_size):
+                chunk = paths[i:i + batch_size]
+                placeholders = ",".join(["?"] * len(chunk))
+                cursor.execute(
+                    f"SELECT video_path, file_size, mtime_ns, subtitle_tracks_json, updated_at FROM media_embedded_tracks_cache WHERE video_path IN ({placeholders})",
+                    chunk,
+                )
+                for row in cursor.fetchall():
+                    v_path, cached_size, cached_mtime_ns, tracks_json, updated_at_str = row
+                    expected_size, expected_mtime_ns = path_map.get(v_path, (None, None))
+                    if expected_size == cached_size and expected_mtime_ns == cached_mtime_ns:
+                        try:
+                            parsed = json.loads(tracks_json)
+                            if isinstance(parsed, list):
+                                res_item = {"status": "ok", "tracks": parsed}
+                            elif isinstance(parsed, dict):
+                                res_item = parsed
+                            else:
+                                res_item = {"status": "ok", "tracks": []}
+                            if updated_at_str and "updated_at" not in res_item:
+                                res_item["updated_at"] = updated_at_str
+                            res[v_path] = res_item
+                        except Exception:
+                            pass
+    except Exception as exc:
+        logger.debug("Failed bulk lookup of cached embedded tracks: %s", exc)
+    return res

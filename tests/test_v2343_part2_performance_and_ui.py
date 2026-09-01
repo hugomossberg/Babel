@@ -145,13 +145,18 @@ async def test_race_winner_bazarr_early_poller(tmp_path, monkeypatch):
     translate_mock = AsyncMock()
     monkeypatch.setattr(pipeline.translator, "translate_srt_content", translate_mock)
 
-    # Mock Bazarr trigger to write target file
+    # Mock Bazarr trigger to write target file and return accepted result
+    from app.services.source_resolver import BazarrResult, BazarrResultCode
     async def mock_bazarr_trigger(vp, language="sv"):
         with open(sv_target, "w", encoding="utf-8") as f:
             f.write(make_valid_srt("sv", 10))
-        return None
+        return BazarrResult(code=BazarrResultCode.TRIGGERED, language=language, detail="Search accepted")
 
     monkeypatch.setattr(pipeline, "trigger_bazarr_search", mock_bazarr_trigger)
+
+    en_target = str(tmp_path / "race_test.en.srt")
+    with open(en_target, "w", encoding="utf-8") as f:
+        f.write(make_valid_srt("en", 10))
 
     call_count = 0
     def mock_find(vp, lang):
@@ -161,6 +166,8 @@ async def test_race_winner_bazarr_early_poller(tmp_path, monkeypatch):
             if call_count == 1:
                 return None
             return sv_target
+        if lang == "en":
+            return en_target
         return None
 
     with patch("app.services.pipeline.find_external_subtitle", side_effect=mock_find):

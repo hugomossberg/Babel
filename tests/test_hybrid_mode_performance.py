@@ -47,6 +47,9 @@ async def test_1_hybrid_target_already_exists_ai_never_called(hybrid_db_settings
     """1. Hybrid + target already exists -> AI never called, job marked ALREADY EXISTS."""
     video_path = tmp_path / "movie.mkv"
     video_path.touch()
+    en_srt = tmp_path / "movie.en.srt"
+    with open(en_srt, "w", encoding="utf-8") as f:
+        f.write(make_valid_srt(lang="en", count=10))
     sv_srt = tmp_path / "movie.sv.srt"
     with open(sv_srt, "w", encoding="utf-8") as f:
         f.write(make_valid_srt(lang="sv", count=10))
@@ -76,7 +79,7 @@ async def test_2_hybrid_target_appears_while_preparation_occurs(hybrid_db_settin
     pipeline = SubtitlePipeline()
     translate_mock = AsyncMock()
     monkeypatch.setattr(pipeline.translator, "translate_srt_content", translate_mock)
-    bazarr_trigger_mock = AsyncMock()
+    bazarr_trigger_mock = AsyncMock(return_value=BazarrResult(code=BazarrResultCode.TRIGGERED, language="sv", detail="Accepted"))
     monkeypatch.setattr(pipeline, "trigger_bazarr_search", bazarr_trigger_mock)
 
     sv_srt_path = str(tmp_path / "show.sv.srt")
@@ -337,7 +340,7 @@ async def test_8_human_subtitle_wins_cleans_temporary_extracted_artifacts(hybrid
     pipeline = SubtitlePipeline()
     translate_mock = AsyncMock()
     monkeypatch.setattr(pipeline.translator, "translate_srt_content", translate_mock)
-    monkeypatch.setattr(pipeline, "trigger_bazarr_search", AsyncMock())
+    monkeypatch.setattr(pipeline, "trigger_bazarr_search", AsyncMock(return_value=BazarrResult(code=BazarrResultCode.TRIGGERED, language="sv", detail="Accepted")))
 
     temp_extracted_file = tmp_path / "temp_clean.temp_extracted.en.srt"
 

@@ -45,7 +45,7 @@ app = FastAPI(
 
     title=APP_NAME,
     version=VERSION,
-    description="Automated ultra-fast AI subtitle extractor, SDH-cleaner and translator for Servarr stack"
+    description="Automated AI subtitle extractor, SDH-cleaner and translator for Servarr stack"
 )
 
 # Bug #39: Optional Basic Auth Middleware
@@ -162,7 +162,8 @@ async def process_one_retry_pass():
         # Phase 2: Non-DEFERRED retry states (RETRY_PENDING, RECOVERING, etc.)
         # ------------------------------------------------------------------
         other_jobs = get_jobs_by_status([
-            "WAITING_PROVIDER", "RETRY_PENDING", "RECOVERING", "PARTIAL", "WAITING_SOURCE"
+            "WAITING_PROVIDER", "RETRY_PENDING", "RECOVERING", "PARTIAL", "WAITING_SOURCE",
+            "WAITING_FOR_BAZARR", "WAITING_FOR_PUBLICATION"
         ])
         for job in other_jobs:
             try:

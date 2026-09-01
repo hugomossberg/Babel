@@ -14,6 +14,9 @@ def inspect_mkv_tracks(video_path: str) -> Dict[str, List[Dict]]:
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
 
+    if os.path.getsize(video_path) == 0:
+        return {"subtitles": [], "audio": [], "duration": 0.0}
+
     tracks = {"subtitles": [], "audio": []}
     try:
         cmd = ["mkvmerge", "-J", video_path]
@@ -109,9 +112,9 @@ def get_cached_embedded_srt(video_path: str, track_id: Optional[int], lang: str)
     try:
         from app.core.languages import normalize_language_code
         norm_lang = normalize_language_code(lang, default=lang.lower()).lower()
-        from app.core.db import DB_PATH
+        import app.core.db
         import sqlite3
-        with sqlite3.connect(DB_PATH, timeout=5.0) as conn:
+        with sqlite3.connect(app.core.db.DB_PATH, timeout=5.0) as conn:
             cursor = conn.cursor()
             if track_id is None:
                 row = cursor.execute(
@@ -151,11 +154,11 @@ def save_cached_embedded_srt(video_path: str, track_id: Optional[int], lang: str
     try:
         from app.core.languages import normalize_language_code
         norm_lang = normalize_language_code(lang, default=lang.lower()).lower()
-        from app.core.db import DB_PATH
+        import app.core.db
         from datetime import datetime, timezone
         import sqlite3
         now = datetime.now(timezone.utc).isoformat()
-        with sqlite3.connect(DB_PATH, timeout=5.0) as conn:
+        with sqlite3.connect(app.core.db.DB_PATH, timeout=5.0) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """INSERT OR REPLACE INTO embedded_extraction_cache
@@ -185,12 +188,19 @@ def invalidate_cached_embedded_srt(video_path: str) -> bool:
         logger.debug(f"Failed to invalidate extraction cache for {norm_path}: {e}")
         return False
 
-
+import threading
 import signal
 import tempfile
+from typing import Tuple
 
 DEFAULT_EXTRACTION_TIMEOUT = 300.0  # 5 minutes bounded timeout for large MKVs
 CONVERSION_TIMEOUT = 60.0
+
+# Concurrency limits for disk-I/O-heavy embedded subtitle extraction
+DEFAULT_MAX_CONCURRENT_EXTRACTIONS = 2
+_extraction_semaphore = threading.Semaphore(DEFAULT_MAX_CONCURRENT_EXTRACTIONS)
+_in_flight_lock = threading.Lock()
+_in_flight_extractions: Dict[Tuple[str, Optional[int], str], threading.Event] = {}
 
 
 def _kill_proc_group(proc: subprocess.Popen) -> None:
@@ -221,6 +231,9 @@ def _run_cancellable_cmd(
     Run an external command with timeout and cancel_event process termination.
     Eliminates pipe deadlock by redirecting stdout to DEVNULL and stderr to a temp file.
     """
+    if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+        return -1
+
     if cancel_event is None:
         popen_kwargs: Dict[str, Any] = {}
         if os.name == "posix":
@@ -284,7 +297,8 @@ def extract_embedded_srt(
     preferred_lang: str = "eng",
     tracks_info: Optional[Dict[str, Any]] = None,
     cancel_event: Optional[Any] = None,
-    timeout: float = DEFAULT_EXTRACTION_TIMEOUT
+    timeout: float = DEFAULT_EXTRACTION_TIMEOUT,
+    **kwargs
 ) -> bool:
     """
     Extracts the best matching embedded subtitle track to an SRT file using fast mkvextract for MKVs (with ffmpeg fallback)
@@ -292,15 +306,33 @@ def extract_embedded_srt(
     Prefers non-forced SRT / SubRip / text subtitles.
     Checks and populates persistent extraction cache. Supports cancel_event for process-level termination.
     """
+    if "timeout" in kwargs and (timeout == DEFAULT_EXTRACTION_TIMEOUT or timeout is None):
+        timeout = kwargs["timeout"]
+    if "cancel_event" in kwargs and cancel_event is None:
+        cancel_event = kwargs["cancel_event"]
+
+    if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+        return False
+
+    t_total_start = time.perf_counter()
+
     if tracks_info is None:
+        t_probe_start = time.perf_counter()
         tracks_info = inspect_mkv_tracks(video_path)
+        t_probe_elapsed = time.perf_counter() - t_probe_start
+    else:
+        t_probe_elapsed = 0.0
+
     sub_tracks = tracks_info.get("subtitles", [])
+    if not sub_tracks:
+        return False
 
     selected_track_id = None
     selected_sub_index = None
-    from app.core.languages import get_language
+    from app.core.languages import get_language, normalize_language_code
     lang_obj = get_language(preferred_lang)
     lang_prefixes = lang_obj.aliases if lang_obj else [preferred_lang.lower()]
+    norm_lang = normalize_language_code(preferred_lang, default=preferred_lang.lower()).lower()
     TEXT_CODECS = {"SubRip/SRT", "S_TEXT/UTF8", "S_TEXT/ASS", "S_TEXT/SSA", "S_TEXT/WEBVTT", "SubStationAlpha", "WebVTT"}
 
     candidates = []
@@ -314,9 +346,19 @@ def extract_embedded_srt(
         if any(bad in title for bad in ["commentary", "director", "description", "audio description"]):
             continue
 
-        is_text_codec = any(tc.lower() in codec.lower() for tc in TEXT_CODECS) or "srt" in codec.lower() or "text" in codec.lower() or "ass" in codec.lower() or "utf" in codec.lower()
+        is_text_codec = any(tc.lower() in codec.lower() for tc in TEXT_CODECS) or "srt" in codec.lower() or "text" in codec.lower() or "ass" in codec.lower() or "ssa" in codec.lower() or "vtt" in codec.lower() or "utf" in codec.lower()
 
-        if any(lp == lang or lang.startswith(lp) for lp in lang_prefixes) and is_text_codec:
+        track_norm = normalize_language_code(lang, default=lang).lower() if lang else None
+        title_lang_obj = get_language(title) if title else None
+        title_norm = title_lang_obj.code.lower() if title_lang_obj else None
+
+        lang_matches = (
+            (track_norm is not None and track_norm == norm_lang)
+            or (title_norm is not None and title_norm == norm_lang)
+            or (not track_norm and not title_norm and any(lp == lang for lp in lang_prefixes))
+        )
+
+        if lang_matches and is_text_codec:
             score = 100
             if forced or any(kw in title for kw in ["forced", "signs", "songs", "foreign", "parts", "descriptive"]):
                 continue  # Skip forced tracks entirely for full translation
@@ -335,182 +377,305 @@ def extract_embedded_srt(
 
     duration = tracks_info.get("duration", 0.0)
     import srt
-    import time
 
-    t_extract_start = time.perf_counter()
+    # Determine file size for throughput telemetry
+    try:
+        media_file_size_bytes = os.path.getsize(video_path)
+    except Exception:
+        media_file_size_bytes = 0
+    media_size_gb = round(media_file_size_bytes / (1024 ** 3), 2)
+
+    is_mkv = video_path.lower().endswith(".mkv") or video_path.lower().endswith(".mka")
+    container_name = "MKV" if is_mkv else ("MP4" if video_path.lower().endswith(".mp4") else "OTHER")
 
     for cand in candidates:
+        if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+            return False
+
         selected_track_id = cand["id"]
         selected_sub_index = cand["index"]
         selected_codec = cand["codec"].lower()
 
-        # Pass 2A: Check persistent extraction cache
+        # Step 1: Check persistent extraction cache
+        t_cache_lookup_start = time.perf_counter()
         cached_content = get_cached_embedded_srt(video_path, selected_track_id, preferred_lang)
+        t_cache_lookup = time.perf_counter() - t_cache_lookup_start
+
         if cached_content:
-            logger.info(f"Source cache: HIT for track {selected_track_id} ({preferred_lang})")
+            logger.info(f"Source cache: HIT for track {selected_track_id} ({preferred_lang}) in {t_cache_lookup:.4f}s")
             try:
                 with open(output_srt_path, "w", encoding="utf-8") as f:
                     f.write(cached_content)
                 if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 0:
-                    logger.info("Extraction skipped: cached source")
+                    logger.info(f"Extraction skipped: cached source (track={selected_track_id}, lang={preferred_lang})")
                     return True
             except Exception as write_err:
                 logger.warning(f"Failed to write cached SRT to {output_srt_path}: {write_err}")
 
         logger.info(f"Source cache: MISS for track {selected_track_id} ({preferred_lang})")
 
-        is_mkv = video_path.lower().endswith(".mkv") or video_path.lower().endswith(".mka")
+        # Step 2: Single-flight synchronization for concurrent requests of the same track
+        flight_key = (os.path.normpath(video_path), selected_track_id, norm_lang)
+        is_lead_extractor = False
+        flight_event: Optional[threading.Event] = None
 
-        success = False
-        t_cand_start = time.monotonic()
-        mkv_timed_out = False
-
-        if is_mkv and selected_track_id is not None:
-            # For Matroska containers: mkvextract is FIRST choice.
-            # mkvextract uses the Matroska seek table to jump directly to subtitle
-            # blocks — no full-file demux required.
-            try:
-                logger.info(f"Extracting embedded {preferred_lang.upper()} track {selected_track_id} with mkvextract (timeout {timeout:.0f}s)...")
-                cmd = ["mkvextract", "tracks", video_path, f"{selected_track_id}:{output_srt_path}"]
-                ret = _run_cancellable_cmd(cmd, timeout=timeout, cancel_event=cancel_event)
-
-                if ret == 0 and os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 0:
-                    if any(x in selected_codec for x in ["ass", "ssa", "vtt", "webvtt"]):
-                        temp_file = output_srt_path + ".tmp"
-                        os.rename(output_srt_path, temp_file)
-                        ffmpeg_cmd = ["ffmpeg", "-y", "-i", temp_file, "-c:s", "srt", output_srt_path]
-                        ret_ff = _run_cancellable_cmd(ffmpeg_cmd, timeout=CONVERSION_TIMEOUT, cancel_event=cancel_event)
-                        try: os.remove(temp_file)
-                        except: pass
-                        if ret_ff != 0:
-                            if os.path.exists(output_srt_path):
-                                try: os.remove(output_srt_path)
-                                except: pass
-
-                    if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 0:
-                        try:
-                            with open(output_srt_path, "r", encoding="utf-8-sig") as f:
-                                test_subs = list(srt.parse(f.read()))
-                            if test_subs:
-                                success = True
-                            else:
-                                if os.path.exists(output_srt_path):
-                                    try: os.remove(output_srt_path)
-                                    except: pass
-                        except Exception:
-                            if os.path.exists(output_srt_path):
-                                try: os.remove(output_srt_path)
-                                except: pass
-                elif ret == -1:
-                    logger.info(f"mkvextract cancelled for track {selected_track_id}.")
-                    if os.path.exists(output_srt_path):
-                        try: os.remove(output_srt_path)
-                        except: pass
-                    return False
-            except subprocess.TimeoutExpired:
-                mkv_timed_out = True
-                logger.warning(f"mkvextract timed out after {timeout:.0f}s for track {selected_track_id}.")
-                if os.path.exists(output_srt_path):
-                    try: os.remove(output_srt_path)
-                    except: pass
-            except Exception as mkv_err:
-                logger.warning(f"mkvextract failed for track {selected_track_id}: {mkv_err}")
-                if os.path.exists(output_srt_path):
-                    try: os.remove(output_srt_path)
-                    except: pass
-
-        if not success:
-            # Check if extraction was cancelled
-            if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
-                return False
-
-            # If mkvextract timed out on MKV, do not attempt ffmpeg fallback
-            # (ffmpeg linear scan is strictly slower than mkvextract on Matroska)
-            if is_mkv and mkv_timed_out:
-                logger.warning(f"Skipping ffmpeg fallback for track {selected_track_id} because mkvextract timed out.")
+        with _in_flight_lock:
+            if flight_key in _in_flight_extractions:
+                flight_event = _in_flight_extractions[flight_key]
             else:
-                # Try ffmpeg stream extraction (primary for non-MKV; fallback for MKV if mkvextract failed fast)
-                elapsed_so_far = time.monotonic() - t_cand_start
-                rem_timeout = max(10.0, timeout - elapsed_so_far)
-                backend_desc = "fallback" if is_mkv else "primary"
+                flight_event = threading.Event()
+                _in_flight_extractions[flight_key] = flight_event
+                is_lead_extractor = True
+
+        if not is_lead_extractor and flight_event is not None:
+            logger.info(f"Awaiting concurrent in-flight extraction for track {selected_track_id} ({norm_lang})...")
+            # Wait for lead extractor to complete while honoring cancel_event
+            while not flight_event.is_set():
+                if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                    return False
+                flight_event.wait(timeout=0.05)
+
+            # Check cache again — lead extractor should have populated it
+            cached_after = get_cached_embedded_srt(video_path, selected_track_id, preferred_lang)
+            if cached_after:
                 try:
-                    logger.info(f"Extracting embedded {preferred_lang.upper()} track {selected_sub_index} with ffmpeg ({backend_desc}, timeout {rem_timeout:.0f}s)...")
-                    cmd = [
-                        "ffmpeg", "-y", "-i", video_path,
-                        "-map", f"0:s:{selected_sub_index}",
-                        "-c:s", "srt",
-                        output_srt_path
-                    ]
-                    ret = _run_cancellable_cmd(cmd, timeout=rem_timeout, cancel_event=cancel_event)
+                    with open(output_srt_path, "w", encoding="utf-8") as f:
+                        f.write(cached_after)
+                    if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 0:
+                        logger.info(f"Extraction reused from concurrent in-flight lead extractor (track {selected_track_id})")
+                        return True
+                except Exception as write_err:
+                    logger.warning(f"Failed to write reused cached SRT: {write_err}")
+
+        # Step 3: Lead extractor acquires bounded extraction semaphore
+        acquired_sem = False
+        t_wait_sem_start = time.perf_counter()
+        try:
+            while not acquired_sem:
+                if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                    return False
+                acquired_sem = _extraction_semaphore.acquire(timeout=0.05)
+
+            t_wait_sem = time.perf_counter() - t_wait_sem_start
+
+            success = False
+            mkv_timed_out = False
+            t_cand_start = time.monotonic()
+            used_backend = "mkvextract" if (is_mkv and selected_track_id is not None) else "ffmpeg"
+            subproc_duration = 0.0
+
+            if is_mkv and selected_track_id is not None:
+                # Primary for Matroska: mkvextract
+                try:
+                    logger.info(
+                        f"Extracting embedded {preferred_lang.upper()} track {selected_track_id} with mkvextract "
+                        f"(size={media_size_gb}GB, timeout={timeout:.0f}s, sem_wait={t_wait_sem:.2f}s)..."
+                    )
+                    t_sp_start = time.perf_counter()
+                    cmd = ["mkvextract", "tracks", video_path, f"{selected_track_id}:{output_srt_path}"]
+                    ret = _run_cancellable_cmd(cmd, timeout=timeout, cancel_event=cancel_event)
+                    subproc_duration = time.perf_counter() - t_sp_start
+
                     if ret == 0 and os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 0:
-                        try:
-                            with open(output_srt_path, "r", encoding="utf-8-sig") as f:
-                                test_subs = list(srt.parse(f.read()))
-                            if test_subs:
-                                success = True
+                        if any(x in selected_codec for x in ["ass", "ssa", "vtt", "webvtt", "substation", "alpha"]):
+                            if "ass" in selected_codec or "substation" in selected_codec or "alpha" in selected_codec:
+                                intermediate_ext = ".ass"
+                            elif "ssa" in selected_codec:
+                                intermediate_ext = ".ssa"
+                            elif "vtt" in selected_codec or "webvtt" in selected_codec:
+                                intermediate_ext = ".vtt"
                             else:
+                                intermediate_ext = ".tmp"
+                            temp_file = output_srt_path + intermediate_ext
+                            os.rename(output_srt_path, temp_file)
+                            t_conv_start = time.perf_counter()
+                            ffmpeg_cmd = ["ffmpeg", "-y", "-i", temp_file, "-c:s", "srt", "-f", "srt", output_srt_path]
+                            ret_ff = _run_cancellable_cmd(ffmpeg_cmd, timeout=CONVERSION_TIMEOUT, cancel_event=cancel_event)
+                            conv_duration = time.perf_counter() - t_conv_start
+                            logger.info(f"Converted {intermediate_ext} to SRT via ffmpeg in {conv_duration:.2f}s (ret={ret_ff})")
+                            try:
+                                os.remove(temp_file)
+                            except Exception:
+                                pass
+                            if ret_ff != 0 and os.path.exists(output_srt_path):
+                                try:
+                                    os.remove(output_srt_path)
+                                except Exception:
+                                    pass
+
+                        if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 0:
+                            try:
+                                with open(output_srt_path, "r", encoding="utf-8-sig") as f:
+                                    test_subs = list(srt.parse(f.read()))
+                                if test_subs:
+                                    success = True
+                                else:
+                                    if os.path.exists(output_srt_path):
+                                        try:
+                                            os.remove(output_srt_path)
+                                        except Exception:
+                                            pass
+                            except Exception:
                                 if os.path.exists(output_srt_path):
-                                    try: os.remove(output_srt_path)
-                                    except: pass
-                        except Exception:
-                            if os.path.exists(output_srt_path):
-                                try: os.remove(output_srt_path)
-                                except: pass
+                                    try:
+                                        os.remove(output_srt_path)
+                                    except Exception:
+                                        pass
                     elif ret == -1:
-                        logger.info(f"ffmpeg extraction cancelled for track {selected_sub_index}.")
+                        logger.info(f"mkvextract cancelled for track {selected_track_id}.")
                         if os.path.exists(output_srt_path):
-                            try: os.remove(output_srt_path)
-                            except: pass
+                            try:
+                                os.remove(output_srt_path)
+                            except Exception:
+                                pass
                         return False
                 except subprocess.TimeoutExpired:
-                    logger.warning(f"ffmpeg extraction timed out after {rem_timeout:.0f}s for track {selected_sub_index}.")
+                    mkv_timed_out = True
+                    logger.warning(f"mkvextract timed out after {timeout:.0f}s for track {selected_track_id}.")
                     if os.path.exists(output_srt_path):
-                        try: os.remove(output_srt_path)
-                        except: pass
-                except Exception as ff_err:
-                    logger.warning(f"ffmpeg extraction failed for track {selected_sub_index}: {ff_err}")
+                        try:
+                            os.remove(output_srt_path)
+                        except Exception:
+                            pass
+                except Exception as mkv_err:
+                    logger.warning(f"mkvextract failed for track {selected_track_id}: {mkv_err}")
                     if os.path.exists(output_srt_path):
-                        try: os.remove(output_srt_path)
-                        except: pass
+                        try:
+                            os.remove(output_srt_path)
+                        except Exception:
+                            pass
 
-        if success:
-            # Sanity check for partial sources
-            try:
-                with open(output_srt_path, "r", encoding="utf-8-sig") as f:
-                    content = f.read()
+            if not success:
+                if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                    return False
 
-                subs = list(srt.parse(content))
-                if not subs:
-                    logger.warning(f"Extracted subtitle {output_srt_path} is empty, removing and trying next candidate.")
-                    if os.path.exists(output_srt_path):
-                        try: os.remove(output_srt_path)
-                        except Exception: pass
-                    continue
+                # If mkvextract timed out on MKV, skip ffmpeg fallback
+                if is_mkv and mkv_timed_out:
+                    logger.warning(f"Skipping ffmpeg fallback for track {selected_track_id} because mkvextract timed out.")
+                else:
+                    elapsed_so_far = time.monotonic() - t_cand_start
+                    rem_timeout = max(10.0, timeout - elapsed_so_far)
+                    backend_desc = "fallback" if is_mkv else "primary"
+                    used_backend = "ffmpeg"
+                    try:
+                        logger.info(f"Extracting embedded {preferred_lang.upper()} track {selected_sub_index} with ffmpeg ({backend_desc}, timeout {rem_timeout:.0f}s)...")
+                        t_sp_start = time.perf_counter()
+                        cmd = [
+                            "ffmpeg", "-y", "-i", video_path,
+                            "-map", f"0:s:{selected_sub_index}",
+                            "-c:s", "srt",
+                            "-f", "srt",
+                            output_srt_path
+                        ]
+                        ret = _run_cancellable_cmd(cmd, timeout=rem_timeout, cancel_event=cancel_event)
+                        subproc_duration = time.perf_counter() - t_sp_start
 
-                last_end = subs[-1].end.total_seconds()
-
-                # Conservative logic to detect obvious partial sources
-                if duration > 1200: # 20 mins
-                    if len(subs) < 100 and last_end < (duration * 0.25):
-                        logger.warning(f"Extracted subtitle {output_srt_path} rejected as partial source ({len(subs)} cues, ends at {last_end:.1f}s of {duration:.1f}s).")
+                        if ret == 0 and os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 0:
+                            try:
+                                with open(output_srt_path, "r", encoding="utf-8-sig") as f:
+                                    test_subs = list(srt.parse(f.read()))
+                                if test_subs:
+                                    success = True
+                                else:
+                                    if os.path.exists(output_srt_path):
+                                        try:
+                                            os.remove(output_srt_path)
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                if os.path.exists(output_srt_path):
+                                    try:
+                                        os.remove(output_srt_path)
+                                    except Exception:
+                                        pass
+                        elif ret == -1:
+                            logger.info(f"ffmpeg extraction cancelled for track {selected_sub_index}.")
+                            if os.path.exists(output_srt_path):
+                                try:
+                                    os.remove(output_srt_path)
+                                except Exception:
+                                    pass
+                            return False
+                    except subprocess.TimeoutExpired:
+                        logger.warning(f"ffmpeg extraction timed out after {rem_timeout:.0f}s for track {selected_sub_index}.")
                         if os.path.exists(output_srt_path):
-                            try: os.remove(output_srt_path)
-                            except Exception: pass
+                            try:
+                                os.remove(output_srt_path)
+                            except Exception:
+                                pass
+                    except Exception as ff_err:
+                        logger.warning(f"ffmpeg extraction failed for track {selected_sub_index}: {ff_err}")
+                        if os.path.exists(output_srt_path):
+                            try:
+                                os.remove(output_srt_path)
+                            except Exception:
+                                pass
+
+            if success:
+                try:
+                    t_parse_start = time.perf_counter()
+                    with open(output_srt_path, "r", encoding="utf-8-sig") as f:
+                        content = f.read()
+
+                    subs = list(srt.parse(content))
+                    t_parse = time.perf_counter() - t_parse_start
+                    if not subs:
+                        logger.warning(f"Extracted subtitle {output_srt_path} is empty, removing and trying next candidate.")
+                        if os.path.exists(output_srt_path):
+                            try:
+                                os.remove(output_srt_path)
+                            except Exception:
+                                pass
                         continue
 
-                backend_name = "mkvextract" if (is_mkv and selected_track_id is not None and not os.path.exists(output_srt_path + ".ffmpeg")) else "ffmpeg"
-                t_extract_elapsed = round(time.perf_counter() - t_extract_start, 2)
-                logger.info(f"Subtitle extraction backend: {backend_name} (track {selected_track_id or selected_sub_index}) in {t_extract_elapsed}s")
-                save_cached_embedded_srt(video_path, selected_track_id, preferred_lang, content)
-                return True
+                    last_end = subs[-1].end.total_seconds()
 
-            except Exception as parse_err:
-                logger.warning(f"Failed to parse extracted subtitle {output_srt_path}: {parse_err}")
-                if os.path.exists(output_srt_path):
-                    try:
-                        os.remove(output_srt_path)
-                    except Exception:
-                        pass
-                continue
+                    # Conservative logic to detect obvious partial sources
+                    if duration > 1200:  # 20 mins
+                        if len(subs) < 100 and last_end < (duration * 0.25):
+                            logger.warning(f"Extracted subtitle {output_srt_path} rejected as partial source ({len(subs)} cues, ends at {last_end:.1f}s of {duration:.1f}s).")
+                            if os.path.exists(output_srt_path):
+                                try:
+                                    os.remove(output_srt_path)
+                                except Exception:
+                                    pass
+                            continue
+
+                    t_total = time.perf_counter() - t_total_start
+                    throughput_mb_s = (media_file_size_bytes / (1024 * 1024)) / subproc_duration if subproc_duration > 0 else 0.0
+
+                    logger.info(
+                        f"Embedded extraction successful:\n"
+                        f"  container = {container_name}\n"
+                        f"  selected track id = {selected_track_id}\n"
+                        f"  codec = {cand.get('codec')}\n"
+                        f"  method = {used_backend}\n"
+                        f"  probe = {t_probe_elapsed:.2f}s\n"
+                        f"  extract_wait = {t_wait_sem:.2f}s\n"
+                        f"  extraction subprocess = {subproc_duration:.2f}s\n"
+                        f"  parse = {t_parse:.3f}s\n"
+                        f"  total = {t_total:.2f}s\n"
+                        f"  file size = {media_size_gb} GB (throughput = {throughput_mb_s:.1f} MB/s)\n"
+                        f"  cache = MISS"
+                    )
+
+                    save_cached_embedded_srt(video_path, selected_track_id, preferred_lang, content)
+                    return True
+
+                except Exception as parse_err:
+                    logger.warning(f"Failed to parse extracted subtitle {output_srt_path}: {parse_err}")
+                    if os.path.exists(output_srt_path):
+                        try:
+                            os.remove(output_srt_path)
+                        except Exception:
+                            pass
+                    continue
+        finally:
+            if acquired_sem:
+                _extraction_semaphore.release()
+            if is_lead_extractor and flight_event is not None:
+                with _in_flight_lock:
+                    _in_flight_extractions.pop(flight_key, None)
+                flight_event.set()
 
     return False

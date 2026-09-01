@@ -46,8 +46,11 @@ async def test_multi_language_partial_e2e(tmp_path):
         lang_code = lang_map.get(target_language, target_language)
         translate_calls[lang_code] += 1
         
-        # Return matched length of translated subs
-        return [srt.Subtitle(index=sub.index, start=sub.start, end=sub.end, content=f"Target {lang_code} {sub.index}") for sub in subs]
+        # Return matched length of translated subs with realistic target dialogue
+        if lang_code == "de":
+            return [srt.Subtitle(index=sub.index, start=sub.start, end=sub.end, content=f"Das ist ein deutscher Dialog {sub.index}") for sub in subs]
+        else:
+            return [srt.Subtitle(index=sub.index, start=sub.start, end=sub.end, content=f"Ceci est un dialogue en français {sub.index}") for sub in subs]
 
     qa_pass_fr = False
     

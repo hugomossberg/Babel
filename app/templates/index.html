@@ -211,12 +211,12 @@
             <span class="text-sm font-medium">Existing / Skipped</span>
             <i class="fa-solid fa-circle-check text-slate-400"></i>
           </div>
-          <div class="text-3xl font-bold text-slate-300" x-text="stats.healthy || 0"></div>
+          <div class="text-3xl font-bold text-slate-300" x-text="stats.existing_skipped || 0"></div>
         </div>
 
         <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 backdrop-blur">
           <div class="flex items-center justify-between text-slate-400 mb-2">
-            <span class="text-sm font-medium">Avg Speed</span>
+            <span class="text-sm font-medium">Avg Translation Time</span>
             <i class="fa-solid fa-bolt text-amber-400"></i>
           </div>
           <div class="text-3xl font-bold text-amber-400" x-text="(stats.avg_duration_seconds || 0) + 's'"></div>
@@ -276,16 +276,144 @@
           </div>
         </div>
 
+        <!-- Activity Feed Status Filter Chips -->
+        <div class="px-5 py-3 border-b border-slate-800/80 bg-slate-950/40 flex items-center gap-1.5 flex-wrap">
+          <button @click="setActivityFilter('')"
+                  :class="!activityStatusFilter ? 'bg-purple-950/60 border-purple-600/60 text-purple-200 shadow-sm' : 'bg-slate-800/60 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                  class="px-2.5 py-1 rounded-lg text-xs font-medium border transition flex items-center gap-1">
+            <span>All</span>
+            <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono bg-purple-900/60 text-purple-200" x-show="!activityStatusFilter && stats.total" x-text="stats.total"></span>
+          </button>
+
+          <button @click="setActivityFilter('TRANSLATED')"
+                  :class="activityStatusFilter === 'TRANSLATED' ? 'bg-emerald-950/60 border-emerald-600/60 text-emerald-300 shadow-sm' : 'bg-slate-800/60 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                  class="px-2.5 py-1 rounded-lg text-xs font-medium border transition flex items-center gap-1">
+            <i class="fa-solid fa-check text-[10px] text-emerald-400"></i>
+            <span>Translated</span>
+          </button>
+
+          <button @click="setActivityFilter('BAZARR MATCH')"
+                  :class="activityStatusFilter === 'BAZARR MATCH' ? 'bg-cyan-950/60 border-cyan-600/60 text-cyan-300 shadow-sm' : 'bg-slate-800/60 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                  class="px-2.5 py-1 rounded-lg text-xs font-medium border transition flex items-center gap-1">
+            <i class="fa-solid fa-cloud-arrow-down text-[10px] text-cyan-400"></i>
+            <span>Bazarr Match</span>
+          </button>
+
+          <button @click="setActivityFilter('FAILED')"
+                  :class="activityStatusFilter === 'FAILED' ? 'bg-rose-950/60 border-rose-600/60 text-rose-300 shadow-sm' : 'bg-slate-800/60 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                  class="px-2.5 py-1 rounded-lg text-xs font-medium border transition flex items-center gap-1">
+            <i class="fa-solid fa-circle-exclamation text-[10px] text-rose-400"></i>
+            <span>Failed</span>
+            <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono bg-rose-900/60 text-rose-200" x-show="stats.failed > 0" x-text="stats.failed"></span>
+          </button>
+
+          <button @click="setActivityFilter('ALREADY EXISTS')"
+                  :class="activityStatusFilter === 'ALREADY EXISTS' ? 'bg-slate-800 border-purple-600/60 text-slate-200 shadow-sm' : 'bg-slate-800/60 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                  class="px-2.5 py-1 rounded-lg text-xs font-medium border transition flex items-center gap-1">
+            <i class="fa-solid fa-circle-check text-[10px] text-slate-400"></i>
+            <span>Already Exists</span>
+          </button>
+
+          <button @click="setActivityFilter('DEFERRED')"
+                  :class="activityStatusFilter === 'DEFERRED' ? 'bg-cyan-950/60 border-cyan-600/60 text-cyan-300 shadow-sm' : 'bg-slate-800/60 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                  class="px-2.5 py-1 rounded-lg text-xs font-medium border transition flex items-center gap-1">
+            <i class="fa-regular fa-hourglass-half text-[10px] text-cyan-400"></i>
+            <span>Deferred</span>
+            <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono bg-cyan-900/60 text-cyan-200" x-show="stats.deferred > 0" x-text="stats.deferred"></span>
+          </button>
+
+          <button @click="setActivityFilter('TRANSLATING')"
+                  :class="activityStatusFilter === 'TRANSLATING' ? 'bg-amber-950/60 border-amber-600/60 text-amber-300 shadow-sm' : 'bg-slate-800/60 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                  class="px-2.5 py-1 rounded-lg text-xs font-medium border transition flex items-center gap-1">
+            <i class="fa-solid fa-spinner text-[10px] text-amber-400" :class="activityStatusFilter === 'TRANSLATING' ? 'fa-spin' : ''"></i>
+            <span>Translating</span>
+          </button>
+
+          <button @click="setActivityFilter('QUEUED')"
+                  :class="activityStatusFilter === 'QUEUED' ? 'bg-indigo-950/60 border-indigo-600/60 text-indigo-300 shadow-sm' : 'bg-slate-800/60 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                  class="px-2.5 py-1 rounded-lg text-xs font-medium border transition flex items-center gap-1">
+            <i class="fa-solid fa-clock text-[10px] text-indigo-400"></i>
+            <span>Queued</span>
+          </button>
+
+          <button @click="setActivityFilter('WAITING_FOR_BAZARR')"
+                  :class="activityStatusFilter === 'WAITING_FOR_BAZARR' ? 'bg-indigo-950/60 border-indigo-600/60 text-indigo-300 shadow-sm' : 'bg-slate-800/60 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                  class="px-2.5 py-1 rounded-lg text-xs font-medium border transition flex items-center gap-1">
+            <i class="fa-solid fa-hourglass-half text-[10px] text-indigo-400"></i>
+            <span>Waiting for Bazarr</span>
+          </button>
+        </div>
+
         <div class="overflow-x-auto">
           <table class="w-full text-left text-sm text-slate-300">
             <thead class="bg-slate-800/50 text-xs uppercase text-slate-400 border-b border-slate-800">
               <tr>
                 <th class="px-5 py-3">Title / Video</th>
-                <th class="px-5 py-3">Source</th>
-                <th class="px-5 py-3">Status</th>
-                <th class="px-5 py-3">Lines</th>
-                <th class="px-5 py-3">Duration</th>
-                <th class="px-5 py-3">Time</th>
+                <th class="px-5 py-3 cursor-pointer select-none hover:text-white transition group" @click="toggleActivitySort('source')">
+                  <div class="flex items-center gap-1.5">
+                    <span>Source</span>
+                    <span class="text-xs">
+                      <template x-if="activitySortBy === 'source'">
+                        <i class="fa-solid" :class="activitySortOrder === 'asc' ? 'fa-arrow-up text-purple-400' : 'fa-arrow-down text-purple-400'"></i>
+                      </template>
+                      <template x-if="activitySortBy !== 'source'">
+                        <i class="fa-solid fa-sort text-slate-600 opacity-0 group-hover:opacity-100 transition"></i>
+                      </template>
+                    </span>
+                  </div>
+                </th>
+                <th class="px-5 py-3 cursor-pointer select-none hover:text-white transition group" @click="toggleActivitySort('status')">
+                  <div class="flex items-center gap-1.5">
+                    <span>Status</span>
+                    <span class="text-xs">
+                      <template x-if="activitySortBy === 'status'">
+                        <i class="fa-solid" :class="activitySortOrder === 'asc' ? 'fa-arrow-up text-purple-400' : 'fa-arrow-down text-purple-400'"></i>
+                      </template>
+                      <template x-if="activitySortBy !== 'status'">
+                        <i class="fa-solid fa-sort text-slate-600 opacity-0 group-hover:opacity-100 transition"></i>
+                      </template>
+                    </span>
+                  </div>
+                </th>
+                <th class="px-5 py-3 cursor-pointer select-none hover:text-white transition group" @click="toggleActivitySort('lines')">
+                  <div class="flex items-center gap-1.5">
+                    <span>Lines</span>
+                    <span class="text-xs">
+                      <template x-if="activitySortBy === 'lines'">
+                        <i class="fa-solid" :class="activitySortOrder === 'asc' ? 'fa-arrow-up text-purple-400' : 'fa-arrow-down text-purple-400'"></i>
+                      </template>
+                      <template x-if="activitySortBy !== 'lines'">
+                        <i class="fa-solid fa-sort text-slate-600 opacity-0 group-hover:opacity-100 transition"></i>
+                      </template>
+                    </span>
+                  </div>
+                </th>
+                <th class="px-5 py-3 cursor-pointer select-none hover:text-white transition group" @click="toggleActivitySort('duration')">
+                  <div class="flex items-center gap-1.5">
+                    <span>Duration</span>
+                    <span class="text-xs">
+                      <template x-if="activitySortBy === 'duration'">
+                        <i class="fa-solid" :class="activitySortOrder === 'asc' ? 'fa-arrow-up text-purple-400' : 'fa-arrow-down text-purple-400'"></i>
+                      </template>
+                      <template x-if="activitySortBy !== 'duration'">
+                        <i class="fa-solid fa-sort text-slate-600 opacity-0 group-hover:opacity-100 transition"></i>
+                      </template>
+                    </span>
+                  </div>
+                </th>
+                <th class="px-5 py-3 cursor-pointer select-none hover:text-white transition group" @click="toggleActivitySort('time')">
+                  <div class="flex items-center gap-1.5">
+                    <span>Time</span>
+                    <span class="text-xs">
+                      <template x-if="activitySortBy === 'time'">
+                        <i class="fa-solid" :class="activitySortOrder === 'asc' ? 'fa-arrow-up text-purple-400' : 'fa-arrow-down text-purple-400'"></i>
+                      </template>
+                      <template x-if="activitySortBy !== 'time'">
+                        <i class="fa-solid fa-sort text-slate-600 opacity-0 group-hover:opacity-100 transition"></i>
+                      </template>
+                    </span>
+                  </div>
+                </th>
                 <th class="px-5 py-3 text-right"></th>
               </tr>
             </thead>
@@ -294,7 +422,7 @@
                 <tr>
                   <td colspan="7" class="px-5 py-8 text-center text-slate-500">
                     <i class="fa-solid fa-inbox text-3xl mb-2 block"></i>
-                    No activity recorded yet.
+                    <span x-text="activityStatusFilter ? 'No matching ' + activityStatusFilter + ' activity found.' : 'No activity recorded yet.'"></span>
                   </td>
                 </tr>
               </template>
@@ -357,6 +485,16 @@
                           <i class="fa-regular fa-hourglass-half"></i> DEFERRED
                         </span>
                       </template>
+                      <template x-if="job.status === 'WAITING_FOR_BAZARR'">
+                        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-indigo-950 text-indigo-400 border border-indigo-800/50 animate-pulse" :title="job.error_message">
+                          <i class="fa-solid fa-hourglass-half"></i> WAITING FOR BAZARR
+                        </span>
+                      </template>
+                      <template x-if="job.status === 'WAITING_FOR_PUBLICATION'">
+                        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-indigo-950 text-indigo-400 border border-indigo-800/50 animate-pulse" :title="job.error_message">
+                          <i class="fa-solid fa-hourglass-half"></i> WAITING FOR PUBLICATION
+                        </span>
+                      </template>
                       <template x-if="job.status === 'WAITING_PROVIDER' || job.status === 'RETRY_PENDING' || job.status === 'RECOVERING'">
                         <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-orange-950 text-orange-400 border border-orange-800/50 animate-pulse">
                           <i class="fa-solid fa-triangle-exclamation"></i> <span x-text="job.status"></span>
@@ -375,7 +513,7 @@
                     </div>
                   </td>
                   <td class="px-5 py-4">
-                    <template x-if="['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER', 'DEFERRED'].includes(job.status)">
+                    <template x-if="['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER', 'DEFERRED', 'WAITING_FOR_BAZARR', 'WAITING_FOR_PUBLICATION'].includes(job.status)">
                       <div class="space-y-1 min-w-[130px]">
                         <div class="flex items-center justify-between text-[11px] font-mono">
                           <span class="text-amber-300" x-text="(job.processed_lines || 0) + '/' + (job.total_lines || '?')"></span>
@@ -386,7 +524,7 @@
                         </div>
                       </div>
                     </template>
-                    <template x-if="!['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER', 'DEFERRED'].includes(job.status)">
+                    <template x-if="!['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER', 'DEFERRED', 'WAITING_FOR_BAZARR', 'WAITING_FOR_PUBLICATION'].includes(job.status)">
                       <div>
                         <span x-text="job.total_lines || 0"></span>
                         <span class="text-xs text-slate-500" x-show="job.cleaned_sdh_lines > 0" x-text="'(' + job.cleaned_sdh_lines + ' sdh)'"></span>
@@ -396,7 +534,7 @@
                   <td class="px-5 py-4 font-mono text-xs" x-text="job.duration_seconds > 0 ? job.duration_seconds + 's' : '-'"></td>
                   <td class="px-5 py-4 text-xs text-slate-500" x-text="formatDate(job.created_at)"></td>
                   <td class="px-5 py-4 text-right" @click.stop>
-                    <button x-show="!['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER'].includes(job.status)" @click="triggerProcess(job.video_path, true)" class="text-slate-500 hover:text-blue-400 p-1.5 transition mr-1" title="Retry">
+                    <button x-show="!['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER', 'WAITING_FOR_BAZARR', 'WAITING_FOR_PUBLICATION'].includes(job.status)" @click="triggerProcess(job.video_path, true)" class="text-slate-500 hover:text-blue-400 p-1.5 transition mr-1" title="Retry">
                       <i class="fa-solid fa-rotate-right"></i>
                     </button>
                     <button @click="deleteJob(job.id)" class="text-slate-500 hover:text-rose-400 p-1.5 transition" title="Delete">
@@ -416,38 +554,116 @@
       <div class="space-y-6">
 
         <!-- Header Controls -->
-        <div class="flex items-center justify-between bg-slate-900/60 border border-slate-800 rounded-2xl p-5 shadow-xl flex-wrap gap-4">
-          <div class="flex items-center space-x-3">
-            <button @click="mediaCategory = 'series'" :class="mediaCategory === 'series' ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/30' : 'bg-slate-800 text-slate-300 hover:text-white'" class="px-4 py-2 rounded-xl text-sm font-semibold transition flex items-center gap-2">
-              <i class="fa-solid fa-tv"></i> TV Series (<span x-text="mediaData.series ? mediaData.series.length : 0"></span>)
-            </button>
-            <button @click="mediaCategory = 'movies'" :class="mediaCategory === 'movies' ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/30' : 'bg-slate-800 text-slate-300 hover:text-white'" class="px-4 py-2 rounded-xl text-sm font-semibold transition flex items-center gap-2">
-              <i class="fa-solid fa-film"></i> Movies (<span x-text="mediaData.movies ? mediaData.movies.length : 0"></span>)
-            </button>
+        <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
+          <!-- Primary Controls Row: Category Switchers & Main Actions -->
+          <div class="flex items-center justify-between flex-wrap gap-4">
+            <div class="flex items-center space-x-3">
+              <button @click="mediaCategory = 'series'" :class="mediaCategory === 'series' ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/30' : 'bg-slate-800 text-slate-300 hover:text-white'" class="px-4 py-2 rounded-xl text-sm font-semibold transition flex items-center gap-2">
+                <i class="fa-solid fa-tv"></i> TV Series (<span x-text="mediaData.series ? mediaData.series.length : 0"></span>)
+              </button>
+              <button @click="mediaCategory = 'movies'" :class="mediaCategory === 'movies' ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/30' : 'bg-slate-800 text-slate-300 hover:text-white'" class="px-4 py-2 rounded-xl text-sm font-semibold transition flex items-center gap-2">
+                <i class="fa-solid fa-film"></i> Movies (<span x-text="mediaData.movies ? mediaData.movies.length : 0"></span>)
+              </button>
+            </div>
+
+            <div class="flex items-center space-x-3">
+              <div x-show="mediaData && mediaData.scanning_embedded" class="text-xs text-purple-300 flex items-center gap-1.5 bg-purple-950/60 border border-purple-800/60 px-3 py-1.5 rounded-xl animate-pulse">
+                <i class="fa-solid fa-spinner fa-spin text-purple-400 text-[11px]"></i>
+                <span x-text="mediaData && mediaData.embedded_pending > 0 ? `Checking embedded subtitles (${mediaData.embedded_pending} left)...` : 'Checking embedded subtitles...'"></span>
+              </div>
+
+              <button @click="translateAllMissing()" x-show="getMissingCount() > 0" class="px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white active:scale-95 rounded-xl text-sm font-semibold transition flex items-center gap-2 shadow-lg shadow-purple-600/20">
+                <i class="fa-solid fa-wand-magic-sparkles"></i>
+                <span>Translate All Missing (<span x-text="getMissingCount()"></span>)</span>
+              </button>
+
+              <button @click="loadMediaFiles(true)" :disabled="scanningFolders" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 active:scale-95 rounded-xl text-sm font-medium transition flex items-center gap-2 shadow-lg shadow-black/20">
+                <i class="fa-solid fa-rotate" :class="scanningFolders ? 'fa-spin text-purple-400' : ''"></i>
+                <span x-text="scanningFolders ? 'Scanning...' : 'Scan Folders'"></span>
+              </button>
+            </div>
           </div>
 
-          <div class="flex items-center space-x-3">
-            <button @click="translateAllMissing()" x-show="getMissingCount() > 0" class="px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white active:scale-95 rounded-xl text-sm font-semibold transition flex items-center gap-2 shadow-lg shadow-purple-600/20">
-              <i class="fa-solid fa-wand-magic-sparkles"></i>
-              <span>Translate All Missing (<span x-text="getMissingCount()"></span>)</span>
-            </button>
+          <!-- Secondary Filter & Search Row -->
+          <div class="pt-3 border-t border-slate-800/80 flex items-center justify-between flex-wrap gap-3">
+            <!-- Search Bar -->
+            <div class="relative flex-1 min-w-[200px] sm:max-w-xs">
+              <i class="fa-solid fa-magnifying-glass absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500 text-xs pointer-events-none"></i>
+              <input type="text"
+                     x-model="mediaSearchQuery"
+                     :placeholder="mediaCategory === 'series' ? 'Search series...' : 'Search movies...'"
+                     class="w-full bg-slate-950/80 border border-slate-800 focus:border-purple-500/70 focus:ring-1 focus:ring-purple-500/40 rounded-xl pl-9 pr-8 py-1.5 text-xs text-slate-200 placeholder-slate-500 outline-none transition" />
+              <button x-show="mediaSearchQuery"
+                      @click="mediaSearchQuery = ''"
+                      class="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 text-xs p-1"
+                      title="Clear search">
+                <i class="fa-solid fa-xmark"></i>
+              </button>
+            </div>
 
-            <button @click="loadMediaFiles(true)" :disabled="scanningFolders" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 active:scale-95 rounded-xl text-sm font-medium transition flex items-center gap-2 shadow-lg shadow-black/20">
-              <i class="fa-solid fa-rotate" :class="scanningFolders ? 'fa-spin text-purple-400' : ''"></i>
-              <span x-text="scanningFolders ? 'Scanning...' : 'Scan Folders'"></span>
-            </button>
+            <!-- Root View Filter Chips -->
+            <div class="flex items-center gap-1.5 flex-wrap">
+              <!-- All -->
+              <button @click="mediaFilter = 'all'"
+                      :class="mediaFilter === 'all' ? 'bg-purple-950/50 border-purple-600/50 text-purple-200' : 'bg-slate-800/60 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                      class="px-3 py-1.5 rounded-lg text-xs font-medium border transition flex items-center gap-1.5">
+                <span>All</span>
+                <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
+                      :class="mediaFilter === 'all' ? 'bg-purple-900/60 text-purple-200' : 'bg-slate-700/70 text-slate-400'"
+                      x-text="getFilterCount('all')"></span>
+              </button>
+
+              <!-- Missing -->
+              <button @click="mediaFilter = 'missing'"
+                      :class="mediaFilter === 'missing' ? 'bg-purple-950/50 border-purple-600/50 text-purple-200' : 'bg-slate-800/60 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                      class="px-3 py-1.5 rounded-lg text-xs font-medium border transition flex items-center gap-1.5">
+                <span>Missing</span>
+                <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
+                      :class="mediaFilter === 'missing' ? 'bg-amber-500/30 text-amber-300 border border-amber-500/40 font-semibold' : (getFilterCount('missing') > 0 ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 'bg-slate-700/70 text-slate-400')"
+                      x-text="getFilterCount('missing')"></span>
+              </button>
+
+              <!-- Complete -->
+              <button @click="mediaFilter = 'complete'"
+                      :class="mediaFilter === 'complete' ? 'bg-purple-950/50 border-purple-600/50 text-purple-200' : 'bg-slate-800/60 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                      class="px-3 py-1.5 rounded-lg text-xs font-medium border transition flex items-center gap-1.5">
+                <span>Complete</span>
+                <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
+                      :class="mediaFilter === 'complete' ? 'bg-purple-900/60 text-purple-200' : 'bg-slate-700/70 text-slate-400'"
+                      x-text="getFilterCount('complete')"></span>
+              </button>
+
+              <!-- Recent -->
+              <button @click="mediaFilter = 'recent'"
+                      :class="mediaFilter === 'recent' ? 'bg-purple-950/50 border-purple-600/50 text-purple-200' : 'bg-slate-800/60 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                      class="px-3 py-1.5 rounded-lg text-xs font-medium border transition flex items-center gap-1.5">
+                <span>Recent</span>
+                <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
+                      :class="mediaFilter === 'recent' ? 'bg-purple-900/60 text-purple-200' : 'bg-slate-700/70 text-slate-400'"
+                      x-text="getFilterCount('recent')"></span>
+              </button>
+            </div>
           </div>
         </div>
 
         <!-- TV Series Group View -->
         <div x-show="mediaCategory === 'series'" class="space-y-4 transition-opacity duration-200" :class="scanningFolders ? 'opacity-50 pointer-events-none' : 'opacity-100'">
-          <template x-if="!mediaData.series || mediaData.series.length === 0">
-            <div class="p-8 text-center text-slate-500 bg-slate-900/60 border border-slate-800 rounded-2xl">
-              No TV series found in configured path.
+          <template x-if="getFilteredSeries().length === 0">
+            <div class="p-8 text-center bg-slate-900/60 border border-slate-800 rounded-2xl space-y-3">
+              <div class="w-10 h-10 mx-auto rounded-xl bg-slate-800/60 border border-slate-700/50 flex items-center justify-center text-slate-500">
+                <i class="fa-solid fa-tv text-base"></i>
+              </div>
+              <p class="text-sm text-slate-400" x-text="getEmptyStateMessage('series')"></p>
+              <button x-show="mediaSearchQuery || mediaFilter !== 'all'"
+                      @click="clearMediaFilters()"
+                      class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium transition inline-flex items-center gap-1.5 border border-slate-700">
+                <i class="fa-solid fa-filter-circle-xmark text-slate-400 text-xs"></i>
+                <span>Reset Filters</span>
+              </button>
             </div>
           </template>
 
-          <template x-for="show in mediaData.series" :key="show.title">
+          <template x-for="show in getFilteredSeries()" :key="show.title">
             <div class="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
               <div @click="toggleShow(show.title)" class="p-5 bg-slate-800/40 border-b border-slate-800 flex items-center justify-between cursor-pointer hover:bg-slate-800/60 transition">
                 <div class="flex items-center space-x-3">
@@ -477,36 +693,76 @@
               </div>
 
               <div x-show="isShowOpen(show.title)" class="p-4 space-y-4">
-                <!-- Season Tabs Header (shown if show has multiple seasons or non-root season) -->
-                <div class="p-2.5 bg-slate-950/80 border border-slate-800 rounded-xl flex items-center gap-2 overflow-x-auto flex-wrap" x-show="getShowSeasons(show).length > 2">
-                  <div class="text-xs text-slate-500 font-semibold px-2 flex items-center gap-1.5">
-                    <i class="fa-solid fa-layer-group text-purple-400 text-[11px]"></i> Seasons:
+                <!-- Season & Episode Filter Controls Header -->
+                <div class="p-2.5 bg-slate-950/80 border border-slate-800 rounded-xl flex items-center justify-between gap-3 overflow-x-auto flex-wrap">
+                  <!-- Seasons List -->
+                  <div class="flex items-center gap-2 flex-wrap" x-show="getShowSeasons(show).length > 2">
+                    <div class="text-xs text-slate-500 font-semibold px-1 flex items-center gap-1.5">
+                      <i class="fa-solid fa-layer-group text-purple-400 text-[11px]"></i> Seasons:
+                    </div>
+                    <template x-for="season in getShowSeasons(show)" :key="season">
+                      <button @click="setSelectedSeason(show.title, season)"
+                              :class="getSelectedSeason(show.title) === season ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30' : 'bg-slate-800/80 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
+                              class="px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 whitespace-nowrap">
+                        <span x-text="season === 'All' ? 'All Seasons' : season"></span>
+                        <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
+                              :class="getSelectedSeason(show.title) === season ? 'bg-purple-800 text-purple-100' : 'bg-slate-700 text-slate-300'"
+                              x-text="getSeasonEpisodeCount(show, season)"></span>
+                        <span x-show="getSeasonMissingCount(show, season) > 0"
+                              class="text-[10px] px-1.5 py-0.2 rounded-full font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 font-mono"
+                              x-text="getSeasonMissingCount(show, season) + ' missing'"></span>
+                      </button>
+                    </template>
                   </div>
-                  <template x-for="season in getShowSeasons(show)" :key="season">
-                    <button @click="setSelectedSeason(show.title, season)"
-                            :class="getSelectedSeason(show.title) === season ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30' : 'bg-slate-800/80 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
-                            class="px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 whitespace-nowrap">
-                      <span x-text="season === 'All' ? 'All Seasons' : season"></span>
-                      <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
-                            :class="getSelectedSeason(show.title) === season ? 'bg-purple-800 text-purple-100' : 'bg-slate-700 text-slate-300'"
-                            x-text="getSeasonEpisodeCount(show, season)"></span>
-                      <span x-show="getSeasonMissingCount(show, season) > 0"
-                            class="text-[10px] px-1.5 py-0.2 rounded-full font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 font-mono"
-                            x-text="getSeasonMissingCount(show, season) + ' missing'"></span>
-                    </button>
-                  </template>
 
-                  <!-- Quick Action: Translate Selected Season Missing -->
-                  <div class="ml-auto flex items-center gap-2 pl-2" x-show="getSelectedSeason(show.title) !== 'All' && getSeasonMissingCount(show, getSelectedSeason(show.title)) > 0">
-                    <button @click="translateSeasonMissing(show, getSelectedSeason(show.title))" class="px-3 py-1 bg-purple-600/80 hover:bg-purple-600 text-white rounded-lg text-xs font-semibold transition flex items-center gap-1.5 shadow-md shadow-purple-900/30 whitespace-nowrap">
-                      <i class="fa-solid fa-wand-magic-sparkles text-[11px]"></i>
-                      <span>Translate <span x-text="getSelectedSeason(show.title)"></span> Missing (<span x-text="getSeasonMissingCount(show, getSelectedSeason(show.title))"></span>)</span>
-                    </button>
+                  <!-- Episode View Filter (Show: [ All ] [ Missing ] [ Complete ]) and Quick Action -->
+                  <div class="flex items-center gap-2.5 flex-wrap ml-auto">
+                    <div class="flex items-center gap-1 text-[11px] text-slate-500 font-medium">
+                      <span>Show:</span>
+                    </div>
+                    <div class="inline-flex bg-slate-900 border border-slate-800 rounded-lg p-0.5">
+                      <button @click="setSelectedEpisodeFilter(show.title, 'all')"
+                              :class="getSelectedEpisodeFilter(show.title) === 'all' ? 'bg-purple-950/70 text-purple-200 border-purple-700/50 font-medium' : 'text-slate-400 hover:text-slate-200 border-transparent'"
+                              class="px-2.5 py-1 rounded-md text-[11px] border transition flex items-center gap-1">
+                        <span>All</span>
+                        <span class="text-[10px] opacity-75 font-mono" x-text="getSeasonEpisodeCount(show, getSelectedSeason(show.title))"></span>
+                      </button>
+                      <button @click="setSelectedEpisodeFilter(show.title, 'missing')"
+                              :class="getSelectedEpisodeFilter(show.title) === 'missing' ? 'bg-purple-950/70 text-purple-200 border-purple-700/50 font-medium' : 'text-slate-400 hover:text-slate-200 border-transparent'"
+                              class="px-2.5 py-1 rounded-md text-[11px] border transition flex items-center gap-1">
+                        <span>Missing</span>
+                        <span x-show="getEpisodeFilterCount(show, getSelectedSeason(show.title), 'missing') > 0"
+                              class="text-[9px] px-1 py-0.2 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/30 font-mono font-semibold"
+                              x-text="getEpisodeFilterCount(show, getSelectedSeason(show.title), 'missing')"></span>
+                      </button>
+                      <button @click="setSelectedEpisodeFilter(show.title, 'complete')"
+                              :class="getSelectedEpisodeFilter(show.title) === 'complete' ? 'bg-purple-950/70 text-purple-200 border-purple-700/50 font-medium' : 'text-slate-400 hover:text-slate-200 border-transparent'"
+                              class="px-2.5 py-1 rounded-md text-[11px] border transition flex items-center gap-1">
+                        <span>Complete</span>
+                        <span class="text-[10px] opacity-75 font-mono" x-text="getEpisodeFilterCount(show, getSelectedSeason(show.title), 'complete')"></span>
+                      </button>
+                    </div>
+
+                    <!-- Quick Action: Translate Selected Season Missing -->
+                    <div class="flex items-center gap-2" x-show="getSelectedSeason(show.title) !== 'All' && getSeasonMissingCount(show, getSelectedSeason(show.title)) > 0">
+                      <button @click="translateSeasonMissing(show, getSelectedSeason(show.title))" class="px-3 py-1 bg-purple-600/80 hover:bg-purple-600 text-white rounded-lg text-xs font-semibold transition flex items-center gap-1.5 shadow-md shadow-purple-900/30 whitespace-nowrap">
+                        <i class="fa-solid fa-wand-magic-sparkles text-[11px]"></i>
+                        <span>Translate <span x-text="getSelectedSeason(show.title)"></span> Missing (<span x-text="getSeasonMissingCount(show, getSelectedSeason(show.title))"></span>)</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
 
                 <!-- Episodes List -->
                 <div class="divide-y divide-slate-800/50 space-y-2">
+                  <template x-if="getFilteredEpisodes(show, getSelectedSeason(show.title)).length === 0">
+                    <div class="p-6 text-center text-slate-500 bg-slate-950/40 border border-slate-800/40 rounded-xl text-xs">
+                      <span x-show="getSelectedEpisodeFilter(show.title) === 'missing'">No missing subtitles found in this season view.</span>
+                      <span x-show="getSelectedEpisodeFilter(show.title) === 'complete'">No completed subtitles found in this season view.</span>
+                      <span x-show="getSelectedEpisodeFilter(show.title) === 'all'">No episodes found in this season view.</span>
+                    </div>
+                  </template>
+
                   <template x-for="ep in getFilteredEpisodes(show, getSelectedSeason(show.title))" :key="ep.path">
                     <div class="p-3.5 bg-slate-950/60 border border-slate-800/60 rounded-xl flex items-center justify-between hover:border-slate-700 transition">
                       <div class="flex items-center space-x-3">
@@ -515,9 +771,14 @@
                           <div class="flex items-center gap-2">
                             <span class="font-medium text-slate-100 text-sm" x-text="ep.filename"></span>
                             <span class="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700" x-text="ep.season"></span>
-                            <!-- NO SUBTITLE only when no active job and no sub -->
-                            <span x-show="!ep.has_target_sub && !ep.active_job" class="text-[10px] px-2 py-0.5 rounded bg-amber-950/50 text-amber-400 border border-amber-900/50 font-mono font-semibold">
+                            <!-- NO SUBTITLE only when no active job and embedded status known -->
+                            <span x-show="!ep.has_target_sub && !ep.active_job && ep.embedded_status_known !== false" class="text-[10px] px-2 py-0.5 rounded bg-amber-950/50 text-amber-400 border border-amber-900/50 font-mono font-semibold">
                               NO SUBTITLE
+                            </span>
+                            <!-- PROBING EMBEDDED status indicator -->
+                            <span x-show="!ep.has_target_sub && !ep.active_job && ep.embedded_status_known === false" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-purple-300 border border-purple-800/40 font-mono flex items-center gap-1">
+                              <i class="fa-solid fa-spinner fa-spin text-[9px] text-purple-400"></i>
+                              <span>SCANNING EMBEDDED...</span>
                             </span>
                             <!-- Active job state badges -->
                             <span x-show="ep.active_job && (ep.active_job.status === 'QUEUED' || ep.active_job.status === 'WAITING_SOURCE')" class="text-[10px] px-2 py-0.5 rounded bg-sky-950/60 text-sky-300 border border-sky-700/50 font-mono font-semibold">
@@ -527,6 +788,9 @@
                               <i class="fa-solid fa-spinner fa-spin text-[9px]"></i>
                               <span x-show="ep.active_job && ep.active_job.total_lines" x-text="'TRANSLATING ' + Math.round((ep.active_job.processed_lines||0)/ep.active_job.total_lines*100) + '%'"></span>
                               <span x-show="!ep.active_job || !ep.active_job.total_lines">TRANSLATING</span>
+                            </span>
+                            <span x-show="ep.active_job && (ep.active_job.status === 'WAITING_FOR_BAZARR' || ep.active_job.status === 'WAITING_FOR_PUBLICATION')" class="text-[10px] px-2 py-0.5 rounded bg-indigo-950/60 text-indigo-300 border border-indigo-700/50 font-mono font-semibold">
+                              <i class="fa-solid fa-hourglass-half text-[9px]"></i> <span x-text="ep.active_job.status === 'WAITING_FOR_BAZARR' ? 'WAITING FOR BAZARR' : 'WAITING FOR PUBLICATION'"></span>
                             </span>
                             <span x-show="ep.active_job && (ep.active_job.status === 'RECOVERING' || ep.active_job.status === 'RETRY_PENDING' || ep.active_job.status === 'ESCALATING' || ep.active_job.status === 'WAITING_PROVIDER')" class="text-[10px] px-2 py-0.5 rounded bg-orange-950/60 text-orange-300 border border-orange-700/50 font-mono font-semibold">
                               <i class="fa-solid fa-arrows-rotate text-[9px]"></i> RECOVERING
@@ -562,9 +826,13 @@
                         </span>
 
                         <!-- Translate Now / Re-translate (only when no active job) -->
-                        <button x-show="!ep.active_job" @click="triggerProcess(ep.path, ep.has_target_sub, ep.filename)" class="px-4 py-1.5 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5 cursor-pointer active:scale-95" :class="ep.has_target_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
-                          <i class="fa-solid" :class="ep.has_target_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles'"></i>
-                          <span x-text="ep.has_target_sub ? 'Re-translate (Force)' : 'Translate Now'"></span>
+                        <button x-show="!ep.active_job"
+                                @click="triggerProcess(ep.path, ep.has_target_sub, ep.filename)"
+                                :disabled="!ep.has_target_sub && ep.embedded_status_known === false"
+                                class="px-4 py-1.5 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5"
+                                :class="ep.has_target_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600 cursor-pointer active:scale-95' : (!ep.has_target_sub && ep.embedded_status_known === false ? 'bg-slate-800 text-slate-400 border border-slate-700 cursor-not-allowed opacity-75' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20 cursor-pointer active:scale-95')">
+                          <i class="fa-solid" :class="ep.has_target_sub ? 'fa-arrows-rotate' : (!ep.has_target_sub && ep.embedded_status_known === false ? 'fa-spinner fa-spin text-purple-400' : 'fa-wand-magic-sparkles')"></i>
+                          <span x-text="ep.has_target_sub ? 'Re-translate (Force)' : (!ep.has_target_sub && ep.embedded_status_known === false ? 'Probing...' : 'Translate Now')"></span>
                         </button>
                       </div>
                     </div>
@@ -577,22 +845,36 @@
 
         <!-- Movies View -->
         <div x-show="mediaCategory === 'movies'" class="space-y-3 transition-opacity duration-200" :class="scanningFolders ? 'opacity-50 pointer-events-none' : 'opacity-100'">
-          <template x-if="!mediaData.movies || mediaData.movies.length === 0">
-            <div class="p-8 text-center text-slate-500 bg-slate-900/60 border border-slate-800 rounded-2xl">
-              No movies found in configured Movies folder.
+          <template x-if="getFilteredMovies().length === 0">
+            <div class="p-8 text-center bg-slate-900/60 border border-slate-800 rounded-2xl space-y-3">
+              <div class="w-10 h-10 mx-auto rounded-xl bg-slate-800/60 border border-slate-700/50 flex items-center justify-center text-slate-500">
+                <i class="fa-solid fa-film text-base"></i>
+              </div>
+              <p class="text-sm text-slate-400" x-text="getEmptyStateMessage('movies')"></p>
+              <button x-show="mediaSearchQuery || mediaFilter !== 'all'"
+                      @click="clearMediaFilters()"
+                      class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium transition inline-flex items-center gap-1.5 border border-slate-700">
+                <i class="fa-solid fa-filter-circle-xmark text-slate-400 text-xs"></i>
+                <span>Reset Filters</span>
+              </button>
             </div>
           </template>
 
-          <template x-for="movie in mediaData.movies" :key="movie.path">
+          <template x-for="movie in getFilteredMovies()" :key="movie.path">
             <div class="p-4 bg-slate-900/60 border border-slate-800 rounded-2xl flex items-center justify-between shadow-xl hover:border-purple-500/40 transition">
               <div class="flex items-center space-x-3">
                 <i class="fa-solid fa-film text-2xl text-purple-400"></i>
                 <div>
                   <div class="flex items-center gap-2">
                     <span class="font-bold text-white text-base" x-text="movie.filename"></span>
-                    <!-- NO SUBTITLE only when no active job -->
-                    <span x-show="!movie.has_target_sub && !movie.active_job" class="text-[10px] px-2 py-0.5 rounded bg-amber-950/50 text-amber-400 border border-amber-900/50 font-mono font-semibold">
+                    <!-- NO SUBTITLE only when no active job and embedded status known -->
+                    <span x-show="!movie.has_target_sub && !movie.active_job && movie.embedded_status_known !== false" class="text-[10px] px-2 py-0.5 rounded bg-amber-950/50 text-amber-400 border border-amber-900/50 font-mono font-semibold">
                       NO SUBTITLE
+                    </span>
+                    <!-- PROBING EMBEDDED status indicator -->
+                    <span x-show="!movie.has_target_sub && !movie.active_job && movie.embedded_status_known === false" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-purple-300 border border-purple-800/40 font-mono flex items-center gap-1">
+                      <i class="fa-solid fa-spinner fa-spin text-[9px] text-purple-400"></i>
+                      <span>SCANNING EMBEDDED...</span>
                     </span>
                     <!-- Active job state badges -->
                     <span x-show="movie.active_job && (movie.active_job.status === 'QUEUED' || movie.active_job.status === 'WAITING_SOURCE')" class="text-[10px] px-2 py-0.5 rounded bg-sky-950/60 text-sky-300 border border-sky-700/50 font-mono font-semibold">
@@ -602,6 +884,9 @@
                       <i class="fa-solid fa-spinner fa-spin text-[9px]"></i>
                       <span x-show="movie.active_job && movie.active_job.total_lines" x-text="'TRANSLATING ' + Math.round((movie.active_job.processed_lines||0)/movie.active_job.total_lines*100) + '%'"></span>
                       <span x-show="!movie.active_job || !movie.active_job.total_lines">TRANSLATING</span>
+                    </span>
+                    <span x-show="movie.active_job && (movie.active_job.status === 'WAITING_FOR_BAZARR' || movie.active_job.status === 'WAITING_FOR_PUBLICATION')" class="text-[10px] px-2 py-0.5 rounded bg-indigo-950/60 text-indigo-300 border border-indigo-700/50 font-mono font-semibold">
+                      <i class="fa-solid fa-hourglass-half text-[9px]"></i> <span x-text="movie.active_job.status === 'WAITING_FOR_BAZARR' ? 'WAITING FOR BAZARR' : 'WAITING FOR PUBLICATION'"></span>
                     </span>
                     <span x-show="movie.active_job && (movie.active_job.status === 'RECOVERING' || movie.active_job.status === 'RETRY_PENDING' || movie.active_job.status === 'ESCALATING' || movie.active_job.status === 'WAITING_PROVIDER')" class="text-[10px] px-2 py-0.5 rounded bg-orange-950/60 text-orange-300 border border-orange-700/50 font-mono font-semibold">
                       <i class="fa-solid fa-arrows-rotate text-[9px]"></i> RECOVERING
@@ -637,9 +922,13 @@
                 </span>
 
                 <!-- Translate Now / Re-translate (only when no active job) -->
-                <button x-show="!movie.active_job" @click="triggerProcess(movie.path, movie.has_target_sub, movie.filename)" class="px-4 py-2 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5 cursor-pointer active:scale-95" :class="movie.has_target_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20'">
-                  <i class="fa-solid" :class="movie.has_target_sub ? 'fa-arrows-rotate' : 'fa-wand-magic-sparkles'"></i>
-                  <span x-text="movie.has_target_sub ? 'Re-translate (Force)' : 'Translate Now'"></span>
+                <button x-show="!movie.active_job"
+                        @click="triggerProcess(movie.path, movie.has_target_sub, movie.filename)"
+                        :disabled="!movie.has_target_sub && movie.embedded_status_known === false"
+                        class="px-4 py-2 text-white rounded-xl text-xs font-semibold shadow-lg transition flex items-center gap-1.5"
+                        :class="movie.has_target_sub ? 'bg-slate-700 hover:bg-slate-600 border border-slate-600 cursor-pointer active:scale-95' : (!movie.has_target_sub && movie.embedded_status_known === false ? 'bg-slate-800 text-slate-400 border border-slate-700 cursor-not-allowed opacity-75' : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 shadow-purple-600/20 cursor-pointer active:scale-95')">
+                  <i class="fa-solid" :class="movie.has_target_sub ? 'fa-arrows-rotate' : (!movie.has_target_sub && movie.embedded_status_known === false ? 'fa-spinner fa-spin text-purple-400' : 'fa-wand-magic-sparkles')"></i>
+                  <span x-text="movie.has_target_sub ? 'Re-translate (Force)' : (!movie.has_target_sub && movie.embedded_status_known === false ? 'Probing...' : 'Translate Now')"></span>
                 </button>
               </div>
             </div>
@@ -1236,6 +1525,13 @@
                 </div>
               </div>
 
+              <!-- Custom Translation Instructions -->
+              <div>
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">Custom Translation Instructions <span class="text-xs text-slate-500 font-normal">(Optional)</span></label>
+                <textarea x-model="settingsData.ai.custom_translation_instructions" maxlength="3000" rows="4" placeholder="Prefer natural conversational language.&#10;Keep profanity intact.&#10;Do not translate character names.&#10;Keep subtitles concise and natural." class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm leading-relaxed resize-y"></textarea>
+                <span class="text-xs text-slate-500 mt-1 block">Additional preferences added to Babel's built-in translation instructions. Core formatting and subtitle integrity rules remain enforced.</span>
+              </div>
+
               <!-- Custom Glossary -->
               <div>
                 <label class="block text-sm font-medium text-slate-300 mb-1.5">Translation Glossary <span class="text-xs text-slate-500 font-normal">(Optional)</span></label>
@@ -1662,8 +1958,9 @@
                     <span x-text="copiedWebhook === 'sonarr' ? 'Copied' : 'Copy'"></span>
                   </button>
                 </div>
-                <div class="text-[11px] text-slate-400">
-                  Inside Docker network you can also use: <code class="text-purple-300 font-mono">http://babel:8765/webhook/sonarr</code>
+                <div class="space-y-1 text-[11px] text-slate-400">
+                  <div>Use an address that Sonarr can reach.</div>
+                  <div>Same Docker network only: <code class="text-purple-300 font-mono" x-text="getDockerWebhookUrl('sonarr')"></code></div>
                 </div>
               </div>
 
@@ -1682,8 +1979,9 @@
                     <span x-text="copiedWebhook === 'radarr' ? 'Copied' : 'Copy'"></span>
                   </button>
                 </div>
-                <div class="text-[11px] text-slate-400">
-                  Inside Docker network you can also use: <code class="text-indigo-300 font-mono">http://babel:8765/webhook/radarr</code>
+                <div class="space-y-1 text-[11px] text-slate-400">
+                  <div>Use an address that Radarr can reach.</div>
+                  <div>Same Docker network only: <code class="text-indigo-300 font-mono" x-text="getDockerWebhookUrl('radarr')"></code></div>
                 </div>
               </div>
 
@@ -1691,9 +1989,11 @@
                 <div class="font-bold text-white mb-1">How to set up in Sonarr / Radarr:</div>
                 <div>1. Go to <strong>Settings</strong> &rarr; <strong>Connect</strong> &rarr; click <strong>+</strong> &rarr; select <strong>Webhook</strong>.</div>
                 <div>2. Name: <strong>Babel</strong>.</div>
-                <div>3. Check triggers: <strong>On Download</strong> and <strong>On Upgrade</strong>.</div>
-                <div>4. URL: Paste the copied endpoint above (e.g. <code>http://babel:8765/webhook/sonarr?secret=your_secret_here</code>).</div>
-                <div>5. Method: <strong>POST</strong> &rarr; Click <strong>Test</strong> (will show green checkmark) &rarr; <strong>Save</strong>.</div>
+                <div>3. Enable <strong>On File Import</strong> and <strong>On File Upgrade</strong>.</div>
+                <div>4. Paste the webhook URL shown above.</div>
+                <div>5. If <code class="text-purple-300 font-mono">BABEL_WEBHOOK_SECRET</code> is configured, add custom header <code class="text-purple-300 font-mono">X-Webhook-Secret: YOUR_SECRET</code> (preferred) or append <code class="text-purple-300 font-mono">?secret=YOUR_SECRET</code>.</div>
+                <div>6. Set Method to <strong>POST</strong>.</div>
+                <div>7. Click <strong>Test</strong> (will show green checkmark) &rarr; <strong>Save</strong>.</div>
               </div>
             </div>
           </div>
@@ -1895,7 +2195,11 @@ docker compose up -d babel</pre>
               <template x-if="!['TRANSLATED', 'REPAIRED', 'FAILED', 'PARTIAL', 'RECOVERING', 'SUCCESS'].includes(selectedJob.status) || selectedJob.sync_diff_ms === -1 || selectedJob.sync_diff_ms === null || selectedJob.sync_diff_ms === undefined">
                 <div class="text-slate-500 font-mono text-xs py-1">
                   <span class="text-slate-400 font-semibold">N/A</span>
-                  <span class="block text-[10px] text-slate-600 font-sans" x-show="['ALREADY EXISTS', 'BAZARR MATCH', 'HEALTHY', 'SKIPPED', 'EXISTING / SKIPPED'].includes(selectedJob.status)">(pre-existing)</span>
+                  <span class="block text-[10px] text-slate-600 font-sans" x-show="selectedJob.status === 'BAZARR MATCH' && (!selectedJob.reason || !selectedJob.reason.includes('Bazarr + existing'))">(found by Bazarr this run)</span>
+                  <span class="block text-[10px] text-slate-600 font-sans" x-show="selectedJob.status === 'BAZARR MATCH' && selectedJob.reason && selectedJob.reason.includes('Bazarr + existing')">(Bazarr + existing targets)</span>
+                  <span class="block text-[10px] text-slate-600 font-sans" x-show="selectedJob.status === 'ALREADY EXISTS' && selectedJob.reason === 'Embedded target extracted and published'">(extracted from media)</span>
+                  <span class="block text-[10px] text-slate-600 font-sans" x-show="selectedJob.status === 'ALREADY EXISTS' && selectedJob.reason === 'External target appeared during processing'">(external target appeared during processing)</span>
+                  <span class="block text-[10px] text-slate-600 font-sans" x-show="['HEALTHY', 'SKIPPED', 'EXISTING / SKIPPED'].includes(selectedJob.status) || (selectedJob.status === 'ALREADY EXISTS' && selectedJob.reason !== 'Embedded target extracted and published' && selectedJob.reason !== 'External target appeared during processing')">(pre-existing)</span>
                 </div>
               </template>
             </div>
@@ -2100,6 +2404,9 @@ docker compose up -d babel</pre>
         loadingUsage: false,
 
         mediaData: { series: [], movies: [] },
+        mediaSearchQuery: '',
+        mediaFilter: 'all',
+        selectedEpisodeFilters: {},
         openShows: {},
         selectedSeasons: {},
         mediaRefreshInFlight: false,
@@ -2244,6 +2551,7 @@ docker compose up -d babel</pre>
             batch_size: 150,
             batch_concurrency: 2,
             max_concurrent_jobs: 3,
+            custom_translation_instructions: '',
             glossary: '',
             daily_request_budget_gemini: 0,
             daily_request_budget_openai: 0,
@@ -2392,9 +2700,12 @@ docker compose up -d babel</pre>
         },
 
         getWebhookUrl(type) {
-          const host = window.location.host || 'localhost:8765';
-          const proto = window.location.protocol || 'http:';
-          return `${proto}//${host}/webhook/${type}`;
+          const origin = window.location.origin || `${window.location.protocol || 'http:'}//${window.location.host || 'localhost:8765'}`;
+          return `${origin}/webhook/${type}`;
+        },
+
+        getDockerWebhookUrl(type) {
+          return `http://babel:8765/webhook/${type}`;
         },
 
         copyWebhook(type) {
@@ -2424,6 +2735,28 @@ docker compose up -d babel</pre>
         },
 
         refreshingActivity: false,
+        activityStatusFilter: '',
+        activitySortBy: '',
+        activitySortOrder: 'desc',
+
+        setActivityFilter(status) {
+          this.activityStatusFilter = status;
+          this.loadJobs();
+        },
+
+        toggleActivitySort(col) {
+          if (this.activitySortBy === col) {
+            this.activitySortOrder = this.activitySortOrder === 'asc' ? 'desc' : 'asc';
+          } else {
+            this.activitySortBy = col;
+            if (['duration', 'lines', 'time'].includes(col)) {
+              this.activitySortOrder = 'desc';
+            } else {
+              this.activitySortOrder = 'asc';
+            }
+          }
+          this.loadJobs();
+        },
 
         async manualRefreshActivity() {
           this.refreshingActivity = true;
@@ -2443,7 +2776,17 @@ docker compose up -d babel</pre>
 
         async loadJobs() {
           try {
-            const res = await fetch('/api/jobs');
+            const params = new URLSearchParams();
+            if (this.activityStatusFilter) {
+              params.set('status', this.activityStatusFilter);
+            }
+            if (this.activitySortBy) {
+              params.set('sort_by', this.activitySortBy);
+              params.set('order', this.activitySortOrder || 'desc');
+            }
+            const qs = params.toString();
+            const url = qs ? `/api/jobs?${qs}` : '/api/jobs';
+            const res = await fetch(url);
             this.jobs = await res.json();
             if (this.modalOpen && this.selectedJob && this.selectedJob.id) {
               const updatedJob = this.jobs.find(j => j.id === this.selectedJob.id);
@@ -2525,9 +2868,6 @@ docker compose up -d babel</pre>
                 this.showToast('Error deleting subtitles: ' + (err.detail || res.statusText), 'error');
                 return;
               }
-              // Optimistically update file state immediately in UI
-              file.has_target_sub = false;
-              file.subtitles = (file.subtitles || []).filter(s => !s.filename.toLowerCase().endsWith('.srt'));
               this.showToast('Subtitles deleted for ' + file.filename, 'success');
               // Silently refresh media files from disk and refresh job history
               await this.loadMediaFiles(true, { silent: true });
@@ -3043,6 +3383,15 @@ docker compose up -d babel</pre>
               const data = await res.json();
               this.mediaData = data;
               this.mediaLoaded = true;
+
+              if (data.scanning_embedded) {
+                this.scheduleEmbeddedStatusPoll();
+              } else {
+                if (this._embeddedPollTimer) {
+                  clearTimeout(this._embeddedPollTimer);
+                  this._embeddedPollTimer = null;
+                }
+              }
             }
           } catch(e) {
             console.error('Failed to load media files:', e);
@@ -3051,6 +3400,47 @@ docker compose up -d babel</pre>
             if (!silent) {
               this.scanningFolders = false;
             }
+          }
+        },
+
+        scheduleEmbeddedStatusPoll() {
+          if (this._embeddedPollTimer) return;
+          this._embeddedPollTimer = setTimeout(() => {
+            this._pollEmbeddedStatus();
+          }, 2500);
+        },
+
+        async _pollEmbeddedStatus() {
+          this._embeddedPollTimer = null;
+          if (this._embeddedStatusPollInFlight) return;
+          this._embeddedStatusPollInFlight = true;
+          try {
+            const res = await fetch('/api/media-files/status');
+            if (res.ok) {
+              const status = await res.json();
+              if (this.mediaData) {
+                this.mediaData.scanning_embedded = Boolean(status.scanning_embedded);
+                this.mediaData.embedded_pending = status.pending || 0;
+              }
+              if (status.scanning_embedded) {
+                // Still probing in background: schedule next lightweight status poll (0 disk I/O)
+                this._embeddedPollTimer = setTimeout(() => {
+                  this._pollEmbeddedStatus();
+                }, 2500);
+              } else {
+                // Background probing finished: perform exactly ONE silent Library refresh
+                this._embeddedPollTimer = null;
+                await this.loadMediaFiles(true, { silent: true });
+              }
+            }
+          } catch(e) {
+            if (this.mediaData && this.mediaData.scanning_embedded) {
+              this._embeddedPollTimer = setTimeout(() => {
+                this._pollEmbeddedStatus();
+              }, 3000);
+            }
+          } finally {
+            this._embeddedStatusPollInFlight = false;
           }
         },
 
@@ -3113,6 +3503,8 @@ docker compose up -d babel</pre>
             }
             return 'Translating…';
           }
+          if (s === 'WAITING_FOR_BAZARR') return 'Waiting for Bazarr…';
+          if (s === 'WAITING_FOR_PUBLICATION') return 'Waiting for Publication…';
           if (s === 'RECOVERING' || s === 'RETRY_PENDING' || s === 'ESCALATING' || s === 'WAITING_PROVIDER') return 'Recovering…';
           if (s === 'DEFERRED') return 'Deferred';
           return s;
@@ -3195,6 +3587,88 @@ docker compose up -d babel</pre>
           });
         },
 
+        isShowRecent(show) {
+          if (!show) return false;
+          const cutoff = (Date.now() / 1000) - (30 * 86400);
+          if (show.mtime && show.mtime >= cutoff) return true;
+          return (show.episodes || []).some(ep => ep.mtime && ep.mtime >= cutoff);
+        },
+
+        isMovieRecent(movie) {
+          if (!movie) return false;
+          const cutoff = (Date.now() / 1000) - (30 * 86400);
+          return Boolean(movie.mtime && movie.mtime >= cutoff);
+        },
+
+        getFilteredSeries() {
+          let list = this.mediaData.series || [];
+          const q = (this.mediaSearchQuery || '').trim().toLowerCase();
+          if (q) {
+            list = list.filter(s => (s.title || '').toLowerCase().includes(q));
+          }
+          if (this.mediaFilter === 'missing') {
+            list = list.filter(s => (s.episodes || []).some(ep => !ep.has_target_sub && ep.embedded_status_known !== false));
+          } else if (this.mediaFilter === 'complete') {
+            list = list.filter(s => (s.episodes || []).length > 0 && (s.episodes || []).every(ep => ep.has_target_sub));
+          } else if (this.mediaFilter === 'recent') {
+            list = list.filter(s => this.isShowRecent(s));
+          }
+          return list;
+        },
+
+        getFilteredMovies() {
+          let list = this.mediaData.movies || [];
+          const q = (this.mediaSearchQuery || '').trim().toLowerCase();
+          if (q) {
+            list = list.filter(m => (m.filename || '').toLowerCase().includes(q));
+          }
+          if (this.mediaFilter === 'missing') {
+            list = list.filter(m => !m.has_target_sub && m.embedded_status_known !== false);
+          } else if (this.mediaFilter === 'complete') {
+            list = list.filter(m => Boolean(m.has_target_sub));
+          } else if (this.mediaFilter === 'recent') {
+            list = list.filter(m => this.isMovieRecent(m));
+          }
+          return list;
+        },
+
+        getFilterCount(filter) {
+          if (this.mediaCategory === 'series') {
+            const list = this.mediaData.series || [];
+            if (filter === 'all') return list.length;
+            if (filter === 'missing') return list.filter(s => (s.episodes || []).some(ep => !ep.has_target_sub && ep.embedded_status_known !== false)).length;
+            if (filter === 'complete') return list.filter(s => (s.episodes || []).length > 0 && (s.episodes || []).every(ep => ep.has_target_sub)).length;
+            if (filter === 'recent') return list.filter(s => this.isShowRecent(s)).length;
+          } else if (this.mediaCategory === 'movies') {
+            const list = this.mediaData.movies || [];
+            if (filter === 'all') return list.length;
+            if (filter === 'missing') return list.filter(m => !m.has_target_sub && m.embedded_status_known !== false).length;
+            if (filter === 'complete') return list.filter(m => Boolean(m.has_target_sub)).length;
+            if (filter === 'recent') return list.filter(m => this.isMovieRecent(m)).length;
+          }
+          return 0;
+        },
+
+        getSelectedEpisodeFilter(title) {
+          return this.selectedEpisodeFilters[title] || 'all';
+        },
+
+        setSelectedEpisodeFilter(title, filter) {
+          this.selectedEpisodeFilters[title] = filter;
+        },
+
+        getEpisodeFilterCount(show, season, filter) {
+          if (!show || !show.episodes) return 0;
+          let eps = show.episodes;
+          if (season && season !== 'All') {
+            eps = eps.filter(ep => (ep.season || 'Root') === season);
+          }
+          if (filter === 'all') return eps.length;
+          if (filter === 'missing') return eps.filter(ep => !ep.has_target_sub && ep.embedded_status_known !== false).length;
+          if (filter === 'complete') return eps.filter(ep => ep.has_target_sub).length;
+          return 0;
+        },
+
         getShowSeasons(show) {
           if (!show || !show.episodes || show.episodes.length === 0) return ['All'];
           const seasons = Array.from(new Set(show.episodes.map(ep => ep.season || 'Root')));
@@ -3210,21 +3684,80 @@ docker compose up -d babel</pre>
 
         getSeasonMissingCount(show, season) {
           if (!show || !show.episodes) return 0;
-          // Exclude items with active jobs — they don't need a new job
-          if (season === 'All') return show.episodes.filter(ep => !ep.has_target_sub && !ep.active_job).length;
-          return show.episodes.filter(ep => (ep.season || 'Root') === season && !ep.has_target_sub && !ep.active_job).length;
+          // Exclude items with active jobs or unknown embedded status
+          if (season === 'All') return show.episodes.filter(ep => !ep.has_target_sub && !ep.active_job && ep.embedded_status_known !== false).length;
+          return show.episodes.filter(ep => (ep.season || 'Root') === season && !ep.has_target_sub && !ep.active_job && ep.embedded_status_known !== false).length;
         },
 
         getFilteredEpisodes(show, season) {
           if (!show || !show.episodes) return [];
-          if (!season || season === 'All') return show.episodes;
-          return show.episodes.filter(ep => (ep.season || 'Root') === season);
+          let eps = show.episodes;
+          if (season && season !== 'All') {
+            eps = eps.filter(ep => (ep.season || 'Root') === season);
+          }
+          const epFilter = this.getSelectedEpisodeFilter(show.title);
+          if (epFilter === 'missing') {
+            eps = eps.filter(ep => !ep.has_target_sub && ep.embedded_status_known !== false);
+          } else if (epFilter === 'complete') {
+            eps = eps.filter(ep => ep.has_target_sub);
+          }
+          return eps;
+        },
+
+        clearMediaFilters() {
+          this.mediaSearchQuery = '';
+          this.mediaFilter = 'all';
+        },
+
+        getEmptyStateMessage(category) {
+          if (category === 'series') {
+            if (!this.mediaData.series || this.mediaData.series.length === 0) {
+              return 'No TV series found in configured path.';
+            }
+            if (this.mediaSearchQuery && this.mediaFilter !== 'all') {
+              return 'No series match your search and filter criteria.';
+            }
+            if (this.mediaSearchQuery) {
+              return 'No library items match your search.';
+            }
+            if (this.mediaFilter === 'missing') {
+              return 'No missing subtitles found.';
+            }
+            if (this.mediaFilter === 'complete') {
+              return 'No completed items found.';
+            }
+            if (this.mediaFilter === 'recent') {
+              return 'No recently added media found.';
+            }
+            return 'No TV series found.';
+          } else if (category === 'movies') {
+            if (!this.mediaData.movies || this.mediaData.movies.length === 0) {
+              return 'No movies found in configured Movies folder.';
+            }
+            if (this.mediaSearchQuery && this.mediaFilter !== 'all') {
+              return 'No movies match your search and filter criteria.';
+            }
+            if (this.mediaSearchQuery) {
+              return 'No library items match your search.';
+            }
+            if (this.mediaFilter === 'missing') {
+              return 'No missing subtitles found.';
+            }
+            if (this.mediaFilter === 'complete') {
+              return 'No completed items found.';
+            }
+            if (this.mediaFilter === 'recent') {
+              return 'No recently added media found.';
+            }
+            return 'No movies found.';
+          }
+          return 'No items found.';
         },
 
         async translateSeasonMissing(show, season) {
           if (!show || !show.episodes) return;
-          // Exclude items with active jobs
-          const missing = show.episodes.filter(ep => (ep.season || 'Root') === season && !ep.has_target_sub && !ep.active_job);
+          // Exclude items with active jobs or unknown embedded status
+          const missing = show.episodes.filter(ep => (ep.season || 'Root') === season && !ep.has_target_sub && !ep.active_job && ep.embedded_status_known !== false);
           if (missing.length === 0) return;
 
           const countText = missing.length === 1 ? 'the missing episode' : `all ${missing.length} missing episodes`;
@@ -3252,13 +3785,13 @@ docker compose up -d babel</pre>
           if (this.mediaCategory === 'series' && this.mediaData.series) {
             for (const show of this.mediaData.series) {
               for (const ep of show.episodes) {
-                // Only count items without a target sub AND without an active job
-                if (!ep.has_target_sub && !ep.active_job) count++;
+                // Only count items without a target sub AND without an active job AND with known embedded status
+                if (!ep.has_target_sub && !ep.active_job && ep.embedded_status_known !== false) count++;
               }
             }
           } else if (this.mediaCategory === 'movies' && this.mediaData.movies) {
             for (const m of this.mediaData.movies) {
-              if (!m.has_target_sub && !m.active_job) count++;
+              if (!m.has_target_sub && !m.active_job && m.embedded_status_known !== false) count++;
             }
           }
           return count;
@@ -3266,8 +3799,8 @@ docker compose up -d babel</pre>
 
         getShowMissingCount(show) {
           if (!show || !show.episodes) return 0;
-          // Exclude items with active jobs
-          return show.episodes.filter(ep => !ep.has_target_sub && !ep.active_job).length;
+          // Exclude items with active jobs or unknown embedded status
+          return show.episodes.filter(ep => !ep.has_target_sub && !ep.active_job && ep.embedded_status_known !== false).length;
         },
 
         async translateAllMissing() {
@@ -3275,13 +3808,13 @@ docker compose up -d babel</pre>
           if (this.mediaCategory === 'series' && this.mediaData.series) {
             for (const show of this.mediaData.series) {
               for (const ep of show.episodes) {
-                // Skip items with active jobs — already being handled
-                if (!ep.has_target_sub && !ep.active_job) missing.push(ep);
+                // Skip items with active jobs or unknown embedded status
+                if (!ep.has_target_sub && !ep.active_job && ep.embedded_status_known !== false) missing.push(ep);
               }
             }
           } else if (this.mediaCategory === 'movies' && this.mediaData.movies) {
             for (const m of this.mediaData.movies) {
-              if (!m.has_target_sub && !m.active_job) missing.push(m);
+              if (!m.has_target_sub && !m.active_job && m.embedded_status_known !== false) missing.push(m);
             }
           }
 
@@ -3308,8 +3841,8 @@ docker compose up -d babel</pre>
 
         async translateShowMissing(show) {
           if (!show || !show.episodes) return;
-          // Exclude items with active jobs
-          const missing = show.episodes.filter(ep => !ep.has_target_sub && !ep.active_job);
+          // Exclude items with active jobs or unknown embedded status
+          const missing = show.episodes.filter(ep => !ep.has_target_sub && !ep.active_job && ep.embedded_status_known !== false);
           if (missing.length === 0) return;
 
           const countText = missing.length === 1 ? 'the missing episode' : `all ${missing.length} missing episodes`;

@@ -1,6 +1,7 @@
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from app.services.pipeline import SubtitlePipeline
+from app.core.trust_engine import TrustResult, TrustDecision, CandidateOrigin, VerificationMode
 import os
 
 @pytest.mark.asyncio
@@ -21,7 +22,7 @@ async def test_embedded_extraction_status_handling(tmp_path):
     with patch("app.services.pipeline.get_setting", side_effect=fake_get_setting):
         with patch("app.services.pipeline.extract_embedded_srt") as mock_extract:
             
-            with patch("app.services.pipeline.evaluate_subtitle_health") as mock_health:
+            with patch("app.services.pipeline.SubtitleTrustEngine.evaluate_candidate", new_callable=AsyncMock) as mock_trust:
                 with patch("app.services.pipeline.create_job", return_value=1), \
                      patch("app.services.pipeline.update_job"), \
                      patch("app.services.pipeline.append_job_log"), \
@@ -32,50 +33,71 @@ async def test_embedded_extraction_status_handling(tmp_path):
                           patch.object(pipeline.translator, "translate_srt_content", return_value=[]), \
                           patch("app.services.pipeline.qa_gate", return_value={"passed": True, "score": 100}):
                           
-                          # Test RED status
+                          # Test FAIL status (RED)
                           def fake_extract_red(vid, out, preferred_lang):
                               with open(out, "w", encoding="utf-8") as f:
                                   f.write("1\n00:00:01,000 --> 00:00:02,000\nBad\n\n")
                               return True
                           mock_extract.side_effect = fake_extract_red
-                          mock_health.return_value = {"status": "RED", "reason": "Bad"}
+                          mock_trust.return_value = TrustResult(
+                              decision=TrustDecision.FAIL,
+                              score=20,
+                              confidence="HIGH",
+                              reasons=["Structural issues"],
+                              origin=CandidateOrigin.EMBEDDED,
+                              verification_mode=VerificationMode.EMBEDDED_PROVENANCE
+                          )
                           
                           await pipeline._run_pipeline_logic(1, str(video), wait_seconds=0)
-                          mock_health.assert_called()
+                          mock_trust.assert_called()
                           mock_publish.assert_not_called()
                           mock_remove.assert_called()
                           
-                          mock_health.reset_mock()
+                          mock_trust.reset_mock()
                           mock_publish.reset_mock()
                           mock_remove.reset_mock()
                           
-                          # Test YELLOW status
+                          # Test REPAIRABLE status (YELLOW when auto_repair is off -> reject)
                           def fake_extract_yellow(vid, out, preferred_lang):
                               with open(out, "w", encoding="utf-8") as f:
                                   f.write("1\n00:00:01,000 --> 00:00:02,000\nWarning\n\n")
                               return True
                           mock_extract.side_effect = fake_extract_yellow
-                          mock_health.return_value = {"status": "YELLOW", "reason": "Warning"}
+                          mock_trust.return_value = TrustResult(
+                              decision=TrustDecision.REPAIRABLE,
+                              score=60,
+                              confidence="HIGH",
+                              reasons=["Offset detected"],
+                              origin=CandidateOrigin.EMBEDDED,
+                              verification_mode=VerificationMode.EMBEDDED_PROVENANCE
+                          )
                           
                           await pipeline._run_pipeline_logic(1, str(video), wait_seconds=0)
-                          mock_health.assert_called()
+                          mock_trust.assert_called()
                           mock_publish.assert_not_called()
                           mock_remove.assert_called()
                           
-                          mock_health.reset_mock()
+                          mock_trust.reset_mock()
                           mock_publish.reset_mock()
                           mock_remove.reset_mock()
                           
-                          # Test GREEN status
+                          # Test PASS status (GREEN)
                           def fake_extract_green(vid, out, preferred_lang):
                               with open(out, "w", encoding="utf-8") as f:
                                   f.write("1\n00:00:01,000 --> 00:00:02,000\nGood\n\n")
                               return True
                           mock_extract.side_effect = fake_extract_green
-                          mock_health.return_value = {"status": "GREEN", "reason": "Good"}
+                          mock_trust.return_value = TrustResult(
+                              decision=TrustDecision.PASS,
+                              score=95,
+                              confidence="HIGH",
+                              reasons=["Passed embedded provenance"],
+                              origin=CandidateOrigin.EMBEDDED,
+                              verification_mode=VerificationMode.EMBEDDED_PROVENANCE
+                          )
                           mock_publish.return_value = {"published": True, "skipped": False, "reason": "published"}
                           
                           await pipeline._run_pipeline_logic(1, str(video), wait_seconds=0)
-                          mock_health.assert_called()
+                          mock_trust.assert_called()
                           mock_publish.assert_called()
                           mock_remove.assert_not_called()

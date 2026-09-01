@@ -152,10 +152,11 @@ async def test_6_one_probe_per_job(base_settings, tmp_path, monkeypatch):
     
     await pipeline._run_pipeline_logic(1, str(video), wait_seconds=0)
     
-    # inspect_mkv_tracks must be called EXACTLY ONCE
+    # inspect_mkv_tracks must be called EXACTLY ONCE across the entire job
     assert probe_call_count == 1, f"Expected exactly 1 container probe, got {probe_call_count}"
-    # Target check (sv) + Source check (eng) -> target failed fast, source extracted once
-    assert extract_call_count == 2
+    # Target check (sv): probe showed 0 Swedish tracks, so target extraction was skipped (0 calls)
+    # Source check (eng): probe showed track 2 is English, so source extraction ran exactly once (1 call)
+    assert extract_call_count == 1, f"Expected exactly 1 source extraction call, got {extract_call_count}"
 
 @pytest.mark.asyncio
 async def test_13_source_equals_target_skips_ai(base_settings, tmp_path, monkeypatch):
