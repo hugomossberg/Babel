@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import os
 import time
 from pathlib import Path
@@ -128,13 +129,17 @@ def _strong_bazarr_provenance(video_path: str, lang: str, snap: TargetSnapshot,
 
 
 # ---------------------------------------------------------------------------
-# S03E09 Forensic Timing Fixture (Deterministic, self-contained)
+# S03E09 Forensic Timing Fixture (Deterministic, hermetic, self-contained)
 # ---------------------------------------------------------------------------
+
+_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "sr_s03e09_timing.json"
+
 
 def _build_forensic_s03e09_fixture():
     """
     Returns (ref_cues, target_cues_raw, target_cues_synced) with exact forensic timing
-    dynamics from the S03E09 incident, using synthetic Swedish text.
+    dynamics from the S03E09 incident, loaded hermetically from deterministic anonymized
+    timing fixture JSON.
 
     Dynamics:
       - Reference: 560 cues
@@ -143,57 +148,36 @@ def _build_forensic_s03e09_fixture():
       - Independent estimator on raw: -5.128s
       - Contradiction: |−5.128 − 0.041| = 5.17s >= 2.0s
     """
-    # Load from /tmp/babel-sr-rootcause if available, otherwise construct from exact specs
-    local_ref = Path("/tmp/babel-sr-rootcause/en.srt")
-    local_sv_raw = Path("/tmp/babel-sr-rootcause/current.sv.srt")
-    local_sv_synced = Path("/tmp/babel-sr-rootcause/225459.synced.srt")
+    with open(_FIXTURE_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-    if local_ref.exists() and local_sv_raw.exists():
-        en_cues_orig = list(srt.parse(local_ref.read_text(encoding="utf-8-sig", errors="ignore")))
-        sv_raw_orig = list(srt.parse(local_sv_raw.read_text(encoding="utf-8-sig", errors="ignore")))
-        sv_synced_orig = list(srt.parse(local_sv_synced.read_text(encoding="utf-8-sig", errors="ignore"))) if local_sv_synced.exists() else []
-
-        ref_cues = [
-            srt.Subtitle(i + 1, c.start, c.end, f"Captain Flint english line {i} dialogue.")
-            for i, c in enumerate(en_cues_orig)
-        ]
-        target_raw_cues = [
-            srt.Subtitle(i + 1, c.start, c.end, f"Kapten Flint svensk replik {i} i Nassau.")
-            for i, c in enumerate(sv_raw_orig)
-        ]
-        target_synced_cues = [
-            srt.Subtitle(i + 1, c.start, c.end, f"Kapten Flint svensk replik {i} i Nassau.")
-            for i, c in enumerate(sv_synced_orig)
-        ] if sv_synced_orig else _shift_cues(target_raw_cues, -5.128)
-        return ref_cues, target_raw_cues, target_synced_cues
-
-    # Fallback synthetic generator matching the exact mathematical properties
-    import random
-    rng = random.Random(42)
-    ref_specs = []
-    t = 15.0
-    for i in range(120):
-        dur = rng.uniform(1.8, 3.8)
-        gap = rng.uniform(2.0, 6.0)
-        ref_specs.append((t, t + dur, f"English dialogue line {i}: spoken content"))
-        t += dur + gap
-
-    OFFSET = -5.128
-    target_specs = []
-    ref_idx = 0
-    tgt_idx = 0
-    while ref_idx < len(ref_specs) - 1 and tgt_idx < 65:
-        r0 = ref_specs[ref_idx]
-        r1 = ref_specs[ref_idx + 1]
-        s = max(0.0, r0[0] + OFFSET)
-        e = max(s + 0.5, r1[1] + OFFSET)
-        target_specs.append((s, e, _sv_text(tgt_idx)))
-        ref_idx += 2
-        tgt_idx += 1
-
-    ref_cues = _make_cues(ref_specs)
-    target_raw_cues = _make_cues(target_specs)
-    target_synced_cues = _shift_cues(target_raw_cues, OFFSET)
+    ref_cues = [
+        srt.Subtitle(
+            i + 1,
+            datetime.timedelta(seconds=s),
+            datetime.timedelta(seconds=e),
+            f"Captain Flint english line {i} dialogue.",
+        )
+        for i, (s, e) in enumerate(data["ref"])
+    ]
+    target_raw_cues = [
+        srt.Subtitle(
+            i + 1,
+            datetime.timedelta(seconds=s),
+            datetime.timedelta(seconds=e),
+            f"Kapten Flint svensk replik {i} i Nassau.",
+        )
+        for i, (s, e) in enumerate(data["raw"])
+    ]
+    target_synced_cues = [
+        srt.Subtitle(
+            i + 1,
+            datetime.timedelta(seconds=s),
+            datetime.timedelta(seconds=e),
+            f"Kapten Flint svensk replik {i} i Nassau.",
+        )
+        for i, (s, e) in enumerate(data["synced"])
+    ]
     return ref_cues, target_raw_cues, target_synced_cues
 
 

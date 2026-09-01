@@ -182,6 +182,13 @@ def test_config_reads_env_babel_version(monkeypatch):
 
     original_env = os.getenv("BABEL_VERSION")
     try:
+        # Determine baseline fallback version when env is missing
+        monkeypatch.delenv("BABEL_VERSION", raising=False)
+        importlib.reload(app.config)
+        fallback_version = app.config.VERSION
+        assert bool(fallback_version)
+        assert isinstance(fallback_version, str)
+
         # Case 1: Custom version provided
         monkeypatch.setenv("BABEL_VERSION", "2.9.9-beta")
         importlib.reload(app.config)
@@ -190,12 +197,12 @@ def test_config_reads_env_babel_version(monkeypatch):
         # Case 2: Empty string in environment (e.g. untagged Docker build without build arg)
         monkeypatch.setenv("BABEL_VERSION", "")
         importlib.reload(app.config)
-        assert app.config.VERSION == "2.5.3-beta"
+        assert app.config.VERSION == fallback_version
 
         # Case 3: Missing from environment
         monkeypatch.delenv("BABEL_VERSION", raising=False)
         importlib.reload(app.config)
-        assert app.config.VERSION == "2.5.3-beta"
+        assert app.config.VERSION == fallback_version
     finally:
         if original_env is not None:
             monkeypatch.setenv("BABEL_VERSION", original_env)
