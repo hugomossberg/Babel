@@ -194,7 +194,7 @@ def test_6_plex_test_connection_uses_saved_key_when_masked(client):
         })
         assert resp.status_code == 200
         mock_get.assert_called_once()
-        assert mock_get.call_args[1]["params"]["X-Plex-Token"] == "real_stored_plex_token_999"
+        assert mock_get.call_args[1]["headers"]["X-Plex-Token"] == "real_stored_plex_token_999"
 
 # 7. Jellyfin test connection success
 @pytest.mark.asyncio
@@ -212,7 +212,7 @@ async def test_7_jellyfin_test_connection_success(client):
         assert data["version"] == "v10.8.13"
         assert data["server_name"] == "Homelab-Jellyfin"
         assert mock_get.call_args[0][0] == "http://jellyfin:8096/System/Info"
-        assert mock_get.call_args[1]["headers"]["X-Emby-Token"] == "valid_jf_token"
+        assert mock_get.call_args[1]["headers"]["Authorization"] == 'MediaBrowser Token="valid_jf_token"'
 
 # 8. Jellyfin test connection invalid token
 @pytest.mark.asyncio
@@ -261,7 +261,7 @@ def test_10_jellyfin_test_connection_uses_saved_key_when_masked(client):
         })
         assert resp.status_code == 200
         mock_get.assert_called_once()
-        assert mock_get.call_args[1]["headers"]["X-Emby-Token"] == "real_stored_jf_key_777"
+        assert mock_get.call_args[1]["headers"]["Authorization"] == 'MediaBrowser Token="real_stored_jf_key_777"'
 
 # 11. Plex boundary-safe mapping & longest prefix preference
 def test_11_plex_boundary_safe_mapping_and_longest_prefix():

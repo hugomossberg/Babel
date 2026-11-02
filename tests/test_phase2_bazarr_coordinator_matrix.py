@@ -275,7 +275,7 @@ async def test_matrix_a_fresh_arr_import_absent_then_appears(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_matrix_b_target_search_pending_no_ai_source(tmp_path, monkeypatch):
+async def test_matrix_b_target_search_pending_no_ai_source(tmp_path, monkeypatch, indexed_bazarr_http):
     """
     Matrix B: Target search pending + no AI source -> source failure is not terminal.
     Babel enters waiting source retry or holds for Bazarr without crashing.
@@ -398,7 +398,7 @@ async def test_matrix_e_search_sync_complete_final_trust_pass_bazarr_match(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_matrix_f_search_sync_complete_final_trust_fail_ai_fallback(tmp_path, monkeypatch):
+async def test_matrix_f_search_sync_complete_final_trust_fail_ai_fallback(tmp_path, monkeypatch, indexed_bazarr_http):
     """Matrix F: Search and sync complete + final Trust FAIL -> AI fallback executes."""
     setup_mock_settings(monkeypatch, {
         "bazarr_quiescence_seconds": "0.05",
@@ -436,7 +436,7 @@ async def test_matrix_f_search_sync_complete_final_trust_fail_ai_fallback(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_matrix_g_babel_retry_while_operation_active_no_duplicate(monkeypatch):
+async def test_matrix_g_babel_retry_while_operation_active_no_duplicate(monkeypatch, indexed_bazarr_http):
     """Matrix G: Babel retry while operation active -> attaches to existing without duplicate trigger."""
     coordinator = BazarrCoordinator()
 
@@ -646,7 +646,7 @@ def test_bazarr_coordinator_job_classification_language_boundaries():
 
 
 @pytest.mark.asyncio
-async def test_matrix_i_speculative_ai_running_final_bazarr_pass_human_wins(tmp_path, monkeypatch):
+async def test_matrix_i_speculative_ai_running_final_bazarr_pass_human_wins(tmp_path, monkeypatch, indexed_bazarr_http):
     """Matrix I: Speculative AI running + final Bazarr PASS -> stop further AI, human target wins."""
     setup_mock_settings(monkeypatch, {
         "bazarr_quiescence_seconds": "0.08",
@@ -860,7 +860,7 @@ async def test_matrix_m_en_source_and_target_both_arrive_target_syncing(tmp_path
 # ===========================================================================
 
 @pytest.mark.asyncio
-async def test_matrix_c_2fast2furious_sync_regression(tmp_path, monkeypatch):
+async def test_matrix_c_2fast2furious_sync_regression(tmp_path, monkeypatch, indexed_bazarr_http):
     """
     2 Fast 2 Furious authoritative regression test.
     Bazarr search triggered for movie.

@@ -204,7 +204,7 @@ async def test_scenario_3_new_jobs_use_new_settings():
 
 
 @pytest.mark.asyncio
-async def test_scenario_4_pinning_happens_before_first_ai_call():
+async def test_scenario_4_pinning_happens_before_first_ai_call(empty_gemini_provider):
     """
     TEST 4:
     Verify that job pinning in pipeline logic occurs BEFORE any AI call,

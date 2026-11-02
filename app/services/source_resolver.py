@@ -448,23 +448,10 @@ class SourceResolver:
             if not self.container_tracks.get("audio") and self.container_tracks.get("duration", 0.0) == 0.0:
                 return True
             return False
-        from app.core.languages import get_language, normalize_language_code
+        from app.core.extractor import subtitle_track_language
         norm_target = normalize_language_code(lang_code, default=lang_code).lower()
-        lang_obj = get_language(norm_target)
-        aliases = [norm_target]
-        if lang_obj:
-            aliases.extend([a.lower() for a in lang_obj.aliases])
-            aliases.append(lang_obj.display_name.lower())
-        for trk in sub_tracks:
-            if not isinstance(trk, dict):
-                continue
-            if trk.get("forced"):
-                continue
-            trk_lang = (trk.get("language") or "").lower()
-            norm_trk = normalize_language_code(trk_lang, default=trk_lang).lower()
-            if norm_trk == norm_target or any(a == trk_lang or trk_lang.startswith(a) for a in aliases):
-                return True
-        return False
+        return any(isinstance(trk, dict) and not trk.get("forced")
+                   and subtitle_track_language(trk) == norm_target for trk in sub_tracks)
 
     async def resolve(self) -> Optional[SubtitleSource]:
         """
@@ -472,7 +459,6 @@ class SourceResolver:
 
         Returns SubtitleSource or None if nothing usable was found.
         """
-        from app.core.extractor import extract_embedded_srt, inspect_mkv_tracks
         from app.services.pipeline import _safe_extract_embedded_srt
         import uuid
 
@@ -501,9 +487,18 @@ class SourceResolver:
                     keep_tmp = False
                     try:
                         self._log(f"Source Resolver: attempting extraction of embedded {lang_code.upper()} track...")
+                        def validate_extracted(path):
+                            ok, reason, actual_lang, _ = _validate_source_candidate(
+                                path, lang_code, video_duration_seconds=self.video_duration_seconds)
+                            usable = ok and self._is_usable_for_any_target(actual_lang or lang_code)
+                            if not usable:
+                                reason = reason if not ok else "detected language matches target"
+                                self._log(f"Source Resolver: embedded {lang_code} track rejected: {reason}")
+                            return usable
+
                         def _safe_call_extractor(_vp=self.video_path, _out=tmp, _pl=lang_code, _ti=self.container_tracks, _ce=self.cancel_event):
                             try:
-                                return _safe_extract_embedded_srt(_vp, _out, preferred_lang=_pl, tracks_info=_ti, cancel_event=_ce)
+                                return _safe_extract_embedded_srt(_vp, _out, preferred_lang=_pl, tracks_info=_ti, cancel_event=_ce, candidate_validator=validate_extracted)
                             except TypeError:
                                 try:
                                     return _safe_extract_embedded_srt(_vp, _out, preferred_lang=_pl, tracks_info=_ti)
@@ -517,7 +512,7 @@ class SourceResolver:
                                 video_duration_seconds=self.video_duration_seconds,
                             )
                             content = _read_file_safe(tmp)
-                            if ok and content:
+                            if ok and content and self._is_usable_for_any_target(actual_lang or lang_code):
                                 effective_lang = actual_lang or lang_code
                                 if reason == "mislabeled":
                                     self._log(
@@ -560,7 +555,7 @@ class SourceResolver:
                     video_duration_seconds=self.video_duration_seconds,
                 )
                 content = _read_file_safe(external)
-                if ok and content:
+                if ok and content and self._is_usable_for_any_target(actual_lang or lang_code):
                     effective_lang = actual_lang or lang_code
                     if reason == "mislabeled":
                         self._log(
@@ -584,6 +579,27 @@ class SourceResolver:
                     self._log(
                         f"Source Resolver: external {lang_code} subtitle rejected: {reason}"
                     )
+
+        # A same-basename, untagged SRT is a common manual sidecar. Its language
+        # must be established from content, never inferred from the audio track.
+        bare_sidecar = f"{base_path}.srt"
+        if os.path.isfile(bare_sidecar):
+            content = _read_file_safe(bare_sidecar)
+            try:
+                sample = " ".join(c.content for c in list(srt.parse(content or ""))[:50])
+                detected = detect_language_heuristics(sample, expected_language="und")
+                language = normalize_language_code(detected.get("lang", "und"))
+                if (detected.get("confidence", 0) > 0.85 and language not in ("und", "unknown")
+                        and self._is_usable_for_any_target(language)):
+                    ok, reason, actual_lang, cues = _validate_source_candidate(
+                        bare_sidecar, language, video_duration_seconds=self.video_duration_seconds)
+                    if ok and self._is_usable_for_any_target(actual_lang or language):
+                        self._log(f"Source Resolver: untagged external {actual_lang or language} source selected ({len(cues)} cues)")
+                        return SubtitleSource(language=actual_lang or language, origin=SourceOrigin.EXTERNAL,
+                                              path=bare_sidecar, content=content, cues=cues,
+                                              metadata={"declared_language": "und", "reason": reason})
+            except (ValueError, TypeError, srt.SRTParseError):
+                pass
 
         # --- PRIORITY 6: Bazarr source fallback ---
         if not self.enable_bazarr or not self.bazarr_api_key:
@@ -701,7 +717,7 @@ class SourceResolver:
                         video_duration_seconds=self.video_duration_seconds,
                     )
                     content = _read_file_safe(found)
-                    if ok and content:
+                    if ok and content and self._is_usable_for_any_target(actual_lang or lang_code):
                         effective_lang = actual_lang or lang_code
                         self._log(
                             f"Source Resolver: Bazarr provided {effective_lang} source "
@@ -753,9 +769,10 @@ class SourceResolver:
         _add("en")
 
         # Container subtitle track languages (dynamic discovery)
+        from app.core.extractor import subtitle_track_language
         if self.container_tracks and isinstance(self.container_tracks, dict):
             for trk in self.container_tracks.get("subtitles", []):
-                t_lang = trk.get("language")
+                t_lang = subtitle_track_language(trk)
                 if t_lang:
                     _add(t_lang)
 

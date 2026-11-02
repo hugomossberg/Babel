@@ -177,7 +177,7 @@ def test_stratified_language_qa_sampling_all_swedish():
 # 3. PROVIDER ERROR BUBBLING (Never masked as semantic deadlock)
 # ===========================================================================
 @pytest.mark.asyncio
-async def test_provider_error_not_masked_as_deadlock(tmp_path, monkeypatch):
+async def test_provider_error_not_masked_as_deadlock(tmp_path, monkeypatch, empty_gemini_provider):
     """If provider throws ProviderUnavailableError in recovery, it must fail or wait, never PASS_WITH_WARNINGS."""
     video = tmp_path / "TestShow.S01E01.mkv"
     video.touch()

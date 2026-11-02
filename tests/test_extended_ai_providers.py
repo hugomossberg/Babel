@@ -336,11 +336,13 @@ async def test_contextual_escalation_with_extended_providers(translator):
 # 5. DYNAMIC MODEL CATALOG, CACHING & FALLBACK
 # ============================================================================
 
-def test_model_catalog_endpoint_and_cache(client):
+def test_model_catalog_endpoint_and_cache(client, monkeypatch):
     """Verify /api/settings/models endpoint with caching and fallback."""
     from app.api.dashboard import _MODELS_CACHE
     _MODELS_CACHE.clear()
-    set_setting("gemini_api_key", "")
+    # Static fallback is intentional here; keys left by other tests must not
+    # turn this into live provider discovery.
+    monkeypatch.setattr('app.api.dashboard.resolve_secret_key', lambda *args: '')
     # Gemini models
     resp_gemini = client.get("/api/settings/models?provider=gemini")
     assert resp_gemini.status_code == 200
@@ -356,7 +358,7 @@ def test_model_catalog_endpoint_and_cache(client):
     resp_ds = client.get("/api/settings/models?provider=deepseek")
     assert resp_ds.status_code == 200
     ds_models = [m["id"] for m in resp_ds.json()["models"]]
-    assert "deepseek-v4-flash" in ds_models
+    assert "deepseek-flash" in ds_models
 
     # OpenRouter models (mocked or fallback)
     with patch("httpx.AsyncClient.get") as mock_async_get:

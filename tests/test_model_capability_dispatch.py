@@ -55,7 +55,7 @@ def test_openai_capabilities():
         assert caps.thinking_control is False, f"{m} must have thinking_control=False"
         assert caps.temperature_requires_no_reasoning is False
         assert caps.default_reasoning_effort is None
-        assert caps.structured_output is True
+        assert caps.structured_output is (m not in ("gpt-4-turbo", "gpt-3.5-turbo"))
         assert caps.json_object is True
 
     # 2. GPT-5.6 Flagship and GPT-5.5: default reasoning = "medium", supports reasoning "none"

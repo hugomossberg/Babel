@@ -139,8 +139,9 @@ class BazarrProvenance:
 
 # Named constant: maximum confidence score when standalone/unverified (below PASS threshold 85)
 MAX_UNVERIFIED_SCORE = 75
-# Cache schema version: bumped to v3 to invalidate any weak reference-fingerprint PASS results
-SCHEMA_VERSION = 3
+# Trust-policy version: re-evaluate older cached verdicts with boundary-based
+# timing estimation. The on-disk table remains backwards compatible.
+SCHEMA_VERSION = 4
 
 # Lifecycle timing defaults for Bazarr / External candidate verification:
 # 1. Generation read stability: short window proving generation is un-torn and safe to read
@@ -1153,8 +1154,9 @@ def estimate_global_offset(
     Deterministic estimation of a single constant timing offset between candidate
     and reference timeline.
     Operates purely on subtitle timing/activity intervals, not translated text.
-    Searches a bounded offset window, discovers candidate peaks via center-point
-    clustering, evaluates timeline interval overlap, and refines to exact median offset.
+    Searches a bounded offset window, discovers activity-boundary peaks and
+    selects the offset with greatest interval overlap. Cue centers cannot refine
+    this estimate: consolidation changes centers without changing dialogue timing.
     Returns estimated offset in seconds (where target_time - offset = ref_time),
     or None if no dominant constant offset can be determined.
     """
@@ -1173,22 +1175,32 @@ def estimate_global_offset(
     if dur_r <= 0.0 or dur_t <= 0.0:
         return None
 
-    sample_indices = set()
-    sample_indices.update(range(min(40, len_t)))
-    mid_start = max(0, len_t // 2 - 20)
-    sample_indices.update(range(mid_start, min(len_t, mid_start + 40)))
-    sample_indices.update(range(max(0, len_t - 40), len_t))
-
-    t_samples = [t_real[i] for i in sorted(sample_indices)]
-
     diffs: List[float] = []
-    for t_c in t_samples:
-        t_center = (t_c.start.total_seconds() + t_c.end.total_seconds()) / 2.0
-        for r_c in r_real:
-            r_center = (r_c.start.total_seconds() + r_c.end.total_seconds()) / 2.0
-            d = t_center - r_center
-            if abs(d) <= max_search_offset_sec:
-                diffs.append(d)
+
+    def add_boundary_hypotheses(target_intervals, reference_intervals):
+        # Stratify over the beginning, middle and end: at most 120 targets
+        # per representation, independent of subtitle length.
+        count = len(target_intervals)
+        samples = set(range(min(40, count)))
+        mid = max(0, count // 2 - 20)
+        samples.update(range(mid, min(count, mid + 40)))
+        samples.update(range(max(0, count - 40), count))
+        for i in sorted(samples):
+            t_start, t_end = target_intervals[i]
+            for r_start, r_end in reference_intervals:
+                for d in (t_start - r_start, t_end - r_end):
+                    if abs(d) <= max_search_offset_sec:
+                        diffs.append(d)
+
+    # Merged activity is invariant to adjacent cue splitting. Also retain raw
+    # boundaries if merging collapsed cues: a continuous speech region must
+    # not lose the repeated evidence needed to detect a timing contradiction.
+    add_boundary_hypotheses(t_intervals, r_intervals)
+    if len(t_intervals) != len_t or len(r_intervals) != len_r:
+        add_boundary_hypotheses(
+            [(c.start.total_seconds(), c.end.total_seconds()) for c in t_real],
+            [(c.start.total_seconds(), c.end.total_seconds()) for c in r_real],
+        )
 
     if not diffs:
         return None
@@ -1199,16 +1211,20 @@ def estimate_global_offset(
     if not top_bins:
         return None
 
-    if 0.0 not in top_bins:
-        top_bins.append(0.0)
+    candidates = {0.0}
+    for b in top_bins:
+        cluster = [x for x in diffs if abs(x - b) <= 0.5]
+        # Half-second bins discover peaks, but their median can mix nearby
+        # unrelated boundaries. Retain repeated millisecond peaks as well.
+        precise = _pycol.Counter(round(x, 3) for x in cluster)
+        candidates.update(value for value, count in precise.most_common(3) if count >= 3)
+        if cluster:
+            candidates.add(statistics.median(cluster))
 
     best_offset = None
     best_overlap = -1.0
 
-    for b in top_bins:
-        cluster = [x for x in diffs if abs(x - b) <= 0.5]
-        cand_off = statistics.median(cluster) if cluster else float(b)
-
+    for cand_off in sorted(candidates, key=lambda value: (abs(value), value)):
         t_shifted = [(max(0.0, s - cand_off), max(0.0, e - cand_off)) for s, e in t_intervals]
         overlap = _intersect_interval_lists(r_intervals, t_shifted)
 
@@ -1240,8 +1256,10 @@ def estimate_global_offset(
     if refine_align.matched_cue_pairs_count < 10:
         return None
 
-    exact_offset = best_offset + refine_align.median_offset_sec
-    return round(exact_offset, 3)
+    # The greedy cue aligner may match one consolidated cue to either half of
+    # its reference dialogue. Its median is therefore a segmentation bias, not
+    # a residual timing correction. Keep the independently proven overlap peak.
+    return round(best_offset, 3)
 
 
 # ---------------------------------------------------------------------------

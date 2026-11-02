@@ -137,7 +137,7 @@ async def test_escalation_all_normalized_echoes_exhaust(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_targeted_recovery_rejects_normalized_echo(tmp_path, monkeypatch):
+async def test_targeted_recovery_rejects_normalized_echo(tmp_path, monkeypatch, empty_gemini_provider):
     """Test 4: Targeted recovery does not count false success for normalized echoes."""
     def mock_get_setting(key, default=""):
         settings = {
@@ -223,7 +223,7 @@ async def test_targeted_recovery_rejects_normalized_echo(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_escalation_defense_in_depth(tmp_path, monkeypatch):
+async def test_pipeline_escalation_defense_in_depth(tmp_path, monkeypatch, empty_gemini_provider):
     """Test 5: Pipeline escalation wrapper rejects normalized echoes even if returned by translator."""
     def mock_get_setting(key, default=""):
         settings = {

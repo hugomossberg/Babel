@@ -413,7 +413,7 @@ async def test_coordinator_same_media_idempotent_race_single_trigger():
 
 
 @pytest.mark.asyncio
-async def test_coordinator_owner_cancellation_does_not_strand_waiters():
+async def test_coordinator_owner_cancellation_does_not_strand_waiters(indexed_bazarr_http):
     """Cancellation of operation owner does not strand waiters or leave op permanent."""
     coordinator = BazarrCoordinator()
     coordinator.reset()

@@ -132,7 +132,7 @@ def test_gemini_endpoint_live_discovery(client):
 # 3. OPENAI FILTERING & DISCOVERY
 # ============================================================================
 
-def test_filter_openai_models_removes_non_text_and_snapshots():
+def test_filter_openai_models_removes_non_text_and_prefers_listed_aliases():
     """OpenAI filter retains standard text models and removes transcription, TTS, image, embeddings, and dated snapshots."""
     raw_models = [
         {"id": "gpt-4o"},
@@ -159,7 +159,7 @@ def test_filter_openai_models_removes_non_text_and_snapshots():
 
     assert "gpt-4o" in ids
     assert "gpt-4o-mini" in ids
-    assert "o1-mini" in ids
+    assert "o1-mini" not in ids  # Official API retirement: 2025-10-27.
     assert "o3-mini" in ids
     assert "chatgpt-4o-latest" in ids
     assert "gpt-5.6-terra" in ids
@@ -175,7 +175,7 @@ def test_filter_openai_models_removes_non_text_and_snapshots():
     assert "gpt-4o-audio-preview" not in ids
     assert "gpt-4o-2024-08-06" not in ids
     assert "o1-mini-2024-09-12" not in ids
-    assert "gpt-4-0613" not in ids
+    assert "gpt-4-0613" in ids  # Standalone Chat Completions snapshot has no listed alias.
     assert "ft:gpt-4o:my-org:custom-001" not in ids
 
 
@@ -260,14 +260,14 @@ def test_openrouter_exact_ids_preserved():
 def test_filter_anthropic_models_preserves_display_name_and_exact_id():
     """Anthropic discovery uses display_name for UI and exact ID internally."""
     raw = [
-        {"id": "claude-3-7-sonnet-20250219", "display_name": "Claude 3.7 Sonnet"},
-        {"id": "claude-3-5-haiku-20241022", "display_name": "Claude 3.5 Haiku"},
+        {"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5"},
+        {"id": "claude-haiku-5-5", "display_name": "Claude Haiku 5.5"},
     ]
     filtered = filter_anthropic_models(raw)
-    assert filtered[0]["id"] == "claude-3-7-sonnet-20250219"
-    assert filtered[0]["name"] == "Claude 3.7 Sonnet"
-    assert filtered[1]["id"] == "claude-3-5-haiku-20241022"
-    assert filtered[1]["name"] == "Claude 3.5 Haiku"
+    assert filtered[0]["id"] == "claude-sonnet-5"
+    assert filtered[0]["name"] == "Claude Sonnet 5"
+    assert filtered[1]["id"] == "claude-haiku-5-5"
+    assert filtered[1]["name"] == "Claude Haiku 5.5"
 
 
 def test_filter_ollama_and_custom_not_overfiltered():
@@ -286,7 +286,7 @@ def test_filter_ollama_and_custom_not_overfiltered():
     custom_raw = [
         {"id": "custom-vllm-mistral-large"},
         {"id": "fine-tuned-translation-model-v2"},
-        {"id": "text-embedding-ada-002"},  # Should be filtered
+        {"id": "text-embedding-ada-002", "output_modalities": ["embedding"]},  # Declared incompatible
     ]
     filtered_custom = filter_custom_models(custom_raw)
     custom_ids = [m["id"] for m in filtered_custom]
@@ -345,31 +345,22 @@ def test_deepl_backward_compatibility():
 
 def test_refresh_models_bypasses_cache(client):
     """Passing refresh=true forces a new discovery and updates the cache."""
-    import time
     from app.api.dashboard import _MODELS_CACHE
-    _MODELS_CACHE["openrouter:"] = (
-        time.time(),
-        [{"id": "stale/model", "name": "Stale Model"}]
-    )
-
-    # Without refresh, returns cached data
-    resp_cached = client.get("/api/settings/models?provider=openrouter")
-    assert resp_cached.json()["cached"] is True
-    assert resp_cached.json()["models"][0]["id"] == "stale/model"
-
-    # With refresh=true, bypasses cache and queries live/fallback
-    mock_data = {
-        "data": [
-            {"id": "meta-llama/llama-3.3-70b-instruct", "name": "Meta: Llama 3.3 70B", "architecture": {"output_modalities": ["text"]}}
-        ]
-    }
+    _MODELS_CACHE.clear()
     with patch("httpx.AsyncClient.get") as mock_get:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.json.return_value = mock_data
+        mock_resp.json.return_value = {"data": [{"id": "stale/model", "name": "Stale Model"}]}
         mock_get.return_value = mock_resp
-
+        assert client.get("/api/settings/models?provider=openrouter").json()["source"] == "live"
+        resp_cached = client.get("/api/settings/models?provider=openrouter")
+        assert resp_cached.json()["cached"] is True
+        assert resp_cached.json()["models"][0]["id"] == "stale/model"
+        assert mock_get.call_count == 1
+        mock_resp.json.return_value = {"data": [{"id": "meta-llama/llama-3.3-70b-instruct", "name": "Meta: Llama 3.3 70B", "architecture": {"output_modalities": ["text"]}}]}
         resp_fresh = client.get("/api/settings/models?provider=openrouter&refresh=true")
         assert resp_fresh.status_code == 200
         assert resp_fresh.json()["cached"] is False
+        assert resp_fresh.json()["source"] == "live"
         assert resp_fresh.json()["models"][0]["id"] == "meta-llama/llama-3.3-70b-instruct"
+        assert mock_get.call_count == 2

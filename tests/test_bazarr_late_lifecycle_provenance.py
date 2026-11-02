@@ -29,6 +29,7 @@ from app.core.trust_engine import (
     SubtitleTrustEngine,
     TargetSnapshot,
     TrustDecision,
+    TrustResult,
     align_subtitle_timelines,
     capture_target_snapshot,
     SyncErrorType,
@@ -529,6 +530,9 @@ async def test_case_g_pipeline_trust_gate_uses_bazarr_origin_for_current_run(tmp
             bazarr_media_correlated=True,
         )
 
+    assert result["published"] is False
+    assert result["skipped"] is True
+    assert result["reason"] == "authoritative_target_passed"
     assert len(captured_calls) >= 1
     call = captured_calls[0]
     assert call["origin"] == CandidateOrigin.BAZARR
@@ -621,6 +625,9 @@ async def test_case_g2_mutation_after_ownership_drops_provenance(tmp_path):
             bazarr_media_correlated=True,
         )
 
+    assert result["published"] is False
+    assert result["skipped"] is True
+    assert result["reason"] == "authoritative_target_passed"
     assert len(captured_calls) >= 1, "Trust Engine must have been called during final conflict"
     call = captured_calls[0]
     # Invariant verified: generation B MUST NOT inherit strong Bazarr provenance or quiescence
@@ -671,7 +678,7 @@ async def test_case_h_pipeline_trust_gate_uses_external_without_provenance(tmp_p
          patch("app.services.pipeline.find_external_subtitle", side_effect=lambda vp, lang: str(sv_file) if lang == "sv" else None), \
          patch.object(SubtitleTrustEngine, "_evaluate_candidate_internal", _mock_evaluate):
 
-        await _publish_subtitle_with_trust_gate(
+        result = await _publish_subtitle_with_trust_gate(
             video_path=video_path,
             target_output_path=str(sv_file),
             lang_code="sv",
@@ -680,6 +687,9 @@ async def test_case_h_pipeline_trust_gate_uses_external_without_provenance(tmp_p
             job_id=None,
         )
 
+    assert result["published"] is False
+    assert result["skipped"] is True
+    assert result["reason"] == "authoritative_target_passed"
     assert len(captured_calls) >= 1
     call = captured_calls[0]
     assert call["origin"] == CandidateOrigin.EXTERNAL

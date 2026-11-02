@@ -521,7 +521,7 @@ KNOWN_MEASUREMENT_UNITS = {
     'psi', 'rpm', 'min', 'sec', 'sek', 's', 'h', 'tim', 'db', 'cal',
     'kcal', 'oz', 'lb', 'ft', 'yd', 'in', 'pt', 'px', 'em', 'rem', 'µg', 'µm'
 }
-KNOWN_ORDINAL_SUFFIXES = {'st', 'nd', 'rd', 'th', 'er', 're', 'e', 'eme', 'ème', 'a', 'an', 'en', 'te', 'de'}
+KNOWN_ORDINAL_SUFFIXES = {'st', 'nd', 'rd', 'th', 'er', 're', 'e', 'eme', 'ème', 'a', 'an', 'en', 'te', 'de', 'ª', 'º'}
 
 def extract_digit_leading_letter_tokens(text: str) -> List[Tuple[str, str, str]]:
     """

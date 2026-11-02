@@ -2,7 +2,7 @@ aiofiles==25.1.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.14.2
-certifi==2026.7.22
+certifi==2026.10.19
 cffi==2.1.1
 charset-normalizer==3.5.1
 click==8.4.2
@@ -28,7 +28,7 @@ mccabe==0.7.0
 openai==3.3.1
 packaging==26.3
 pluggy==1.6.0
-pyasn1==0.6.4
+pyasn1==0.6.5
 pyasn1_modules==0.4.2
 pycodestyle==2.14.0
 pycparser==3.0
@@ -50,7 +50,7 @@ tenacity==9.1.4
 truststore==0.10.4
 typing-inspection==0.4.4
 typing_extensions==4.16.0
-urllib3==2.7.0
+urllib3==2.8.0
 uvicorn==0.52.4
 uvloop==0.22.1
 watchfiles==1.2.0

@@ -81,7 +81,7 @@ async def test_never_give_up_recovers_in_loop(setup_teardown_db):
     assert parsed[2].content == "Mer svensk text"
 
 @pytest.mark.asyncio
-async def test_never_give_up_fails_all_loops(setup_teardown_db):
+async def test_never_give_up_fails_all_loops(setup_teardown_db, empty_gemini_provider):
     """C) All 3 internal QA loops fail -> status RECOVERING. Background worker picks it up."""
     video_path = setup_teardown_db
     job_id = create_job(video_path, "MANUAL")

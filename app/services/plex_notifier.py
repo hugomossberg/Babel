@@ -23,15 +23,10 @@ async def check_plex_connection(url: str, token: str) -> Dict[str, Any]:
         return {"connected": False, "message": "No Plex Token provided or saved"}
 
     endpoint = f"{clean_url}/library/sections"
-    headers = {
-        "Accept": "application/xml",
-    }
-    params = {
-        "X-Plex-Token": token,
-    }
+    headers = {"Accept": "application/xml", "X-Plex-Token": token}
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            res = await client.get(endpoint, headers=headers, params=params)
+            res = await client.get(endpoint, headers=headers)
             if res.status_code == 200:
                 try:
                     root = ET.fromstring(res.text)
@@ -50,7 +45,7 @@ async def check_plex_connection(url: str, token: str) -> Dict[str, Any]:
     except httpx.ConnectError:
         return {"connected": False, "message": "Unable to reach Plex server"}
     except Exception as e:
-        logger.warning(f"Plex connection test error: {e}")
+        logger.warning("Plex connection test failed (%s)", type(e).__name__)
         return {"connected": False, "message": "Connection failed"}
 
 
@@ -103,7 +98,7 @@ def _map_to_plex_path(local_path: str) -> str:
 
 async def _get_sections(client: httpx.AsyncClient, url: str, token: str) -> List[Tuple[str, List[str]]]:
     """Returns [(section_key, [location_paths])] for every library section."""
-    res = await client.get(f"{url}/library/sections", params={"X-Plex-Token": token})
+    res = await client.get(f"{url}/library/sections", headers={"Accept": "application/xml", "X-Plex-Token": token})
     if res.status_code != 200:
         logger.warning(f"Plex returned status {res.status_code} listing library sections")
         return []
@@ -175,10 +170,10 @@ async def notify_plex_library_refresh(published_path: Optional[str] = None):
 
             for key in target_keys:
                 res = await client.get(f"{url}/library/sections/{key}/refresh",
-                                       params={"X-Plex-Token": token})
+                                       headers={"Accept": "application/xml", "X-Plex-Token": token})
                 if res.status_code in (200, 201, 204):
                     logger.info(f"Triggered Plex scan for library section {key}")
                 else:
                     logger.warning(f"Plex scan for section {key} returned status {res.status_code}")
     except Exception as e:
-        logger.warning(f"Could not notify Plex: {e}")
+        logger.warning("Could not notify Plex (%s)", type(e).__name__)

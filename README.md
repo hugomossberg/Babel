@@ -97,6 +97,7 @@ Babel treats AI providers as **untrusted components**. Every generated subtitle 
 - **Embedded Track Extraction:** Extracts embedded text subtitle tracks directly from MKV/MP4 containers with `ffmpeg`/`mkvextract`.
 - **Existing Subtitle Protection:** Detects existing target language subtitles and skips redundant translation.
 - **Bazarr Coordination:** In Hybrid Mode, checks Bazarr for human subtitles while preparing AI fallback, eliminating fixed delay windows.
+- **Grace Period:** Under Settings → Integrations → Bazarr, configure days and hours (up to 365 days) before automatic AI fallback for new Sonarr/Radarr jobs. The default is **0 hours**, preserving immediate preparation. Waiting jobs survive restarts and retain their original start across scans; changing the duration applies from that start. Babel checks for eligible targets at most every 15 minutes during the wait, without repeated Bazarr search requests. At expiry, Bazarr gets another bounded search opportunity before the existing validated AI fallback. **Translate now** or a manual request bypasses the wait on the same job. Grace requires Hybrid Mode and a configured Bazarr API key; disabling either releases waiting jobs. Existing recovery and provider-retry jobs do not acquire a new grace period.
 - **Source Fallback:** Automatically falls back to external source files (`.en.srt`) or Bazarr-downloaded source tracks if embedded tracks are absent.
 
 ### AI Translation Engine
@@ -106,6 +107,7 @@ Babel treats AI providers as **untrusted components**. Every generated subtitle 
   - **DeepL** (Free and Pro API)
   - **Ollama / Local Models** (local OpenAI-compatible or Ollama endpoints)
 - **Batch Processing:** Processes subtitles in optimal chunks (default: 50 lines) to minimize token overhead and latency while maintaining context.
+- **Configurable Request Timeout:** Under Settings → AI, set **AI Request Timeout (Seconds)** to 1–3600 for slower inference, including CPU-only Ollama. `0` preserves existing provider defaults (60 seconds for Ollama). The override applies to translation, QA, and recovery; it is a per-request transport timeout, and SDK retries may extend total elapsed time. A timeout stops the current pass, keeps completed batch checkpoints, and allows up to three automatic job retries before requiring a manual retry. Increase the timeout or reduce batch size before retrying. QA validation still runs before publication.
 - **Context-Aware Translation:** Uses dialogue context and optional series-specific glossaries for consistent terminology.
 
 ### Multi-Stage Automatic Recovery
@@ -252,6 +254,8 @@ Configure your preferred settings:
 ---
 
 ## Updating Babel
+
+See the [v2.5.6-beta release notes](docs/releases/v2.5.6-beta.md) for Grace Period, model discovery, security updates and upgrade requirements. The [changelog](CHANGELOG.md) lists the changes in this beta.
 
 ### Recommended: One-Click In-App Updates
 If you use the recommended Docker Compose setup with `babel-updater`:
@@ -454,6 +458,27 @@ pytest -v
 ```bash
 docker build -t babel:local .
 ```
+
+### 4. Run the complete suite without external network access
+
+The test image adds Node for the Alpine component tests; it does not change the
+runtime image. Tests use temporary databases and deterministic provider HTTP
+responses. Unmocked external Python network attempts fail the test, including
+when application error handling catches the network exception.
+
+```bash
+docker build -f tests/Dockerfile --build-arg BABEL_TEST_BASE=babel:local -t babel:tests tests
+docker run --rm --network none --read-only --tmpfs /tmp:rw,size=256m,mode=1777 \
+  -e BABEL_DB_PATH=/tmp/babel-tests/babel.db \
+  -e PYTHONPATH=/app -e PYTHONDONTWRITEBYTECODE=1 \
+  -v "$PWD/tests:/app/tests:ro" -v "$PWD/.github:/app/.github:ro" \
+  babel:tests python -m pytest -q -p no:cacheprovider
+```
+
+Tests use the image version; updater fixtures choose their test releases independently.
+The workflow mount supplies source files intentionally excluded
+from the runtime image. Neither production data nor a Docker socket is mounted.
+For a complete native run, install Node before running pytest as well.
 
 ---
 

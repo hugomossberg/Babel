@@ -47,7 +47,7 @@ from app.core.db import (
 )
 from app.services.bazarr_checker import check_existing_swedish_subtitle, check_existing_english_subtitle, find_external_subtitle
 from app.services.translator import (
-    SubtitleTranslator, is_usable_translation, is_meaningful_translation, ProviderUnavailableError,
+    SubtitleTranslator, is_usable_translation, is_meaningful_translation, ProviderUnavailableError, ProviderRequestTimeout,
     ProviderConfigurationError, get_provider_capabilities, is_deterministically_safe_keep,
     normalize_for_compare, is_safe_keep_prefilter, has_entity_evidence,
     is_strictly_valid_entity_candidate, is_valid_shared_or_entity_keep,
@@ -74,10 +74,11 @@ from app.core.languages import normalize_language_code, get_language as _get_lan
 
 logger = logging.getLogger("babel.pipeline")
 
-def _safe_extract_embedded_srt(video_path: str, output_srt_path: str, preferred_lang: str = "eng", tracks_info: Optional[Dict[str, Any]] = None, cancel_event: Optional[Any] = None) -> bool:
+def _safe_extract_embedded_srt(video_path: str, output_srt_path: str, preferred_lang: str = "eng", tracks_info: Optional[Dict[str, Any]] = None, cancel_event: Optional[Any] = None, candidate_validator=None) -> bool:
     """Invokes extract_embedded_srt safely supporting cached tracks_info, cancel_event, and legacy mock signatures."""
     try:
-        return extract_embedded_srt(video_path, output_srt_path, preferred_lang=preferred_lang, tracks_info=tracks_info, cancel_event=cancel_event)
+        validation_args = {"candidate_validator": candidate_validator} if candidate_validator is not None else {}
+        return extract_embedded_srt(video_path, output_srt_path, preferred_lang=preferred_lang, tracks_info=tracks_info, cancel_event=cancel_event, **validation_args)
     except TypeError:
         try:
             return extract_embedded_srt(video_path, output_srt_path, preferred_lang=preferred_lang, tracks_info=tracks_info)
@@ -1222,8 +1223,12 @@ class SubtitlePipeline:
         # Key presence indicates an audit was attempted; value AUDIT_FAILED marks the failure.
         _AUDIT_CHUNK_FAILED = "AUDIT_FAILED"
 
+        audit_timed_out = asyncio.Event()
+
         async def _audit_sub_chunk(chunk):
             async with sem:
+                if audit_timed_out.is_set():
+                    return {}
                 try:
                     result = await self.translator.audit_batch_semantic_integrity(
                         chunk,
@@ -1235,13 +1240,19 @@ class SubtitlePipeline:
                     # An empty dict here means translator-level exception (already logged).
                     # Return the raw result; missing batch_ids are handled below per-batch.
                     return result
+                except ProviderRequestTimeout:
+                    audit_timed_out.set()
+                    raise
                 except Exception as e:
                     logger.warning(f"Consolidated semantic batch audit chunk failed: {e}")
                     # Return each requested batch_id mapped to failure sentinel so that
                     # per-batch logic below can mark them UNCERTAIN (fail-closed).
                     return {bp["batch_id"]: _AUDIT_CHUNK_FAILED for bp in chunk}
 
-        results_list = await asyncio.gather(*(_audit_sub_chunk(c) for c in audit_chunks)) if audit_chunks else []
+        results_list = await asyncio.gather(*(_audit_sub_chunk(c) for c in audit_chunks), return_exceptions=True) if audit_chunks else []
+        for result in results_list:
+            if isinstance(result, BaseException):
+                raise result
         consolidated_results = {}
         for r in results_list:
             consolidated_results.update(r)
@@ -2420,6 +2431,9 @@ class SubtitlePipeline:
 
         start_time = time.time()
         job_data = get_job_by_id(job_id) if job_id else None
+        grace_first_dispatch = bool(job_data and job_data.get("grace_started_at")
+                                    and not job_data.get("primary_provider")
+                                    and not job_data.get("processed_lines"))
         prev_dur = float(job_data.get("duration_seconds") or 0.0) if job_data else 0.0
         # Sentinel vars so exception handlers don't NameError if raised before assignment
         source_subtitle = None
@@ -2720,6 +2734,23 @@ class SubtitlePipeline:
             if has_materialized_embedded:
                 await self._notify_media_servers(video_path)
             return {"status": "skipped", "reason": "already_exists", "job_id": job_id}
+        # Grace precedes source preparation (including any SDH/QA AI calls).
+        # Existing target eligibility above remains authoritative during waiting.
+        from app.core.db import apply_grace_period, MAX_GRACE_PERIOD_HOURS
+        grace_hours = get_int_setting("grace_period_hours", 0, min_val=0, max_val=MAX_GRACE_PERIOD_HOURS)
+        grace_expired = False
+        if grace_hours or (job_data and job_data.get("grace_started_at")):
+            grace = apply_grace_period(
+                job_id, "MANUAL" if force_retranslate else event_source,
+                grace_hours if enable_bazarr and bazarr_api_key else 0,
+            )
+            if grace["waiting"]:
+                if grace.get("changed"):
+                    append_job_log(job_id, f"Grace Period: waiting for Bazarr subtitles until {grace['until']}. Manual translation can bypass this wait.")
+                update_job(job_id, duration_seconds=round(prev_dur + time.time() - start_time, 2))
+                return {"status": "waiting_grace", "job_id": job_id, "grace_until": grace["until"]}
+            grace_expired = grace["expired"]
+
         # Design:
         #   1. Trigger Bazarr TARGET searches immediately (fire-and-forget HTTP PATCH).
         #   2. Run source resolution concurrently with a lightweight target-presence
@@ -2827,6 +2858,15 @@ class SubtitlePipeline:
                         logger.warning(f"Bazarr target search {_lc}: {_e}")
                 _bt = asyncio.create_task(_do_btarget(), name=f"bazarr_tgt_{job_id}_{_blc}")
                 bazarr_tasks.append(_bt)
+
+        if grace_expired and bazarr_tasks:
+            # A ready local source must not cancel the post-grace search before
+            # Bazarr accepts it. Keep this extra opportunity bounded; subsequent
+            # target discovery, lifecycle coordination and QA remain unchanged.
+            try:
+                await asyncio.wait_for(asyncio.gather(*bazarr_tasks), timeout=20.0)
+            except asyncio.TimeoutError:
+                append_job_log(job_id, "Grace Period expired: Bazarr search timed out; continuing normal fallback checks.")
 
         # Step 2: Source Resolution — runs concurrently with target polling.
         append_job_log(job_id, "Source Resolver: scanning for usable source subtitle...")
@@ -3417,7 +3457,7 @@ class SubtitlePipeline:
                 pass
 
             is_resumed_job = (
-                event_source == "RETRY"
+                (event_source == "RETRY" and not grace_first_dispatch)
                 or (job_snapshot and job_snapshot.get("retry_count", 0) > 0)
                 or (job_snapshot and job_snapshot.get("processed_lines", 0) > 0)
             )
@@ -3898,6 +3938,7 @@ class SubtitlePipeline:
                                     caps = get_model_capabilities(primary_ctx.provider, primary_ctx.model)
                                     if caps.semantic_audit:
                                         recovery_results = []
+                                        recovery_timeout = None
                                         chunk_size = 20
                                         for i in range(0, len(recovery_payload), chunk_size):
                                             chunk = recovery_payload[i:i + chunk_size]
@@ -3917,6 +3958,11 @@ class SubtitlePipeline:
                                                         source_language=source_subtitle.language_name if source_subtitle else "source",
                                                     )
                                                 recovery_results.extend(chunk_res)
+                                            except ProviderRequestTimeout as exc:
+                                                # Validate and retain completed chunks below before
+                                                # stopping the pass. Do not start remaining chunks.
+                                                recovery_timeout = exc
+                                                break
                                             except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
                                                 raise
                                             except Exception as e:
@@ -3972,6 +4018,14 @@ class SubtitlePipeline:
                                                         safe_ids.append(idx)
                                                     append_job_log(job_id, f"QA Recovery: Valid shared translation for cue {idx + 1}")
                                                     recovered_cues.add(idx)
+                                        if recovery_timeout is not None:
+                                            saved = self.translator.save_partial_progress(subs, translated_subs, lang_name, job_id)
+                                            message = (
+                                                "candidate progress checkpointed; QA will run again on retry."
+                                                if saved else "could not checkpoint candidates; primary batch progress retained."
+                                            )
+                                            append_job_log(job_id, f"QA recovery timeout: {message}")
+                                            raise recovery_timeout
                                     else:
                                         # Deterministic fallback for DeepL
                                         recovery_results = []
@@ -4879,6 +4933,17 @@ class SubtitlePipeline:
 
             job_data = get_job_by_id(job_id)
             current_retries = job_data.get("retry_count", 0) if job_data else 0
+
+            # A too-small timeout cannot be fixed by endlessly repeating inference.
+            # Keep successful primary-batch checkpoints for a manual retry after
+            # adjusting settings. Other provider failures retain their existing policy.
+            if isinstance(e, ProviderRequestTimeout) and current_retries >= 3:
+                append_job_log(job_id, f"REQUEST TIMEOUT: automatic retry limit reached. {e}")
+                update_job(
+                    job_id, status="FAILED", error_message=str(e),
+                    duration_seconds=total_duration, next_retry_at=None, last_error=str(e),
+                )
+                return {"status": "failed", "error": str(e), "job_id": job_id}
 
             # Simple backoff: 2 minutes, then 5, then 15, max 30.
             backoff_mins = 2

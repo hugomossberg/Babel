@@ -8,6 +8,7 @@ from app.services.pipeline import SubtitlePipeline
 from app.services.source_resolver import SubtitleSource, SourceOrigin
 from app.core.db import get_setting, set_setting
 from app.main import app
+from app.core import db
 
 def make_valid_srt(lang="en", count=10):
     lines = []
@@ -20,8 +21,14 @@ def make_valid_srt(lang="en", count=10):
     return "\n".join(lines)
 
 
+@pytest.fixture(autouse=True)
+def isolated_database(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'notifications.db'))
+    db.init_db()
+
+
 @pytest.fixture
-def pipeline_settings(monkeypatch):
+def pipeline_settings():
     settings = {
         "ai_provider": "gemini",
         "gemini_api_key": "dummy_api_key",
@@ -37,11 +44,8 @@ def pipeline_settings(monkeypatch):
         "notify_jellyfin": "true",
         "notify_plex": "true",
     }
-    def mock_get_setting(key, default=""):
-        return settings.get(key, default)
-
-    monkeypatch.setattr("app.services.pipeline.get_setting", mock_get_setting)
-    monkeypatch.setattr("app.services.translator.get_setting", mock_get_setting)
+    for key, value in settings.items():
+        set_setting(key, value)
     return settings
 
 
@@ -78,7 +82,7 @@ async def test_successful_publish_notifies_media_servers(pipeline_settings, tmp_
 
 # Test B — QA FAILED / no publish
 @pytest.mark.asyncio
-async def test_qa_failed_no_publish_does_not_notify(pipeline_settings, tmp_path, monkeypatch):
+async def test_qa_failed_no_publish_does_not_notify(pipeline_settings, empty_gemini_provider, tmp_path, monkeypatch):
     """When a job fails QA and no subtitle is published, _notify_media_servers() is NOT called."""
     video_path = tmp_path / "qa_failed.mkv"
     video_path.touch()
@@ -88,19 +92,13 @@ async def test_qa_failed_no_publish_does_not_notify(pipeline_settings, tmp_path,
 
     pipeline = SubtitlePipeline()
 
-    # Translator returns empty / dropped text causing QA fail
-    async def mock_translate_dropped(subs, target_language, source_language="English", batch_size=150, job_id=None, show_title=None):
-        return [
-            srt.Subtitle(index=i + 1, start=sub.start, end=sub.end, content="")
-            for i, sub in enumerate(subs)
-        ]
-
-    monkeypatch.setattr(pipeline.translator, "translate_srt_content", mock_translate_dropped)
+    # The actual translator/SDK receives unusable HTTP-200 candidate and
+    # recovery responses; the real QA gate must reject them.
 
     notify_mock = AsyncMock()
     monkeypatch.setattr(pipeline, "_notify_media_servers", notify_mock)
 
-    # Force QA recovery attempts to be exhausted by setting high retry count
+    # QA must still fail permanently on a job with previous worker retries.
     from app.core.db import create_job, update_job
     job_id = create_job(str(video_path), "SONARR")
     update_job(job_id, retry_count=5)
@@ -113,14 +111,21 @@ async def test_qa_failed_no_publish_does_not_notify(pipeline_settings, tmp_path,
 
     assert res["status"] == "failed"
     assert len(res.get("output_files", [])) == 0
+    assert not video_path.with_suffix('.sv.srt').exists()
+    job = db.get_job_by_id(job_id)
+    assert job['status'] == 'FAILED'
+    assert job['next_retry_at'] is None
+    assert 'QA Gate FAILED' in '\n'.join(job['logs'])
+    assert any('translations' in call['properties'] for call in empty_gemini_provider['calls'])
+    assert any('translation' in call['properties'] for call in empty_gemini_provider['calls'])
     # Must NOT notify
     assert notify_mock.call_count == 0
 
 
 # Test C — recovering / no publish
 @pytest.mark.asyncio
-async def test_recovering_no_publish_does_not_notify(pipeline_settings, tmp_path, monkeypatch):
-    """When a job enters RECOVERING state without publishing, _notify_media_servers() is NOT called."""
+async def test_recovering_no_publish_does_not_notify(pipeline_settings, empty_gemini_provider, tmp_path, monkeypatch):
+    """Bounded recovery with no usable output fails QA without notifying."""
     video_path = tmp_path / "recovering_job.mkv"
     video_path.touch()
     en_srt = tmp_path / "recovering_job.en.srt"
@@ -129,14 +134,8 @@ async def test_recovering_no_publish_does_not_notify(pipeline_settings, tmp_path
 
     pipeline = SubtitlePipeline()
 
-    # QA fail with low retry_count leads to RECOVERING
-    async def mock_translate_bad(subs, target_language, source_language="English", batch_size=150, job_id=None, show_title=None):
-        return [
-            srt.Subtitle(index=i + 1, start=sub.start, end=sub.end, content="")
-            for i, sub in enumerate(subs)
-        ]
-
-    monkeypatch.setattr(pipeline.translator, "translate_srt_content", mock_translate_bad)
+    # Even on the first attempt, bounded recovery with no progress is a
+    # terminal QA failure, not a transient provider outage.
 
     notify_mock = AsyncMock()
     monkeypatch.setattr(pipeline, "_notify_media_servers", notify_mock)
@@ -151,9 +150,42 @@ async def test_recovering_no_publish_does_not_notify(pipeline_settings, tmp_path
         event_source="SONARR"
     )
 
-    assert res["status"] in ["recovering", "failed"]
+    assert res["status"] == 'failed'
     assert len(res.get("output_files", [])) == 0
+    assert not video_path.with_suffix('.sv.srt').exists()
+    job = db.get_job_by_id(job_id)
+    assert job['status'] == 'FAILED'
+    assert job['next_retry_at'] is None
+    assert 'QA Gate FAILED' in '\n'.join(job['logs'])
+    assert any('translations' in call['properties'] for call in empty_gemini_provider['calls'])
+    assert any('translation' in call['properties'] for call in empty_gemini_provider['calls'])
     assert notify_mock.call_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure, expected', [('timeout', 'WAITING_PROVIDER'), ('unauthorized', 'FAILED')])
+async def test_recovery_provider_error_never_publishes_or_notifies(
+        pipeline_settings, empty_gemini_provider, tmp_path, monkeypatch, failure, expected):
+    """A real SDK transport error during recovery is not a QA-result response."""
+    video = tmp_path / 'provider_error.mkv'
+    video.touch()
+    video.with_suffix('.en.srt').write_text(make_valid_srt(count=10))
+    empty_gemini_provider['failure_contract'] = 'results'
+    empty_gemini_provider['failure'] = failure
+    pipeline = SubtitlePipeline()
+    notify = AsyncMock()
+    monkeypatch.setattr(pipeline, '_notify_media_servers', notify)
+    result = await pipeline.process_video_file(str(video), event_source='SONARR')
+    job = db.get_job_by_id(result['job_id'])
+    assert result['status'] == expected.lower()
+    assert job['status'] == expected
+    assert bool(job['next_retry_at']) == (failure == 'timeout')
+    assert job['last_error']
+    assert any('translations' in call['properties'] for call in empty_gemini_provider['calls'])
+    assert any('results' in call['properties'] for call in empty_gemini_provider['calls'])
+    assert not video.with_suffix('.sv.srt').exists()
+    assert not result.get('output_files')
+    notify.assert_not_awaited()
 
 
 # Test D — delete endpoint notifies

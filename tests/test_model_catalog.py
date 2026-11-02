@@ -209,7 +209,7 @@ class TestDropdownModelCatalogSemantics:
         return options
 
     KNOWN_INVALID = {"gemini-3.5-pro", "gemini-4.0-flash", "gpt-5.6-turbo"}
-    KNOWN_VALID_GEMINI = {"gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash"}
+    KNOWN_VALID_GEMINI = {"gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.8-flash"}
     # Updated 2026-08-26: o1-mini and gpt-4-turbo removed from recommended presets (deprecated/legacy).
     # gpt-5.6 family added as current baseline. gpt-4o-mini and gpt-4o retained as stable options.
     KNOWN_VALID_OPENAI = {"gpt-4o-mini", "gpt-4o", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"}

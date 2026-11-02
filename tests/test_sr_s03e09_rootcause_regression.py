@@ -21,14 +21,13 @@ Test matrix (all deterministic, 0 skips):
   K. Mutation-after-evaluation -> prior PASS discarded and re-evaluated
   L. Unit invariants: estimator detection, contradiction thresholds, residual collapse
 
-Synthetic timing fixtures use exact timing tuples from forensic reproduction with anonymized Swedish text.
+Synthetic timing fixtures model the incident deterministically without external media files.
 """
 
 from __future__ import annotations
 
 import asyncio
 import datetime
-import json
 import os
 import time
 from pathlib import Path
@@ -129,56 +128,43 @@ def _strong_bazarr_provenance(video_path: str, lang: str, snap: TargetSnapshot,
 
 
 # ---------------------------------------------------------------------------
-# S03E09 Forensic Timing Fixture (Deterministic, hermetic, self-contained)
+# S03E09 Forensic Timing Fixture (Deterministic, self-contained)
 # ---------------------------------------------------------------------------
 
-_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "sr_s03e09_timing.json"
-
-
 def _build_forensic_s03e09_fixture():
-    """
-    Returns (ref_cues, target_cues_raw, target_cues_synced) with exact forensic timing
-    dynamics from the S03E09 incident, loaded hermetically from deterministic anonymized
-    timing fixture JSON.
+    """Build a hermetic example of the consolidated-dialogue contradiction.
 
-    Dynamics:
-      - Reference: 560 cues
-      - Target raw: 301 consolidated cues (~5.1s early)
-      - Legacy alignment on raw: sync_error_type=NONE, median_offset=+0.041s, score=91
-      - Independent estimator on raw: -5.128s
-      - Contradiction: |−5.128 − 0.041| = 5.17s >= 2.0s
-    """
-    with open(_FIXTURE_PATH, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    There are 120 short source cues, paired into 60 target cues. Each pair has
+    only a brief internal speech pause, with varying silence between pairs.
+    The raw target is 5.128 seconds early. Its greedy alignment looks near zero,
+    while shared activity boundaries establish the actual offset independently.
 
-    ref_cues = [
-        srt.Subtitle(
-            i + 1,
-            datetime.timedelta(seconds=s),
-            datetime.timedelta(seconds=e),
-            f"Captain Flint english line {i} dialogue.",
-        )
-        for i, (s, e) in enumerate(data["ref"])
-    ]
-    target_raw_cues = [
-        srt.Subtitle(
-            i + 1,
-            datetime.timedelta(seconds=s),
-            datetime.timedelta(seconds=e),
-            f"Kapten Flint svensk replik {i} i Nassau.",
-        )
-        for i, (s, e) in enumerate(data["raw"])
-    ]
-    target_synced_cues = [
-        srt.Subtitle(
-            i + 1,
-            datetime.timedelta(seconds=s),
-            datetime.timedelta(seconds=e),
-            f"Kapten Flint svensk replik {i} i Nassau.",
-        )
-        for i, (s, e) in enumerate(data["synced"])
-    ]
-    return ref_cues, target_raw_cues, target_synced_cues
+    The previous fallback bridged 2–6 seconds of silence in every pair, making
+    target activity 72% longer than the reference. Even a perfect shift could
+    cover only 58% of that target, so its expected PASS violated the unchanged
+    70% estimator coverage gate. Optional /tmp media also made results depend
+    on untracked local files. This fixture models the intended incident without
+    those dependencies; no production thresholds or failure assertions change.
+    """
+    import random
+    rng = random.Random(1)
+    reference, target = [], []
+    second = 15.0
+    offset = -5.128
+    for i in range(60):
+        first = rng.uniform(0.4, 1.0)
+        last = rng.uniform(0.4, 1.0)
+        pause = rng.uniform(0.0, 0.02)
+        end = second + first + pause + last
+        reference.extend([
+            (second, second + first, f"English dialogue line {2 * i}: spoken content"),
+            (second + first + pause, end, f"English dialogue line {2 * i + 1}: spoken content"),
+        ])
+        target.append((second + offset, end + offset, _sv_text(i)))
+        second = end + rng.uniform(0.1, 2.0)
+    ref_cues = _make_cues(reference)
+    target_raw_cues = _make_cues(target)
+    return ref_cues, target_raw_cues, _shift_cues(target_raw_cues, offset)
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +405,7 @@ class TestContradictionGate:
 
         # Confirm synced version has independent offset near zero
         indep = estimate_global_offset(target_synced_cues, ref_cues)
-        assert indep is None or abs(indep) < 2.0
+        assert indep is not None and abs(indep) < 0.5
 
         video_path = str(tmp_path / "show.mkv")
         Path(video_path).touch()
@@ -926,6 +912,17 @@ class TestMutationInvalidation:
 class TestContradictionGateUnit:
     """L. Direct unit tests for estimator, contradiction conditions, and residual collapse."""
 
+    def test_incident_fixture_is_hermetic_and_models_consolidated_speech(self):
+        with patch.object(Path, "read_text", side_effect=AssertionError("No external media fixture allowed")):
+            reference, raw, synced = _build_forensic_s03e09_fixture()
+        assert len(reference) == 120
+        assert len(raw) == len(synced) == 60
+        reference_activity = sum((c.end - c.start).total_seconds() for c in reference)
+        target_activity = sum((c.end - c.start).total_seconds() for c in raw)
+        assert reference_activity / target_activity > 0.98
+        assert align_subtitle_timelines(raw, reference).sync_error_type == SyncErrorType.NONE
+        assert [cue.content for cue in raw] == [cue.content for cue in synced]
+
     def test_estimate_global_offset_finds_large_shift(self):
         """Verify estimator discovers the true -5.128s shift on the forensic timing data."""
         ref_cues, target_raw_cues, _ = _build_forensic_s03e09_fixture()
@@ -959,4 +956,4 @@ class TestContradictionGateUnit:
         assert shifted_align.sync_error_type == SyncErrorType.NONE
         assert shifted_align.ref_coverage >= raw_align.ref_coverage
         assert shifted_align.ref_coverage >= 0.85
-        assert post_indep is None or abs(post_indep) < 0.5
+        assert post_indep is not None and abs(post_indep) < 0.5

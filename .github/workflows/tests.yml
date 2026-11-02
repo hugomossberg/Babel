@@ -16,6 +16,10 @@ jobs:
       with:
         python-version: "3.13"
         cache: "pip"
+    - name: Set up Node for UI regression tests
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip

@@ -52,14 +52,18 @@ def test_central_catalog_consistency():
 # 2. GOOGLE GEMINI CATALOG & DISCOVERY
 # ============================================================================
 
-def test_gemini_catalog_contains_current_models(client):
+def test_gemini_catalog_contains_current_models(client, monkeypatch):
     """Verify Gemini catalog contains multiple current text models including Gemini 3.x series."""
+    # This exercises offline suggestions, independently of API keys left by other tests.
+    from app.api.dashboard import _MODELS_CACHE
+    _MODELS_CACHE.clear()
+    monkeypatch.setattr('app.api.dashboard.resolve_secret_key', lambda *args: '')
     catalog = get_provider_catalog("gemini")
     model_ids = [m["id"] for m in catalog]
 
-    assert "gemini-3.7-flash" in model_ids
+    assert "gemini-3.8-flash" in model_ids
     assert "gemini-3.6-flash" in model_ids
-    assert "gemini-3.5-flash" in model_ids
+    assert "gemini-3.5-flash" not in model_ids  # Provider routes this legacy alias to 3.6.
     assert "gemini-3.5-flash-lite" in model_ids
     assert "gemini-3.1-flash-lite" in model_ids
 
@@ -68,7 +72,7 @@ def test_gemini_catalog_contains_current_models(client):
     assert resp.status_code == 200
     data = resp.json()
     resp_ids = [m["id"] for m in data["models"]]
-    assert "gemini-3.7-flash" in resp_ids
+    assert "gemini-3.8-flash" in resp_ids
     assert "gemini-3.5-flash-lite" in resp_ids
     assert data["default_model"] == "gemini-3.5-flash-lite"
 
@@ -77,7 +81,7 @@ def test_gemini_catalog_contains_current_models(client):
 async def test_gemini_live_discovery_filters_non_text(client):
     """Verify live discovery for Gemini filters out image/audio/embedding models."""
     from app.api.dashboard import _MODELS_CACHE
-    _MODELS_CACHE.pop("gemini:", None)
+    _MODELS_CACHE.clear()
 
     mock_gemini_response = {
         "models": [
@@ -103,15 +107,18 @@ async def test_gemini_live_discovery_filters_non_text(client):
         assert "gemini-embedding-001" not in ids
         assert "imagen-3.0-generate-002" not in ids
     set_setting("gemini_api_key", "")
-    _MODELS_CACHE.pop("gemini:", None)
+    _MODELS_CACHE.clear()
 
 
 # ============================================================================
 # 3. OPENAI CATALOG & DISCOVERY (STRICT ISOLATION)
 # ============================================================================
 
-def test_openai_catalog_contains_current_gpt_models(client):
+def test_openai_catalog_contains_current_gpt_models(client, monkeypatch):
     """Verify direct OpenAI provider returns GPT models and excludes non-OpenAI models."""
+    from app.api.dashboard import _MODELS_CACHE
+    _MODELS_CACHE.clear()
+    monkeypatch.setattr('app.api.dashboard.resolve_secret_key', lambda *args: '')
     catalog = get_provider_catalog("openai")
     model_ids = [m["id"] for m in catalog]
 
@@ -138,22 +145,26 @@ def test_openai_catalog_contains_current_gpt_models(client):
 # 4. DEEPSEEK CATALOG & V4 IDS
 # ============================================================================
 
-def test_deepseek_catalog_uses_v4_ids(client):
-    """Verify DeepSeek uses V4 IDs and does NOT use deepseek-chat as new default."""
-    assert DEFAULT_MODELS["deepseek"] == "deepseek-v4-flash"
+def test_deepseek_catalog_uses_current_flash_alias(client, monkeypatch):
+    """Verify DeepSeek uses the documented Flash alias and does NOT use deepseek-chat as new default."""
+    assert DEFAULT_MODELS["deepseek"] == "deepseek-flash"
 
+    # This exercises offline suggestions, independently of API keys left by other tests.
+    from app.api.dashboard import _MODELS_CACHE
+    _MODELS_CACHE.clear()
+    monkeypatch.setattr('app.api.dashboard.resolve_secret_key', lambda *args: '')
     catalog = get_provider_catalog("deepseek")
     model_ids = [m["id"] for m in catalog]
-    assert "deepseek-v4-flash" in model_ids
+    assert "deepseek-flash" in model_ids
     assert "deepseek-v4-pro" in model_ids
     assert "deepseek-chat" not in model_ids
 
     resp = client.get("/api/settings/models?provider=deepseek")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["default_model"] == "deepseek-v4-flash"
+    assert data["default_model"] == "deepseek-flash"
     resp_ids = [m["id"] for m in data["models"]]
-    assert "deepseek-v4-flash" in resp_ids
+    assert "deepseek-flash" in resp_ids
     assert "deepseek-v4-pro" in resp_ids
 
 
@@ -171,7 +182,7 @@ def test_deepseek_legacy_saved_model_preserved():
 def test_openrouter_live_discovery_and_id_format(client):
     """Verify OpenRouter returns dynamic model list preserving exact provider/model ID format."""
     from app.api.dashboard import _MODELS_CACHE
-    _MODELS_CACHE.pop("openrouter:", None)
+    _MODELS_CACHE.clear()
 
     mock_openrouter_data = {
         "data": [

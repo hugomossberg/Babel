@@ -628,10 +628,11 @@ async def test_bazarr_negatives_strict_rejection(tmp_path):
 # 7. TARGET/SOURCE RACE: Clean cancellation and drainage on early Bazarr win
 # ==============================================================================
 @pytest.mark.asyncio
-async def test_race_cancellation_on_early_bazarr_win(tmp_path, monkeypatch):
+@pytest.mark.parametrize('slow_probe', [False, True])
+async def test_race_cancellation_on_early_bazarr_win(tmp_path, monkeypatch, slow_probe):
     """
     Proves true concurrent Target / Source Race:
-    - Slow source extraction starts (taking 5.0s)
+    - Source extraction starts and remains pending until cancelled
     - Bazarr target appears and finalizes immediately
     - Concurrent poller detects Bazarr target
     - Source extraction is cleanly cancelled and drained
@@ -646,14 +647,30 @@ async def test_race_cancellation_on_early_bazarr_win(tmp_path, monkeypatch):
         os.remove(target_sv)
 
     pipeline = SubtitlePipeline()
-    pipeline.trigger_bazarr_search = AsyncMock(return_value=BazarrResult(code=BazarrResultCode.TRIGGERED, detail="OK", media_correlated=True))
+    search_started = asyncio.Event()
+    source_started = asyncio.Event()
+    release_source = asyncio.Event()
+
+    async def search(*args, **kwargs):
+        search_started.set()
+        return BazarrResult(code=BazarrResultCode.TRIGGERED, detail="OK", media_correlated=True)
+
+    pipeline.trigger_bazarr_search = AsyncMock(side_effect=search)
+    if slow_probe:
+        # Reproduce container/toolchain latency before the pre-search snapshot.
+        # Target arrival must be coordinated with the search, not wall time.
+        def probe(*args, **kwargs):
+            time.sleep(0.2)
+            return {"subtitles": [], "audio": []}
+        monkeypatch.setattr('app.services.pipeline.inspect_mkv_tracks', probe)
     source_extracted = False
     source_cancelled = False
 
     async def slow_source_resolve(*args, **kwargs):
         nonlocal source_extracted, source_cancelled
         try:
-            await asyncio.sleep(5.0)
+            source_started.set()
+            await release_source.wait()
             source_extracted = True
             return SubtitleSource(
                 origin=SourceOrigin.EMBEDDED,
@@ -668,7 +685,8 @@ async def test_race_cancellation_on_early_bazarr_win(tmp_path, monkeypatch):
 
     # Target arrives during race
     async def target_writer():
-        await asyncio.sleep(0.05)
+        await search_started.wait()
+        await source_started.wait()
         cues_text = generate_cues_srt([(1.0, 3.0), (4.0, 6.0), (7.0, 9.0), (10.0, 12.0), (13.0, 15.0)])
         Path(target_sv).write_text(cues_text, encoding="utf-8")
 
@@ -698,10 +716,15 @@ async def test_race_cancellation_on_early_bazarr_win(tmp_path, monkeypatch):
             jobs=[],
         )
 
-        asyncio.create_task(target_writer())
-        res = await pipeline.process_video_file(mkv_file, event_source="SONARR")
+        writer = asyncio.create_task(target_writer())
+        try:
+            res = await asyncio.wait_for(pipeline.process_video_file(mkv_file, event_source="SONARR"), timeout=10)
+        finally:
+            if not writer.done():
+                writer.cancel()
+            await asyncio.gather(writer, return_exceptions=True)
 
-    assert res["status"] == "skipped"
+    assert res["status"] == "skipped", res
     assert res["reason"] == "bazarr_downloaded"
 
     assert source_cancelled is True

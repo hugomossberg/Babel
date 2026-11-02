@@ -228,7 +228,7 @@ async def test_morgan_production_case_e2e(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_semantic_deadlock_fails_closed_no_worker_retry(tmp_path):
+async def test_semantic_deadlock_fails_closed_no_worker_retry(tmp_path, empty_gemini_provider):
     """
     Semantic Deadlock:
     When provider calls succeed but bounded recovery is exhausted with 0 progress,
