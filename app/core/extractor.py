@@ -490,6 +490,27 @@ def extract_embedded_srt(
 
             t_wait_sem = time.perf_counter() - t_wait_sem_start
 
+            if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                return False
+
+            # Another extractor can finish after our first cache lookup but
+            # before flight registration or I/O admission. Recheck under the
+            # semaphore so that a stale miss cannot repeat the physical scan.
+            cached_ready = get_cached_embedded_srt(video_path, selected_track_id, preferred_lang)
+            if cached_ready:
+                try:
+                    with open(output_srt_path, "w", encoding="utf-8") as f:
+                        f.write(_player_sized_ass_srt(cached_ready, selected_codec))
+                except OSError as write_err:
+                    logger.warning("Failed to write queued cached SRT: %s", write_err)
+                else:
+                    if not candidate_is_usable():
+                        os.remove(output_srt_path)
+                        continue
+                    logger.info("Extraction reused after I/O admission (track=%s, lang=%s, sem_wait=%.2fs)",
+                                selected_track_id, norm_lang, t_wait_sem)
+                    return True
+
             success = False
             mkv_timed_out = False
             t_cand_start = time.monotonic()

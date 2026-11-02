@@ -465,7 +465,8 @@
                       </template>
                       <template x-if="job.status === 'TRANSLATING' || job.status === 'PROCESSING'">
                         <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-950 text-amber-400 border border-amber-800/50 animate-pulse">
-                          <i class="fa-solid fa-spinner fa-spin"></i> TRANSLATING
+                          <i class="fa-solid fa-spinner fa-spin"></i>
+                          <span x-text="isPreparingSource(job) ? 'PREPARING SOURCE' : 'TRANSLATING'"></span>
                         </span>
                       </template>
                       <template x-if="job.status === 'QUEUED'">
@@ -522,7 +523,10 @@
                     </div>
                   </td>
                   <td class="px-5 py-4">
-                    <template x-if="['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER', 'DEFERRED', 'WAITING_FOR_BAZARR', 'WAITING_FOR_PUBLICATION'].includes(job.status)">
+                    <template x-if="isPreparingSource(job)">
+                      <span class="text-xs text-amber-300" x-text="getActiveJobLabel(job)"></span>
+                    </template>
+                    <template x-if="['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER', 'DEFERRED', 'WAITING_FOR_BAZARR', 'WAITING_FOR_PUBLICATION'].includes(job.status) && !isPreparingSource(job)">
                       <div class="space-y-1 min-w-[130px]">
                         <div class="flex items-center justify-between text-[11px] font-mono">
                           <span class="text-amber-300" x-text="(job.processed_lines || 0) + '/' + (job.total_lines || '?')"></span>
@@ -798,8 +802,7 @@
                             </span>
                             <span x-show="ep.active_job && (ep.active_job.status === 'TRANSLATING' || ep.active_job.status === 'PARTIAL')" class="text-[10px] px-2 py-0.5 rounded bg-violet-950/60 text-violet-300 border border-violet-700/50 font-mono font-semibold">
                               <i class="fa-solid fa-spinner fa-spin text-[9px]"></i>
-                              <span x-show="ep.active_job && ep.active_job.total_lines" x-text="ep.active_job && ep.active_job.total_lines ? 'TRANSLATING ' + Math.round((ep.active_job.processed_lines||0)/ep.active_job.total_lines*100) + '%' : ''"></span>
-                              <span x-show="!ep.active_job || !ep.active_job.total_lines">TRANSLATING</span>
+                              <span x-text="getActiveJobLabel(ep.active_job)"></span>
                             </span>
                             <span x-show="ep.active_job && (ep.active_job.status === 'WAITING_FOR_BAZARR' || ep.active_job.status === 'WAITING_FOR_PUBLICATION')" class="text-[10px] px-2 py-0.5 rounded bg-indigo-950/60 text-indigo-300 border border-indigo-700/50 font-mono font-semibold">
                               <i class="fa-solid fa-hourglass-half text-[9px]"></i> <span x-text="ep.active_job ? (ep.active_job.status === 'WAITING_FOR_BAZARR' ? 'WAITING FOR BAZARR' : 'WAITING FOR PUBLICATION') : ''"></span>
@@ -898,8 +901,7 @@
                     </span>
                     <span x-show="movie.active_job && (movie.active_job.status === 'TRANSLATING' || movie.active_job.status === 'PARTIAL')" class="text-[10px] px-2 py-0.5 rounded bg-violet-950/60 text-violet-300 border border-violet-700/50 font-mono font-semibold">
                       <i class="fa-solid fa-spinner fa-spin text-[9px]"></i>
-                      <span x-show="movie.active_job && movie.active_job.total_lines" x-text="movie.active_job && movie.active_job.total_lines ? 'TRANSLATING ' + Math.round((movie.active_job.processed_lines||0)/movie.active_job.total_lines*100) + '%' : ''"></span>
-                      <span x-show="!movie.active_job || !movie.active_job.total_lines">TRANSLATING</span>
+                      <span x-text="getActiveJobLabel(movie.active_job)"></span>
                     </span>
                     <span x-show="movie.active_job && (movie.active_job.status === 'WAITING_FOR_BAZARR' || movie.active_job.status === 'WAITING_FOR_PUBLICATION')" class="text-[10px] px-2 py-0.5 rounded bg-indigo-950/60 text-indigo-300 border border-indigo-700/50 font-mono font-semibold">
                       <i class="fa-solid fa-hourglass-half text-[9px]"></i> <span x-text="movie.active_job ? (movie.active_job.status === 'WAITING_FOR_BAZARR' ? 'WAITING FOR BAZARR' : 'WAITING FOR PUBLICATION') : ''"></span>
@@ -3661,9 +3663,15 @@ docker compose up -d babel</pre>
           }
         },
 
+        isPreparingSource(job) {
+          return Boolean(job && job.status === 'TRANSLATING' &&
+            typeof job.current_batch === 'string' && job.current_batch.startsWith('Preparing source:'));
+        },
+
         // Returns a short human-readable label for the active job button/badge
         getActiveJobLabel(job) {
           if (!job) return '';
+          if (this.isPreparingSource(job)) return job.current_batch;
           const s = job.status;
           if (s === 'QUEUED' || s === 'WAITING_SOURCE') return 'Queued';
           if (s === 'WAITING_GRACE') return job.grace_until ? 'Grace Period until ' + new Date(job.grace_until).toLocaleString() : 'Grace Period';

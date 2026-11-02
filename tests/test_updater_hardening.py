@@ -190,12 +190,12 @@ def test_config_reads_env_babel_version(monkeypatch):
         # Case 2: Empty string in environment (e.g. untagged Docker build without build arg)
         monkeypatch.setenv("BABEL_VERSION", "")
         importlib.reload(app.config)
-        assert app.config.VERSION == "2.5.6-beta"
+        assert app.config.VERSION == "2.5.7-beta"
 
         # Case 3: Missing from environment
         monkeypatch.delenv("BABEL_VERSION", raising=False)
         importlib.reload(app.config)
-        assert app.config.VERSION == "2.5.6-beta"
+        assert app.config.VERSION == "2.5.7-beta"
     finally:
         if original_env is not None:
             monkeypatch.setenv("BABEL_VERSION", original_env)

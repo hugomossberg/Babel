@@ -138,6 +138,7 @@ async def api_active_jobs() -> Dict[str, Any]:
         result[vp] = {
             "id": job.get("id"),
             "status": job.get("status"),
+            "current_batch": job.get("current_batch"),
             "processed_lines": job.get("processed_lines"),
             "total_lines": job.get("total_lines"),
             "defer_reason": job.get("defer_reason"),
@@ -803,6 +804,7 @@ async def _attach_active_jobs_to_media(series_data: list, movies_data: list, all
         return {
             "id": job.get("id"),
             "status": job.get("status"),
+            "current_batch": job.get("current_batch"),
             "processed_lines": job.get("processed_lines"),
             "total_lines": job.get("total_lines"),
             "defer_reason": job.get("defer_reason"),

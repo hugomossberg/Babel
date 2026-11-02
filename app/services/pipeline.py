@@ -2438,7 +2438,7 @@ class SubtitlePipeline:
         # Sentinel vars so exception handlers don't NameError if raised before assignment
         source_subtitle = None
         temp_extracted_srt = f"{os.path.splitext(video_path)[0]}.temp_src.srt"
-        update_job(job_id, status="TRANSLATING")
+        update_job(job_id, status="TRANSLATING", current_batch="Preparing source: inspecting media")
         append_job_log(job_id, f"Processing file: {video_path}")
 
         if not os.path.exists(video_path):
@@ -2764,6 +2764,7 @@ class SubtitlePipeline:
         # provided the target subtitle but the job still waited 101s for embedded
         # English source extraction to complete before checking.
         prep_start_time = time.time()
+        update_job(job_id, current_batch="Preparing source: resolving subtitles")
 
         _bazarr_accepted_by_lang: Dict[str, bool] = {}
         _bazarr_correlated_by_lang: Dict[str, bool] = {}
@@ -3395,6 +3396,7 @@ class SubtitlePipeline:
             ai_provider = primary_ctx.provider
 
             # ── PRE-PROCESSING & SDH CLEANER (on resolved source subtitle) ──────
+            update_job(job_id, current_batch="Preparing source: cleaning subtitles")
             raw_srt_text = source_subtitle.content
             t_clean_start = time.perf_counter()
             clean_sdh_enabled = get_setting("clean_sdh", "true").lower() == "true"

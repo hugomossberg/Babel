@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.5.7-beta
+
+### Fixed
+
+- Prevent duplicate physical extraction scans under concurrent requests by rechecking subtitle cache after I/O semaphore admission.
+- Clarify active job status during media inspection, subtitle resolving, and SDH cleaning, replacing inaccurate `TRANSLATING 0%` displays with descriptive preparation stages.
+- Propagate `current_batch` across library and dashboard active job views with null-safe Alpine template evaluation.
+
+### Added
+
+- Regression test suites covering concurrent cache handoff, semaphore release on cancellation, and source preparation activity preservation.
+
+### Upgrade Notes
+
+No database migration is required. Existing settings, API keys, and job histories are preserved.
+
+Linux amd64 images: `ghcr.io/hugomossberg/babel:v2.5.7-beta` and `:beta`; `latest` is unchanged. Storage-level MKV extraction performance variance and typography case handling for specific media sources remain under investigation.
+
+[Release notes](docs/releases/v2.5.7-beta.md) · [Full Changelog](https://github.com/hugomossberg/Babel/compare/v2.5.6-beta...v2.5.7-beta)
+
 ## v2.5.6-beta
 
 ### Added

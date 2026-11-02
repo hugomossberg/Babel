@@ -48,6 +48,24 @@ function harness() {
 }
 
 const scenarios = {
+  async source_preparation_labels() {
+    const h = harness();
+    const preparing = { status: 'TRANSLATING', total_lines: 827, processed_lines: 100,
+      current_batch: 'Preparing source: resolving subtitles' };
+    assert.equal(h.app.isPreparingSource(preparing), true);
+    assert.equal(h.app.getActiveJobLabel(preparing), preparing.current_batch);
+    assert.equal(h.app.isPreparingSource(null), false);
+    assert.equal(h.app.getActiveJobLabel(null), '');
+    assert.equal(h.app.isPreparingSource({ ...preparing, status: 'CANCELLED' }), false);
+    assert.equal(h.app.getActiveJobLabel({ ...preparing, status: 'CANCELLED' }), 'CANCELLED');
+    const translating = { ...preparing, current_batch: 'Translating lines 1-150' };
+    assert.equal(h.app.isPreparingSource(translating), false);
+    assert.equal(h.app.getActiveJobLabel(translating), 'Translating 12%');
+    assert.equal(h.app.getActiveJobLabel({ status: 'TRANSLATING', total_lines: 100, processed_lines: 0 }), 'Translating 0%');
+    assert.match(html, /getActiveJobLabel\(ep\.active_job\)/);
+    assert.match(html, /getActiveJobLabel\(movie\.active_job\)/);
+    assert.match(html, /getActiveJobLabel\(job\)/);
+  },
   async model_reactive_identity() {
     const h = harness();
     h.app._modelRequests = new Proxy({}, { get(target, key) {
@@ -167,14 +185,16 @@ const scenarios = {
   },
   async null_job_bindings() {
     // Alpine evaluates x-text even inside an x-show=false badge.
+    const h = harness();
     const bindings = [...html.matchAll(/x-text="([^"]*active_job[^"]*)"/g)]
-      .map(match => match[1]).filter(expression => expression.includes('active_job.'));
-    assert.equal(bindings.length, 4);
+      .map(match => match[1]);
+    assert.equal(bindings.length, 6);
     for (const expression of bindings) {
-      const evaluate = new Function('ep', 'movie', `return (${expression})`);
-      assert.equal(evaluate({ active_job: null }, { active_job: null }), '');
+      const evaluate = new Function('ep', 'movie', 'getActiveJobLabel', `return (${expression})`);
+      const label = h.app.getActiveJobLabel.bind(h.app);
+      assert.equal(evaluate({ active_job: null }, { active_job: null }, label), '');
       const active = { active_job: { status: 'TRANSLATING', processed_lines: 5, total_lines: 10 } };
-      assert.equal(typeof evaluate(active, active), 'string');
+      assert.equal(typeof evaluate(active, active, label), 'string');
     }
   },
   async duplicate_init() {
