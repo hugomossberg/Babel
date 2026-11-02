@@ -59,8 +59,10 @@ def validate_media_path(target_path: str) -> str:
 
 def mask_secret(key: str) -> str:
     """Masks a secret key, leaving only the last 4 characters visible."""
-    if not key or len(key) < 8:
-        return key or ""
+    if not key:
+        return ""
+    if len(key) < 8:
+        return "••••••••"
     return "••••••••" + key[-4:]
 
 def is_masked_secret(key: str = None) -> bool:

@@ -28,23 +28,24 @@ DEFAULT_MODELS: Dict[str, str] = {
     "openai": "gpt-4o-mini",
     "anthropic": "claude-sonnet-5",
     "openrouter": "google/gemini-3.7-flash",
-    "deepseek": "deepseek-v4-flash",
+    "deepseek": "deepseek-flash",
     "custom": "default",
     "ollama": "llama3",
     "deepl": "prefer_quality_optimized",
 }
 
+# Offline suggestions reviewed 2026-11-02. These never imply account availability.
+# Official sources and lifecycle decisions: docs/model-discovery.md.
 PROVIDER_FALLBACK_CATALOGS: Dict[str, list[Dict[str, str]]] = {
     "gemini": [
-        {"id": "gemini-3.7-flash", "name": "gemini-3.7-flash"},
+        {"id": "gemini-3.8-flash", "name": "gemini-3.8-flash"},
         {"id": "gemini-3.6-flash", "name": "gemini-3.6-flash"},
-        {"id": "gemini-3.5-flash", "name": "gemini-3.5-flash"},
         {"id": "gemini-3.5-flash-lite", "name": "gemini-3.5-flash-lite"},
         {"id": "gemini-3.1-flash-lite", "name": "gemini-3.1-flash-lite"},
-        {"id": "gemini-2.5-flash", "name": "gemini-2.5-flash"},
-        {"id": "gemini-2.5-pro", "name": "gemini-2.5-pro"},
     ],
     "openai": [
+        {"id": "gpt-6.1-sol", "name": "gpt-6.1-sol"},
+        {"id": "gpt-6-luna", "name": "gpt-6-luna"},
         {"id": "gpt-5.6-sol", "name": "gpt-5.6-sol"},
         {"id": "gpt-5.6-terra", "name": "gpt-5.6-terra"},
         {"id": "gpt-5.6-luna", "name": "gpt-5.6-luna"},
@@ -53,32 +54,27 @@ PROVIDER_FALLBACK_CATALOGS: Dict[str, list[Dict[str, str]]] = {
         {"id": "gpt-4.1-mini", "name": "gpt-4.1-mini"},
         {"id": "gpt-4.1", "name": "gpt-4.1"},
         {"id": "o3-mini", "name": "o3-mini"},
-        {"id": "o1-mini", "name": "o1-mini"},
     ],
     "anthropic": [
+        {"id": "claude-sonnet-5-5", "name": "claude-sonnet-5-5"},
+        {"id": "claude-haiku-5-5", "name": "claude-haiku-5-5"},
         {"id": "claude-sonnet-5", "name": "claude-sonnet-5"},
         {"id": "claude-opus-5", "name": "claude-opus-5"},
         {"id": "claude-haiku-4-5-20251001", "name": "claude-haiku-4-5-20251001"},
         {"id": "claude-fable-5", "name": "claude-fable-5"},
-        {"id": "claude-sonnet-4-5", "name": "claude-sonnet-4-5"},
-        {"id": "claude-3-5-sonnet-latest", "name": "claude-3-5-sonnet-latest"},
-        {"id": "claude-3-5-haiku-latest", "name": "claude-3-5-haiku-latest"},
     ],
     "openrouter": [
         {"id": "google/gemini-3.7-flash", "name": "Google: Gemini 3.7 Flash"},
         {"id": "google/gemini-3.5-flash", "name": "Google: Gemini 3.5 Flash"},
         {"id": "anthropic/claude-sonnet-5", "name": "Anthropic: Claude Sonnet 5"},
-        {"id": "anthropic/claude-3.5-sonnet", "name": "Anthropic: Claude 3.5 Sonnet"},
         {"id": "openai/gpt-4o-mini", "name": "OpenAI: GPT-4o-mini"},
         {"id": "openai/gpt-4o", "name": "OpenAI: GPT-4o"},
         {"id": "deepseek/deepseek-v4-flash", "name": "DeepSeek: DeepSeek V4 Flash"},
-        {"id": "deepseek/deepseek-r1", "name": "DeepSeek: DeepSeek R1"},
         {"id": "meta-llama/llama-3.3-70b-instruct", "name": "Meta: Llama 3.3 70B Instruct"},
-        {"id": "mistralai/mistral-large-2411", "name": "Mistral: Mistral Large"},
         {"id": "qwen/qwen-2.5-72b-instruct", "name": "Qwen: Qwen 2.5 72B Instruct"},
     ],
     "deepseek": [
-        {"id": "deepseek-v4-flash", "name": "deepseek-v4-flash"},
+        {"id": "deepseek-flash", "name": "deepseek-flash"},
         {"id": "deepseek-v4-pro", "name": "deepseek-v4-pro"},
     ],
     "custom": [
@@ -106,6 +102,17 @@ def get_provider_catalog(provider: str) -> list[Dict[str, str]]:
     return [dict(m) for m in PROVIDER_FALLBACK_CATALOGS.get(prov, [])]
 
 
+def _accepts_text(model: Dict[str, Any]) -> bool:
+    for field in ("input_modalities", "output_modalities"):
+        modalities = model.get(field)
+        if isinstance(modalities, list) and "text" not in modalities:
+            return False
+    endpoints = model.get("supported_endpoints")
+    if isinstance(endpoints, list) and not any(e in endpoints for e in ("chat/completions", "/v1/chat/completions", "chat_completions")):
+        return False
+    return model.get("lifecycle", model.get("status")) not in ("retired", "deprecated")
+
+
 def filter_gemini_models(raw_models: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """
     Filter Gemini models from live API discovery:
@@ -119,20 +126,21 @@ def filter_gemini_models(raw_models: List[Dict[str, Any]]) -> List[Dict[str, str
     non_text_keywords = (
         "embedding", "embed", "imagen", "veo", "lyria", "music", "audio",
         "speech", "tts", "whisper", "transcri", "deep-research", "computer-use",
-        "antigravity", "aqa", "robotics"
+        "antigravity", "aqa", "robotics", "image", "nano-banana", "live"
     )
     for m in raw_models:
-        name = m.get("name", "").replace("models/", "").strip()
+        name = m.get("name", "").removeprefix("models/").strip()
         if not name or name in seen:
             continue
         methods = m.get("supportedGenerationMethods", [])
-        if methods and "generateContent" not in methods:
+        if "generateContent" not in methods:
             continue
         lower_name = name.lower()
         lower_display = str(m.get("displayName", "")).lower()
         if any(kw in lower_name or kw in lower_display for kw in non_text_keywords):
             continue
-        discovered.append({"id": name, "name": name})
+        label = name + " — deprecated alias" if name in ("gemini-3.5-flash", "gemini-3.7-flash") else name
+        discovered.append({"id": name, "name": label})
         seen.add(name)
     return discovered
 
@@ -151,20 +159,26 @@ def filter_openai_models(raw_models: List[Dict[str, Any]]) -> List[Dict[str, str
     non_text_keywords = (
         "audio", "realtime", "tts", "transcription", "whisper", "moderation",
         "embedding", "dall-e", "instruct", "davinci", "babbage", "curie", "ada",
-        "search", "computer-use", "deep-research"
+        "search", "computer-use", "deep-research", "image", "codex"
     )
     for m in raw_models:
         mid = m.get("id", "").strip()
         if not mid or mid in seen:
             continue
         lower_id = mid.lower()
-        if not any(pref in lower_id for pref in ["gpt-", "o1", "o3", "o4", "chatgpt-"]):
+        if not re.match(r"^(gpt-|o[134](?:-|$)|chatgpt-)", lower_id):
             continue
         if lower_id.startswith("ft:") or ":ft-" in lower_id:
             continue
         if any(kw in lower_id for kw in non_text_keywords):
             continue
-        if re.search(r'-\d{4}(-\d{2}-\d{2})?$', mid):
+        if re.search(r"(?:^o[134]|^gpt-).*?-pro(?:-|$)", lower_id):
+            continue  # Pro/research/Codex endpoints require Responses, not Chat Completions.
+        if lower_id == "o1-mini" or lower_id.startswith("o1-mini-") or lower_id.startswith("o1-preview"):
+            continue  # Retired from the OpenAI API in 2025.
+        # Prefer the alias when listed too; retain standalone snapshots and exact IDs.
+        alias = re.sub(r"-\d{4}(?:-\d{2}-\d{2})?$", "", mid)
+        if alias != mid and any(item.get("id") == alias for item in raw_models):
             continue
         discovered.append({"id": mid, "name": mid})
         seen.add(mid)
@@ -190,6 +204,8 @@ def filter_openrouter_models(raw_models: List[Dict[str, Any]]) -> List[Dict[str,
     for m in raw_models:
         mid = m.get("id", "").strip()
         if not mid or mid in seen:
+            continue
+        if not _accepts_text(m):
             continue
         raw_name = m.get("name", "").strip() or mid
         lower_id = mid.lower()
@@ -233,6 +249,11 @@ def filter_anthropic_models(raw_models: List[Dict[str, Any]]) -> List[Dict[str, 
         mid = m.get("id", "").strip()
         if not mid or mid in seen:
             continue
+        if m.get("lifecycle", m.get("status")) in ("retired", "deprecated"):
+            continue
+        # Old API versions omit lifecycle. These families are retired on Claude API.
+        if mid.startswith(("claude-3-5-", "claude-3-7-", "claude-3-haiku-", "claude-opus-4-1-", "claude-opus-4-2025", "claude-sonnet-4-2025")):
+            continue
         display_name = m.get("display_name", "").strip() or mid
         if any(kw in mid.lower() or kw in display_name.lower() for kw in non_text_keywords):
             continue
@@ -253,7 +274,8 @@ def filter_ollama_models(raw_models: List[Dict[str, Any]]) -> List[Dict[str, str
         name = m.get("name", "").strip()
         if not name or name in seen:
             continue
-        if any(kw in name.lower() for kw in ["embed", "bge-", "all-minilm", "gte-"]):
+        family = name.rsplit("/", 1)[-1].lower()
+        if family.startswith(("nomic-embed", "mxbai-embed", "snowflake-arctic-embed", "bge-", "all-minilm", "gte-", "embeddinggemma", "qwen3-embedding", "granite-embedding")):
             continue
         discovered.append({"id": name, "name": name})
         seen.add(name)
@@ -271,7 +293,7 @@ def filter_custom_models(raw_models: List[Dict[str, Any]]) -> List[Dict[str, str
         mid = m.get("id", "").strip()
         if not mid or mid in seen:
             continue
-        if any(kw in mid.lower() for kw in ["embedding", "text-moderation"]):
+        if not _accepts_text(m):
             continue
         discovered.append({"id": mid, "name": mid})
         seen.add(mid)
@@ -341,7 +363,7 @@ def get_model_capabilities(provider: str, model: str) -> ModelCapabilities:
     model = model.lower().strip() if model else ""
     
     if provider == "gemini":
-        # Gemini 3.x series models do not accept custom temperature in Google GenAI SDK.
+        # Leave Gemini 3.x sampling at the provider-recommended default.
         # Legacy Gemini 1.5 / 2.0 / 2.5 series models accept temperature.
         # Unknown/future Gemini models use conservative default (temperature=False).
         temp = False
@@ -357,13 +379,16 @@ def get_model_capabilities(provider: str, model: str) -> ModelCapabilities:
             max_output_tokens=8192
         )
     elif provider == "anthropic":
-        # Anthropic 5.x and 4.5/4.1 models do not support temperature, but support native output_config.format
+        # Use provider-default sampling for modern Claude models; native JSON on known families.
         # Claude 3.5 and earlier models support temperature but not native output_config.format
         # Unknown Anthropic models use conservative default (temperature=False, native_output_config=False)
         _native_oc = (
             "claude-sonnet-5" in model
             or "claude-opus-5" in model
             or "claude-fable-5" in model
+            or "claude-haiku-5" in model
+            or "claude-sonnet-4-6" in model
+            or any(prefix in model for prefix in ("claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"))
             or "claude-haiku-4-5" in model
             or "claude-sonnet-4-5" in model
             or "claude-sonnet-4.5" in model
@@ -387,7 +412,7 @@ def get_model_capabilities(provider: str, model: str) -> ModelCapabilities:
         # Known DeepSeek chat models support temperature and thinking control
         # DeepSeek reasoner models (r1) do not support temperature
         # Unknown DeepSeek models use conservative default
-        if model in ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"):
+        if model in ("deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"):
             return ModelCapabilities(
                 structured_output=False,
                 json_object=True,
@@ -418,6 +443,14 @@ def get_model_capabilities(provider: str, model: str) -> ModelCapabilities:
             max_output_tokens=8192
         )
     elif provider == "openai":
+        if re.fullmatch(r"gpt-(6(?:-astra|-sol|-luna)|6\.1(?:-sol|-terra))(?:-\d{4}-\d{2}-\d{2})?", model):
+            supports_none = model.startswith(("gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"))
+            return ModelCapabilities(
+                structured_output=True, json_object=True, temperature=False,
+                thinking_control=True, semantic_audit=True, entity_verification=True,
+                max_output_tokens=8192,
+                temperature_requires_no_reasoning=supports_none,
+            )
         # 1. Reasoning o-series models (o1, o1-mini, o1-preview, o3, o3-mini, o4, o4-mini): reject custom temperature
         is_o_series = bool(re.match(r"^o(1|3|4)(-mini|-preview)?(-\d{4}-\d{2}-\d{2})?$", model) or model in ["o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4", "o4-mini"])
 
@@ -536,9 +569,18 @@ def get_model_capabilities(provider: str, model: str) -> ModelCapabilities:
                 default_reasoning_effort="medium",
             )
         elif is_classical_gpt:
+            # JSON mode predates strict schemas. Do not send json_schema to
+            # GPT-3.5, GPT-4 Turbo or the first GPT-4o snapshot (official API).
+            schema_supported = (
+                model.startswith(("gpt-4o-mini", "gpt-4.1"))
+                or model in ("gpt-4o", "chatgpt-4o-latest")
+                or bool(re.fullmatch(r"gpt-4o-\d{4}-\d{2}-\d{2}", model)
+                        and model >= "gpt-4o-2024-08-06")
+            )
+            json_supported = schema_supported or model.startswith(("gpt-3.5-turbo", "gpt-4-turbo", "gpt-4o-"))
             return ModelCapabilities(
-                structured_output=True,
-                json_object=True,
+                structured_output=schema_supported,
+                json_object=json_supported,
                 temperature=True,
                 thinking_control=False,
                 semantic_audit=True,
@@ -561,6 +603,8 @@ def get_model_capabilities(provider: str, model: str) -> ModelCapabilities:
                 default_reasoning_effort=None,
             )
     elif provider == "openrouter":
+        if model.startswith("openai/gpt-6"):
+            return get_model_capabilities("openai", model.removeprefix("openai/"))
         # Specific known OpenAI models via OpenRouter
         if model in [
             "openai/gpt-5.6-sol", "openai/gpt-5.6-terra", "openai/gpt-5.6-luna",

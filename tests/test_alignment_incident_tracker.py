@@ -340,7 +340,6 @@ async def test_all_confirmed_incidents_repaired_without_arbitrary_slice_cap():
     repaired_cue_ids = []
 
     async def mock_repair(repair_cue_ids, **kwargs):
-        nonlocal repaired_cue_ids
         repaired_cue_ids.extend(repair_cue_ids)
         return [{"id": cid, "text": f"Repaired {cid}"} for cid in repair_cue_ids]
 
@@ -481,7 +480,7 @@ async def test_primary_batch_clean_id_contract_with_identical_content_does_not_d
     received_payloads = []
 
     async def mock_translate_batch(payload, **kwargs):
-        nonlocal call_count, received_payloads
+        nonlocal call_count
         call_count += 1
         received_payloads.append(list(payload))
         # Returns all 6 IDs exactly once (missing=0, unknown=0, dup=0, malformed=0),
@@ -529,7 +528,7 @@ async def test_primary_batch_true_structural_id_missing_triggers_atomic_discard_
     received_payloads = []
 
     async def mock_translate_batch(payload, **kwargs):
-        nonlocal call_count, received_payloads
+        nonlocal call_count
         call_count += 1
         received_payloads.append(list(payload))
 

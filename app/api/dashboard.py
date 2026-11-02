@@ -11,7 +11,7 @@ from google import genai
 
 from app.core.db import (
     get_jobs, get_job_by_id, get_job_stats, delete_job, clear_all_jobs,
-    get_setting, set_setting, get_positive_int_setting, get_jobs_by_status
+    get_setting, set_setting, get_positive_int_setting, get_int_setting, get_jobs_by_status
 )
 from app.core.security import mask_secret, is_masked_secret, resolve_secret_key
 from app.services.docker_controller import docker_controller
@@ -45,6 +45,8 @@ class AISettingsRequest(BaseModel):
     escalation_provider: Optional[str] = None
     escalation_model: Optional[str] = None
     escalate_to_pro: Optional[bool] = None
+    # 0 preserves provider defaults; explicit override is bounded to one hour.
+    llm_request_timeout_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
     batch_size: Optional[int] = Field(default=None, ge=1)
     max_concurrent_jobs: Optional[int] = Field(default=None, ge=1)
     batch_concurrency: Optional[int] = Field(default=None, ge=1)
@@ -100,6 +102,7 @@ class IntegrationsSettingsRequest(BaseModel):
     bazarr_api_key: str
     bazarr_container_name: str
     wait_time_seconds: Optional[int] = None  # Deprecated legacy parameter, ignored by runtime
+    grace_period_hours: Optional[int] = Field(default=None, ge=0, le=8760)
     notify_jellyfin: bool
     jellyfin_url: str
     jellyfin_api_key: str
@@ -143,6 +146,7 @@ async def api_active_jobs() -> Dict[str, Any]:
             "waiting_model": job.get("waiting_model"),
             "primary_provider": job.get("primary_provider"),
             "primary_model": job.get("primary_model"),
+            "grace_until": job.get("grace_until"),
         }
     return result
 
@@ -318,6 +322,7 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "batch_size": get_positive_int_setting("batch_size", 150),
             "max_concurrent_jobs": get_positive_int_setting("max_concurrent_jobs", 3),
             "batch_concurrency": get_positive_int_setting("batch_concurrency", 2),
+            "llm_request_timeout_seconds": _saved_llm_request_timeout(),
             "custom_translation_instructions": get_setting("custom_translation_instructions", ""),
             "glossary": get_setting("glossary", ""),
             # Daily request budgets (0 = Unlimited)
@@ -353,6 +358,7 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "bazarr_container_name": get_setting("bazarr_container_name", "bazarr"),
             "bazarr_container_status": docker_info,
             "wait_time_seconds": int(get_setting("wait_time_seconds", "15")),
+            "grace_period_hours": get_int_setting("grace_period_hours", 0, min_val=0, max_val=8760),
             "notify_jellyfin": get_setting("notify_jellyfin", "false").lower() == "true",
             "jellyfin_url": get_setting("jellyfin_url", "http://jellyfin:8096"),
             "jellyfin_api_key": mask_secret(get_setting("jellyfin_api_key", "")),
@@ -395,6 +401,11 @@ async def api_unblock_provider(provider: str):
         raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'")
     unblock_provider(provider)
     return {"status": "unblocked", "provider": provider}
+
+def _saved_llm_request_timeout() -> int:
+    from app.services.translator import get_llm_request_timeout
+    return get_llm_request_timeout() or 0
+
 
 @router.post("/settings/ai")
 async def api_save_ai_settings(req: AISettingsRequest):
@@ -440,6 +451,8 @@ async def api_save_ai_settings(req: AISettingsRequest):
         set_setting("escalation_model", req.escalation_model.strip())
     if req.escalate_to_pro is not None:
         set_setting("escalate_to_pro", "true" if req.escalate_to_pro else "false")
+    if req.llm_request_timeout_seconds is not None:
+        set_setting("llm_request_timeout_seconds", str(req.llm_request_timeout_seconds))
     if req.batch_size is not None:
         safe_batch_size = max(1, int(req.batch_size))
         set_setting("batch_size", str(safe_batch_size))
@@ -464,7 +477,8 @@ async def api_save_ai_settings(req: AISettingsRequest):
     return {"status": "saved"}
 
 
-_MODELS_CACHE: Dict[str, tuple[float, List[Dict[str, str]]]] = {}
+# Kept importable for administrative cache invalidation and deterministic tests.
+from app.services.model_discovery import MODELS_CACHE as _MODELS_CACHE
 
 
 @router.get("/settings/providers")
@@ -472,157 +486,43 @@ async def api_get_providers():
     from app.core.ai_providers import PROVIDERS
     return {"providers": {k: {"id": v.id, "label": v.label, "general_llm": v.general_llm, "default_model": v.default_model} for k, v in PROVIDERS.items()}}
 
+
 @router.get("/settings/models")
 async def api_get_provider_models(provider: str = Query("gemini"), url: Optional[str] = None, refresh: bool = Query(False)):
-    import logging
-    _log = logging.getLogger(__name__)
-    from app.core.ai_providers import (
-        get_provider_catalog,
-        get_default_model,
-        normalize_provider,
-        filter_gemini_models,
-        filter_openai_models,
-        filter_anthropic_models,
-        filter_openrouter_models,
-        filter_ollama_models,
-        filter_custom_models,
-    )
+    from app.core.ai_providers import normalize_provider, PROVIDERS
+    from app.services.model_discovery import discover_models
     prov = normalize_provider(provider or "gemini")
-    cache_key = f"{prov}:{url or ''}"
-    now = datetime.now().timestamp()
-
-    if not refresh and cache_key in _MODELS_CACHE:
-        cached_time, cached_data = _MODELS_CACHE[cache_key]
-        ttl = 60.0 if prov in ["ollama", "custom"] else 3600.0
-        if now - cached_time < ttl:
-            return {"provider": prov, "default_model": get_default_model(prov), "models": cached_data, "cached": True}
-
-    models: List[Dict[str, str]] = []
-
-    if prov == "gemini":
-        key = resolve_secret_key("", "gemini_api_key")
-        if key:
-            try:
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    res = await client.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={key}")
-                    if res.status_code == 200:
-                        data = res.json()
-                        discovered = filter_gemini_models(data.get("models", []))
-                        if discovered:
-                            models = discovered
-            except Exception as e:
-                _log.debug(f"Gemini live discovery failed: {e}")
-        if not models:
-            models = get_provider_catalog("gemini")
-
-    elif prov == "openai":
-        key = resolve_secret_key("", "openai_api_key")
-        if key:
-            try:
-                headers = {"Authorization": f"Bearer {key}"}
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    res = await client.get("https://api.openai.com/v1/models", headers=headers)
-                    if res.status_code == 200:
-                        data = res.json()
-                        discovered = filter_openai_models(data.get("data", []))
-                        if discovered:
-                            models = discovered
-            except Exception as e:
-                _log.debug(f"OpenAI live discovery failed: {e}")
-        if not models:
-            models = get_provider_catalog("openai")
-
-    elif prov == "anthropic":
-        key = resolve_secret_key("", "anthropic_api_key")
-        if key:
-            try:
-                headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    res = await client.get("https://api.anthropic.com/v1/models", headers=headers)
-                    if res.status_code == 200:
-                        data = res.json()
-                        discovered = filter_anthropic_models(data.get("data", []))
-                        if discovered:
-                            models = discovered
-            except Exception as e:
-                _log.debug(f"Anthropic live discovery failed: {e}")
-        if not models:
-            models = get_provider_catalog("anthropic")
-
-    elif prov == "deepseek":
-        models = get_provider_catalog("deepseek")
-
-    elif prov == "openrouter":
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                res = await client.get("https://openrouter.ai/api/v1/models")
-                if res.status_code == 200:
-                    data = res.json()
-                    discovered = filter_openrouter_models(data.get("data", []))
-                    if discovered:
-                        models = discovered
-                else:
-                    raise Exception(f"Status {res.status_code}")
-        except Exception as e:
-            _log.debug(f"OpenRouter live discovery failed: {e}")
-            if cache_key in _MODELS_CACHE:
-                return {"provider": prov, "default_model": get_default_model(prov), "models": _MODELS_CACHE[cache_key][1], "cached": True}
-            models = get_provider_catalog("openrouter")
-            return {"provider": prov, "default_model": get_default_model(prov), "models": models, "cached": False}
-
-    elif prov in ["ollama", "localai"]:
-        endpoint = (url or get_setting("ollama_url", "http://localhost:11434")).rstrip("/")
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                res = await client.get(f"{endpoint}/api/tags")
-                if res.status_code == 200:
-                    data = res.json()
-                    discovered = filter_ollama_models(data.get("models", []))
-                    if discovered:
-                        models = discovered
-                else:
-                    raise Exception("Ollama error")
-        except Exception as e:
-            _log.debug(f"Ollama live discovery failed: {e}")
-            if cache_key in _MODELS_CACHE:
-                return {"provider": prov, "default_model": get_default_model(prov), "models": _MODELS_CACHE[cache_key][1], "cached": True}
-            models = get_provider_catalog("ollama")
-            return {"provider": prov, "default_model": get_default_model(prov), "models": models, "cached": False}
-
-    elif prov in ["custom", "custom_openai"]:
-        endpoint = (url or get_setting("custom_openai_url", "http://localhost:8000/v1")).rstrip("/")
-        try:
-            key = resolve_secret_key("", "custom_openai_api_key")
-            headers = {"Authorization": f"Bearer {key or 'dummy'}"}
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                res = await client.get(f"{endpoint}/models", headers=headers)
-                if res.status_code == 200:
-                    data = res.json()
-                    discovered = filter_custom_models(data.get("data", []))
-                    if discovered:
-                        models = discovered
-                else:
-                    raise Exception("Custom error")
-        except Exception as e:
-            _log.debug(f"Custom OpenAI live discovery failed: {e}")
-            if cache_key in _MODELS_CACHE:
-                return {"provider": prov, "default_model": get_default_model(prov), "models": _MODELS_CACHE[cache_key][1], "cached": True}
-            models = get_provider_catalog("custom")
-            return {"provider": prov, "default_model": get_default_model(prov), "models": models, "cached": False}
-
-    elif prov == "deepl":
-        models = get_provider_catalog("deepl")
-
-    if not models:
-        models = get_provider_catalog(prov)
-
-    _MODELS_CACHE[cache_key] = (now, models)
-    return {"provider": prov, "default_model": get_default_model(prov), "models": models, "cached": False}
+    if prov not in PROVIDERS:
+        raise HTTPException(status_code=400, detail="Unsupported AI provider")
+    key_setting = "custom_openai_api_key" if prov == "custom" else f"{prov}_api_key"
+    key = resolve_secret_key("", key_setting) if prov not in ("ollama", "deepl") else ""
+    endpoint = ""
+    if prov in ("ollama", "custom"):
+        setting, default = (("ollama_url", "http://localhost:11434") if prov == "ollama"
+                            else ("custom_openai_url", "http://localhost:8000/v1"))
+        endpoint = url or get_setting(setting, default)
+    try:
+        return await discover_models(prov, key, endpoint, refresh)
+    except ValueError:
+        # Never echo user URLs, credentials or provider response bodies.
+        raise HTTPException(status_code=400, detail="Invalid model discovery endpoint; use an HTTP(S) URL without credentials, query or fragment")
 
 
 @router.post("/settings/test-ai")
 async def api_test_ai(req: TestAIRequest):
-    provider = (req.provider or "gemini").lower()
+    provider = normalize_provider(req.provider or "gemini")
+    from app.core.ai_providers import PROVIDERS
+    from app.services.model_discovery import validate_endpoint
+    if provider not in PROVIDERS:
+        raise HTTPException(status_code=400, detail="Unsupported AI provider")
+    connection_error = "AI connection failed; check credentials, model and endpoint."
+    if provider in ("custom", "ollama"):
+        setting, default = (("ollama_url", "http://localhost:11434") if provider == "ollama"
+                            else ("custom_openai_url", "http://localhost:8000/v1"))
+        try:
+            local_endpoint = validate_endpoint(req.url or get_setting(setting, default))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid AI endpoint; credentials, query and fragment are not allowed") from None
     setting_map = {
         "deepl": "deepl_api_key",
         "openai": "openai_api_key",
@@ -644,35 +544,39 @@ async def api_test_ai(req: TestAIRequest):
                 res = await client.get(url, headers={"Authorization": f"DeepL-Auth-Key {key}"})
                 res.raise_for_status()
                 return {"status": "ok", "response": "DeepL Connected"}
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=str(e))
+            except Exception:
+                raise HTTPException(status_code=400, detail=connection_error) from None
     elif provider in ["ollama", "localai"]:
-        url = (req.url or get_setting("ollama_url", "http://localhost:11434")).rstrip("/")
+        url = local_endpoint
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
                 res = await client.get(f"{url}/api/tags")
                 res.raise_for_status()
                 return {"status": "ok", "response": "Ollama Connected"}
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Cannot reach Ollama at {url}: {e}")
+            except Exception:
+                raise HTTPException(status_code=400, detail=connection_error) from None
     elif provider == "openai":
         import openai
         if not key:
             raise HTTPException(status_code=400, detail="No OpenAI API Key provided or saved")
         try:
             client = openai.OpenAI(api_key=key)
+            from app.core.ai_providers import get_model_capabilities
+            test_model = req.model or get_default_model("openai")
+            caps = get_model_capabilities("openai", test_model)
+            token_limit = {"max_completion_tokens": 32} if caps.thinking_control else {"max_tokens": 10}
             resp = client.chat.completions.create(
-                model=req.model or "gpt-4o-mini",
+                model=test_model,
                 messages=[{"role": "user", "content": "Respond with 'Connected'"}],
-                max_tokens=10
+                **token_limit,
             )
             return {"status": "ok", "response": "Connected"}
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        except Exception:
+            raise HTTPException(status_code=400, detail=connection_error) from None
     elif provider == "anthropic":
         if not key:
             raise HTTPException(status_code=400, detail="No Anthropic API Key provided or saved")
-        test_model = req.model or "claude-sonnet-5"
+        test_model = req.model or get_default_model("anthropic")
         async with httpx.AsyncClient(timeout=15.0) as client:
             try:
                 res = await client.post(
@@ -689,17 +593,12 @@ async def api_test_ai(req: TestAIRequest):
                     },
                 )
                 if res.status_code != 200:
-                    try:
-                        err_json = res.json()
-                        err_msg = err_json.get("error", {}).get("message", res.text)
-                    except Exception:
-                        err_msg = res.text
-                    raise HTTPException(status_code=400, detail=f"Anthropic error ({res.status_code}): {err_msg}")
+                    raise HTTPException(status_code=400, detail=connection_error)
                 return {"status": "ok", "response": "Connected"}
             except HTTPException:
                 raise
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=str(e))
+            except Exception:
+                raise HTTPException(status_code=400, detail=connection_error) from None
     elif provider == "openrouter":
         import openai
         if not key:
@@ -714,13 +613,13 @@ async def api_test_ai(req: TestAIRequest):
                 },
             )
             resp = client.chat.completions.create(
-                model=req.model or "anthropic/claude-sonnet-5",
+                model=req.model or get_default_model("openrouter"),
                 messages=[{"role": "user", "content": "Respond with 'Connected'"}],
                 max_tokens=10,
             )
             return {"status": "ok", "response": "Connected"}
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        except Exception:
+            raise HTTPException(status_code=400, detail=connection_error) from None
     elif provider == "deepseek":
         import openai
         if not key:
@@ -731,16 +630,16 @@ async def api_test_ai(req: TestAIRequest):
                 base_url="https://api.deepseek.com",
             )
             resp = client.chat.completions.create(
-                model=req.model or "deepseek-v4-flash",
+                model=req.model or get_default_model("deepseek"),
                 messages=[{"role": "user", "content": "Respond with 'Connected'"}],
                 max_tokens=10,
             )
             return {"status": "ok", "response": "Connected"}
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        except Exception:
+            raise HTTPException(status_code=400, detail=connection_error) from None
     elif provider in ["custom", "custom_openai"]:
         import openai
-        base_url = (req.url or get_setting("custom_openai_url", "http://localhost:8000/v1")).rstrip("/")
+        base_url = local_endpoint
         if not base_url:
             raise HTTPException(status_code=400, detail="No Custom OpenAI Base URL provided or saved")
         try:
@@ -755,14 +654,14 @@ async def api_test_ai(req: TestAIRequest):
                 max_tokens=10,
             )
             return {"status": "ok", "response": "Connected"}
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        except Exception:
+            raise HTTPException(status_code=400, detail=connection_error) from None
     else:
         if not key:
             raise HTTPException(status_code=400, detail="No Gemini API Key provided or saved")
         try:
             client = genai.Client(api_key=key)
-            test_model = req.model or "gemini-3.5-flash-lite"
+            test_model = req.model or get_default_model("gemini")
             loop = asyncio.get_event_loop()
 
             def do_gemini_test():
@@ -781,13 +680,9 @@ async def api_test_ai(req: TestAIRequest):
             await asyncio.wait_for(loop.run_in_executor(None, do_gemini_test), timeout=15.0)
             return {"status": "ok", "response": "Connected"}
         except asyncio.TimeoutError:
-            raise HTTPException(status_code=408, detail=f"Connection timed out for model '{test_model}'. Model may be overloaded or unavailable.")
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except asyncio.TimeoutError:
-            raise HTTPException(status_code=408, detail=f"Connection timed out for model '{test_model}'. Model may be overloaded or unavailable.")
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=408, detail="AI connection timed out; try again later.")
+        except Exception:
+            raise HTTPException(status_code=400, detail=connection_error) from None
 
 @router.post("/settings/test-bazarr")
 async def api_test_bazarr(req: TestBazarrRequest):
@@ -851,6 +746,7 @@ async def api_save_modules(req: ModulesSettingsRequest):
 @router.post("/settings/languages")
 async def api_save_languages(req: LanguagesSettingsRequest):
     set_setting("languages", json.dumps([l.dict() for l in req.languages]))
+    invalidate_media_cache()
     return {"status": "saved"}
 
 @router.post("/settings/folders")
@@ -859,6 +755,7 @@ async def api_save_folders(req: MediaFoldersSettingsRequest):
     set_setting("media_movies_path", req.media_movies_path)
     set_setting("remote_path_prefix", req.remote_path_prefix)
     set_setting("local_path_prefix", req.local_path_prefix)
+    invalidate_media_cache()
     return {"status": "saved"}
 
 @router.post("/settings/integrations")
@@ -870,6 +767,8 @@ async def api_save_integrations(req: IntegrationsSettingsRequest):
     set_setting("bazarr_container_name", req.bazarr_container_name)
     if req.wait_time_seconds is not None:
         set_setting("wait_time_seconds", str(req.wait_time_seconds))
+    if req.grace_period_hours is not None:
+        set_setting("grace_period_hours", str(req.grace_period_hours))
     set_setting("notify_jellyfin", "true" if req.notify_jellyfin else "false")
     set_setting("jellyfin_url", req.jellyfin_url)
     if not is_masked_secret(req.jellyfin_api_key):
@@ -885,11 +784,13 @@ async def api_save_integrations(req: IntegrationsSettingsRequest):
 _media_cache: Dict[str, Any] = {}
 _media_cache_time: float = 0.0
 _media_cache_paths: list = []
+_media_cache_generation: int = 0
 _scan_lock = asyncio.Lock()
 MEDIA_CACHE_TTL = 30.0  # seconds
 
 def invalidate_media_cache():
-    global _media_cache, _media_cache_time, _media_cache_paths
+    global _media_cache, _media_cache_time, _media_cache_paths, _media_cache_generation
+    _media_cache_generation += 1
     _media_cache = {}
     _media_cache_time = 0.0
     _media_cache_paths = []
@@ -910,6 +811,7 @@ async def _attach_active_jobs_to_media(series_data: list, movies_data: list, all
             "waiting_model": job.get("waiting_model"),
             "primary_provider": job.get("primary_provider"),
             "primary_model": job.get("primary_model"),
+            "grace_until": job.get("grace_until"),
         }
 
     for show in series_data:
@@ -962,11 +864,14 @@ async def api_get_media_files(force: bool = False):
             )
         # If no cache exists at all, wait for the scan to complete rather than throwing 429
         async with _scan_lock:
-            return await _attach_active_jobs_to_media(
-                _media_cache.get("series", []),
-                _media_cache.get("movies", []),
-                _media_cache_paths,
-            )
+            if _media_cache:
+                return await _attach_active_jobs_to_media(
+                    _media_cache.get("series", []),
+                    _media_cache.get("movies", []),
+                    _media_cache_paths,
+                )
+            # A setting change may have invalidated a scan while it was running.
+            # With no published snapshot, continue below and scan the new paths.
 
     async with _scan_lock:
         now = time.time()
@@ -977,6 +882,7 @@ async def api_get_media_files(force: bool = False):
                 _media_cache_paths,
             )
 
+        scan_generation = _media_cache_generation
         series_path = get_setting("media_series_path", "/tv")
         movies_path = get_setting("media_movies_path", "/movies")
 
@@ -990,12 +896,14 @@ async def api_get_media_files(force: bool = False):
         for movie in movies_data:
             all_paths.append(movie["path"])
 
-        _media_cache = {
-            "series": series_data,
-            "movies": movies_data,
-        }
-        _media_cache_paths = all_paths
-        _media_cache_time = time.time()
+        # Do not republish a snapshot invalidated during filesystem I/O.
+        if scan_generation == _media_cache_generation:
+            _media_cache = {
+                "series": series_data,
+                "movies": movies_data,
+            }
+            _media_cache_paths = all_paths
+            _media_cache_time = time.time()
 
         return await _attach_active_jobs_to_media(series_data, movies_data, all_paths)
 

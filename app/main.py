@@ -163,8 +163,12 @@ async def process_one_retry_pass():
         # ------------------------------------------------------------------
         other_jobs = get_jobs_by_status([
             "WAITING_PROVIDER", "RETRY_PENDING", "RECOVERING", "PARTIAL", "WAITING_SOURCE",
-            "WAITING_FOR_BAZARR", "WAITING_FOR_PUBLICATION"
+            "WAITING_FOR_BAZARR", "WAITING_FOR_PUBLICATION", "WAITING_GRACE"
         ])
+        grace_hours = db_core.get_int_setting("grace_period_hours", 0, min_val=0,
+                                             max_val=db_core.MAX_GRACE_PERIOD_HOURS)
+        grace_enabled = (db_core.get_setting("enable_bazarr_check", "true").lower() == "true"
+                         and bool(db_core.get_setting("bazarr_api_key", "")))
         for job in other_jobs:
             try:
                 should_retry = False
@@ -180,6 +184,12 @@ async def process_one_retry_pass():
                         updated_at = updated_at.replace(tzinfo=timezone.utc)
                     if (now - updated_at).total_seconds() > 300:  # 5 min fallback
                         should_retry = True
+
+                if job.get("grace_started_at") and not job.get("grace_completed"):
+                    # Settings changes shorten/disable waiting promptly, or extend
+                    # it from the same original start. Periodic checks use only
+                    # the persisted next_retry_at, not library scans or API loops.
+                    should_retry = should_retry or not grace_enabled or grace_hours == 0 or now >= db_core.grace_period_deadline(job, grace_hours)
 
                 if should_retry:
                     if db_core.claim_job_for_retry(job["id"]):

@@ -1,9 +1,18 @@
 from typing import Dict, Any
+from urllib.parse import quote
 import httpx
 import logging
 from app.core.db import get_setting
 
 logger = logging.getLogger("babel.jellyfin")
+
+
+def _auth_headers(api_key: str) -> Dict[str, str]:
+    # Jellyfin 12 disables the legacy X-Emby-Token header by default.
+    # MediaBrowser auth is also supported by older servers. Its quoted values
+    # use URL encoding so a token cannot inject another auth parameter/header.
+    return {"Authorization": f'MediaBrowser Token="{quote(api_key, safe="")}"'}
+
 
 async def check_jellyfin_connection(url: str, api_key: str) -> Dict[str, Any]:
     """
@@ -18,7 +27,7 @@ async def check_jellyfin_connection(url: str, api_key: str) -> Dict[str, Any]:
 
     endpoint = f"{clean_url}/System/Info"
     headers = {
-        "X-Emby-Token": api_key,
+        **_auth_headers(api_key),
         "Accept": "application/json"
     }
     try:
@@ -27,12 +36,14 @@ async def check_jellyfin_connection(url: str, api_key: str) -> Dict[str, Any]:
             if res.status_code == 200:
                 try:
                     data = res.json()
-                    version = data.get("Version", "")
-                    ver_str = f"v{version}" if version else ""
-                    server_name = data.get("ServerName", "")
-                    return {"connected": True, "version": ver_str, "server_name": server_name, "status": "ok"}
-                except Exception:
-                    return {"connected": True, "version": "", "status": "ok"}
+                except ValueError:
+                    return {"connected": False, "message": "Invalid response from Jellyfin server"}
+                if not isinstance(data, dict):
+                    return {"connected": False, "message": "Invalid response from Jellyfin server"}
+                version = data.get("Version", "")
+                ver_str = f"v{version}" if version else ""
+                server_name = data.get("ServerName", "")
+                return {"connected": True, "version": ver_str, "server_name": server_name, "status": "ok"}
             elif res.status_code in (401, 403):
                 return {"connected": False, "message": "Invalid Jellyfin API Token (Unauthorized)"}
             elif res.status_code == 404:
@@ -44,7 +55,8 @@ async def check_jellyfin_connection(url: str, api_key: str) -> Dict[str, Any]:
     except httpx.ConnectError:
         return {"connected": False, "message": "Unable to reach Jellyfin server"}
     except Exception as e:
-        logger.warning(f"Jellyfin connection test error: {e}")
+        # Exception text may contain request headers, URLs or server responses.
+        logger.warning("Jellyfin connection test error (%s)", type(e).__name__)
         return {"connected": False, "message": "Connection failed"}
 
 async def notify_jellyfin_library_refresh():
@@ -60,7 +72,7 @@ async def notify_jellyfin_library_refresh():
         
     endpoint = f"{url}/Library/Refresh"
     headers = {
-        "X-Emby-Token": api_key,
+        **_auth_headers(api_key),
         "Content-Type": "application/json"
     }
     try:
@@ -71,4 +83,4 @@ async def notify_jellyfin_library_refresh():
             else:
                 logger.warning(f"Jellyfin refresh returned status code {res.status_code}")
     except Exception as e:
-        logger.warning(f"Could not notify Jellyfin: {e}")
+        logger.warning("Could not notify Jellyfin (%s)", type(e).__name__)

@@ -28,7 +28,7 @@
   </script>
   <style>[x-cloak] { display: none !important; }</style>
 </head>
-<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans" x-data="babelApp()" x-init="init()">
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans" x-data="babelApp()">
 
   <!-- Top Navigation -->
   <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-50">
@@ -336,6 +336,9 @@
             <span>Queued</span>
           </button>
 
+          <button @click="setActivityFilter('WAITING_GRACE')" class="px-2.5 py-1 rounded-lg text-xs font-medium border border-indigo-700/50 bg-slate-800 text-indigo-300">
+            <i class="fa-regular fa-clock text-[10px]"></i> Grace Period
+          </button>
           <button @click="setActivityFilter('WAITING_FOR_BAZARR')"
                   :class="activityStatusFilter === 'WAITING_FOR_BAZARR' ? 'bg-indigo-950/60 border-indigo-600/60 text-indigo-300 shadow-sm' : 'bg-slate-800/60 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:bg-slate-800'"
                   class="px-2.5 py-1 rounded-lg text-xs font-medium border transition flex items-center gap-1">
@@ -485,6 +488,12 @@
                           <i class="fa-regular fa-hourglass-half"></i> DEFERRED
                         </span>
                       </template>
+                      <template x-if="job.status === 'WAITING_GRACE'">
+                        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-indigo-950 text-indigo-300 border border-indigo-700/50" :title="job.reason">
+                          <i class="fa-regular fa-clock"></i> GRACE PERIOD
+                          <span x-text="job.grace_until ? 'until ' + new Date(job.grace_until).toLocaleString() : ''"></span>
+                        </span>
+                      </template>
                       <template x-if="job.status === 'WAITING_FOR_BAZARR'">
                         <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-indigo-950 text-indigo-400 border border-indigo-800/50 animate-pulse" :title="job.error_message">
                           <i class="fa-solid fa-hourglass-half"></i> WAITING FOR BAZARR
@@ -534,7 +543,10 @@
                   <td class="px-5 py-4 font-mono text-xs" x-text="job.duration_seconds > 0 ? job.duration_seconds + 's' : '-'"></td>
                   <td class="px-5 py-4 text-xs text-slate-500" x-text="formatDate(job.created_at)"></td>
                   <td class="px-5 py-4 text-right" @click.stop>
-                    <button x-show="!['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER', 'WAITING_FOR_BAZARR', 'WAITING_FOR_PUBLICATION'].includes(job.status)" @click="triggerProcess(job.video_path, true)" class="text-slate-500 hover:text-blue-400 p-1.5 transition mr-1" title="Retry">
+                    <button x-show="job.status === 'WAITING_GRACE'" @click="triggerProcess(job.video_path, false, job.title)" class="text-purple-400 hover:text-purple-300 p-1.5 transition mr-1" title="Translate now">
+                      <i class="fa-solid fa-play"></i>
+                    </button>
+                    <button x-show="!['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING', 'RETRY_PENDING', 'WAITING_PROVIDER', 'WAITING_FOR_BAZARR', 'WAITING_FOR_PUBLICATION', 'WAITING_GRACE'].includes(job.status)" @click="triggerProcess(job.video_path, true)" class="text-slate-500 hover:text-blue-400 p-1.5 transition mr-1" title="Retry">
                       <i class="fa-solid fa-rotate-right"></i>
                     </button>
                     <button @click="deleteJob(job.id)" class="text-slate-500 hover:text-rose-400 p-1.5 transition" title="Delete">
@@ -786,11 +798,11 @@
                             </span>
                             <span x-show="ep.active_job && (ep.active_job.status === 'TRANSLATING' || ep.active_job.status === 'PARTIAL')" class="text-[10px] px-2 py-0.5 rounded bg-violet-950/60 text-violet-300 border border-violet-700/50 font-mono font-semibold">
                               <i class="fa-solid fa-spinner fa-spin text-[9px]"></i>
-                              <span x-show="ep.active_job && ep.active_job.total_lines" x-text="'TRANSLATING ' + Math.round((ep.active_job.processed_lines||0)/ep.active_job.total_lines*100) + '%'"></span>
+                              <span x-show="ep.active_job && ep.active_job.total_lines" x-text="ep.active_job && ep.active_job.total_lines ? 'TRANSLATING ' + Math.round((ep.active_job.processed_lines||0)/ep.active_job.total_lines*100) + '%' : ''"></span>
                               <span x-show="!ep.active_job || !ep.active_job.total_lines">TRANSLATING</span>
                             </span>
                             <span x-show="ep.active_job && (ep.active_job.status === 'WAITING_FOR_BAZARR' || ep.active_job.status === 'WAITING_FOR_PUBLICATION')" class="text-[10px] px-2 py-0.5 rounded bg-indigo-950/60 text-indigo-300 border border-indigo-700/50 font-mono font-semibold">
-                              <i class="fa-solid fa-hourglass-half text-[9px]"></i> <span x-text="ep.active_job.status === 'WAITING_FOR_BAZARR' ? 'WAITING FOR BAZARR' : 'WAITING FOR PUBLICATION'"></span>
+                              <i class="fa-solid fa-hourglass-half text-[9px]"></i> <span x-text="ep.active_job ? (ep.active_job.status === 'WAITING_FOR_BAZARR' ? 'WAITING FOR BAZARR' : 'WAITING FOR PUBLICATION') : ''"></span>
                             </span>
                             <span x-show="ep.active_job && (ep.active_job.status === 'RECOVERING' || ep.active_job.status === 'RETRY_PENDING' || ep.active_job.status === 'ESCALATING' || ep.active_job.status === 'WAITING_PROVIDER')" class="text-[10px] px-2 py-0.5 rounded bg-orange-950/60 text-orange-300 border border-orange-700/50 font-mono font-semibold">
                               <i class="fa-solid fa-arrows-rotate text-[9px]"></i> RECOVERING
@@ -825,6 +837,10 @@
                           <span x-text="getActiveJobLabel(ep.active_job)"></span>
                         </span>
 
+                        <button x-show="ep.active_job && ep.active_job.status === 'WAITING_GRACE'"
+                                @click="triggerProcess(ep.path, false, ep.filename)" class="px-3 py-1.5 bg-purple-600 text-white rounded-xl text-xs font-semibold">
+                          Translate now
+                        </button>
                         <!-- Translate Now / Re-translate (only when no active job) -->
                         <button x-show="!ep.active_job"
                                 @click="triggerProcess(ep.path, ep.has_target_sub, ep.filename)"
@@ -882,11 +898,11 @@
                     </span>
                     <span x-show="movie.active_job && (movie.active_job.status === 'TRANSLATING' || movie.active_job.status === 'PARTIAL')" class="text-[10px] px-2 py-0.5 rounded bg-violet-950/60 text-violet-300 border border-violet-700/50 font-mono font-semibold">
                       <i class="fa-solid fa-spinner fa-spin text-[9px]"></i>
-                      <span x-show="movie.active_job && movie.active_job.total_lines" x-text="'TRANSLATING ' + Math.round((movie.active_job.processed_lines||0)/movie.active_job.total_lines*100) + '%'"></span>
+                      <span x-show="movie.active_job && movie.active_job.total_lines" x-text="movie.active_job && movie.active_job.total_lines ? 'TRANSLATING ' + Math.round((movie.active_job.processed_lines||0)/movie.active_job.total_lines*100) + '%' : ''"></span>
                       <span x-show="!movie.active_job || !movie.active_job.total_lines">TRANSLATING</span>
                     </span>
                     <span x-show="movie.active_job && (movie.active_job.status === 'WAITING_FOR_BAZARR' || movie.active_job.status === 'WAITING_FOR_PUBLICATION')" class="text-[10px] px-2 py-0.5 rounded bg-indigo-950/60 text-indigo-300 border border-indigo-700/50 font-mono font-semibold">
-                      <i class="fa-solid fa-hourglass-half text-[9px]"></i> <span x-text="movie.active_job.status === 'WAITING_FOR_BAZARR' ? 'WAITING FOR BAZARR' : 'WAITING FOR PUBLICATION'"></span>
+                      <i class="fa-solid fa-hourglass-half text-[9px]"></i> <span x-text="movie.active_job ? (movie.active_job.status === 'WAITING_FOR_BAZARR' ? 'WAITING FOR BAZARR' : 'WAITING FOR PUBLICATION') : ''"></span>
                     </span>
                     <span x-show="movie.active_job && (movie.active_job.status === 'RECOVERING' || movie.active_job.status === 'RETRY_PENDING' || movie.active_job.status === 'ESCALATING' || movie.active_job.status === 'WAITING_PROVIDER')" class="text-[10px] px-2 py-0.5 rounded bg-orange-950/60 text-orange-300 border border-orange-700/50 font-mono font-semibold">
                       <i class="fa-solid fa-arrows-rotate text-[9px]"></i> RECOVERING
@@ -921,6 +937,10 @@
                   <span x-text="getActiveJobLabel(movie.active_job)"></span>
                 </span>
 
+                <button x-show="movie.active_job && movie.active_job.status === 'WAITING_GRACE'"
+                        @click="triggerProcess(movie.path, false, movie.filename)" class="px-3 py-2 bg-purple-600 text-white rounded-xl text-xs font-semibold">
+                  Translate now
+                </button>
                 <!-- Translate Now / Re-translate (only when no active job) -->
                 <button x-show="!movie.active_job"
                         @click="triggerProcess(movie.path, movie.has_target_sub, movie.filename)"
@@ -1328,19 +1348,22 @@
               <div x-show="settingsData.ai.ai_provider !== 'deepl'">
                 <div class="flex items-center justify-between mb-1.5">
                   <label class="block text-sm font-medium text-slate-300" x-text="getProviderLabel(settingsData.ai.ai_provider) + ' Model'"></label>
-                  <button type="button" @click="fetchProviderModels(settingsData.ai.ai_provider, true)" class="text-xs text-purple-400 hover:text-purple-300 transition flex items-center gap-1">
+                  <button type="button" @click="fetchProviderModels(settingsData.ai.ai_provider, true)" :disabled="fetchingModels[settingsData.ai.ai_provider]" class="text-xs text-purple-400 hover:text-purple-300 transition flex items-center gap-1">
                     <i class="fa-solid fa-arrows-rotate" :class="fetchingModels[settingsData.ai.ai_provider] ? 'fa-spin' : ''"></i> Refresh Models
                   </button>
                 </div>
                 <div class="relative">
                   <select x-model="settingsData.ai[currentModelKey(settingsData.ai.ai_provider)]" @change="aiTestResult = ''; aiTestSuccess = false;" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
-                    <template x-for="m in (fetchedModels[settingsData.ai.ai_provider] || [])" :key="m.id">
+                    <template x-for="m in modelOptions(settingsData.ai.ai_provider, settingsData.ai[currentModelKey(settingsData.ai.ai_provider)])" :key="m.id">
                       <option :value="m.id" x-text="m.name || m.id"></option>
                     </template>
-                    <option :value="settingsData.ai[currentModelKey(settingsData.ai.ai_provider)]" x-show="settingsData.ai[currentModelKey(settingsData.ai.ai_provider)] && !modelInList(settingsData.ai.ai_provider, settingsData.ai[currentModelKey(settingsData.ai.ai_provider)])">
-                      <span x-text="settingsData.ai[currentModelKey(settingsData.ai.ai_provider)]"></span>
-                    </option>
+
                   </select>
+                </div>
+                <p class="text-xs text-slate-400 mt-2" role="status" x-text="modelStatus(settingsData.ai.ai_provider)"></p>
+                <div x-show="['ollama', 'custom'].includes(settingsData.ai.ai_provider)" class="mt-2">
+                  <label class="text-xs text-slate-400">Custom model ID</label>
+                  <input type="text" x-model="settingsData.ai[currentModelKey(settingsData.ai.ai_provider)]" placeholder="Exact model ID" class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-sm">
                 </div>
               </div>
 
@@ -1483,19 +1506,19 @@
                   <div class="space-y-2" x-show="settingsData.ai.escalation_provider !== 'none'">
                     <div class="flex items-center justify-between">
                       <label class="block text-sm font-medium text-slate-300">Fallback Model</label>
-                      <button type="button" @click="fetchProviderModels(settingsData.ai.escalation_provider, true)" class="text-xs text-purple-400 hover:text-purple-300 transition flex items-center gap-1">
+                      <button type="button" @click="fetchProviderModels(settingsData.ai.escalation_provider, true)" :disabled="fetchingModels[settingsData.ai.escalation_provider]" class="text-xs text-purple-400 hover:text-purple-300 transition flex items-center gap-1">
                         <i class="fa-solid fa-arrows-rotate" :class="fetchingModels[settingsData.ai.escalation_provider] ? 'fa-spin' : ''"></i> Refresh Models
                       </button>
                     </div>
 
                     <select x-model="settingsData.ai.escalation_model" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
-                      <template x-for="m in (fetchedModels[settingsData.ai.escalation_provider] || [])" :key="m.id">
+                      <template x-for="m in modelOptions(settingsData.ai.escalation_provider, settingsData.ai.escalation_model)" :key="m.id">
                         <option :value="m.id" x-text="m.name || m.id"></option>
                       </template>
-                      <option :value="settingsData.ai.escalation_model" x-show="settingsData.ai.escalation_model && !modelInList(settingsData.ai.escalation_provider, settingsData.ai.escalation_model)">
-                        <span x-text="settingsData.ai.escalation_model"></span>
-                      </option>
+
                     </select>
+                    <p class="text-xs text-slate-400" role="status" x-text="modelStatus(settingsData.ai.escalation_provider)"></p>
+                    <input x-show="['ollama', 'custom'].includes(settingsData.ai.escalation_provider)" type="text" aria-label="Custom fallback model ID" x-model="settingsData.ai.escalation_model" placeholder="Exact model ID" class="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-sm">
                   </div>
 
                 </div>
@@ -1523,6 +1546,12 @@
                   <input type="number" x-model.number="settingsData.ai.max_concurrent_jobs" min="1" max="10" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
                   <span class="text-xs text-slate-500 mt-1 block">Videos that can translate at the same time.</span>
                 </div>
+              </div>
+
+              <div>
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">AI Request Timeout (Seconds)</label>
+                <input type="number" x-model.number="settingsData.ai.llm_request_timeout_seconds" min="0" max="3600" step="1" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                <span class="text-xs text-slate-500 mt-1 block">0 keeps provider defaults (60 seconds for Ollama). Set up to 3600 seconds for slower inference. Applies to translation, QA, and recovery requests.</span>
               </div>
 
               <!-- Custom Translation Instructions -->
@@ -1818,7 +1847,22 @@
 
                 <div class="p-3 bg-purple-950/20 border border-purple-800/30 rounded-xl text-slate-400 text-xs flex items-start gap-2">
                   <i class="fa-solid fa-bolt text-purple-400 mt-0.5 text-xs"></i>
-                  <span><strong>Zero-Wait Hybrid:</strong> Bazarr searches for human subtitles concurrently while Babel prepares the AI fallback. No fixed delay window.</span>
+                  <span><strong>Hybrid mode:</strong> With Grace Period set to 0, Bazarr searches concurrently while Babel prepares the AI fallback. A configured Grace Period delays automatic AI translation.</span>
+                </div>
+
+                <div class="space-y-2 border-t border-slate-800 pt-4">
+                  <div class="text-sm font-semibold text-white">Grace Period before AI fallback</div>
+                  <div class="grid grid-cols-2 gap-3">
+                    <div>
+                      <label for="grace-days" class="block text-xs text-slate-400 mb-1">Grace Period days</label>
+                      <input id="grace-days" type="number" min="0" max="365" step="1" x-model.number="gracePeriodDays" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg">
+                    </div>
+                    <div>
+                      <label for="grace-hours" class="block text-xs text-slate-400 mb-1">Grace Period hours</label>
+                      <input id="grace-hours" type="number" min="0" max="23" step="1" x-model.number="gracePeriodHours" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg">
+                    </div>
+                  </div>
+                  <p class="text-xs text-slate-400">New Sonarr and Radarr items wait for human subtitles before AI translation. 0 days and 0 hours keeps the current behavior. Manual translation bypasses the wait. Changes apply from each waiting item's original start.</p>
                 </div>
 
                 <div class="flex items-center justify-between pt-1">
@@ -2390,6 +2434,8 @@ docker compose up -d babel</pre>
         updateFailed: false,
         healthPollActive: false,
         healthPollTimer: null,
+        _healthDeadlineTimer: null,
+        _healthAbortController: null,
         popoverOpen: false,
         checkingUpdates: false,
         updateCheckError: false,
@@ -2410,8 +2456,14 @@ docker compose up -d babel</pre>
         openShows: {},
         selectedSeasons: {},
         mediaRefreshInFlight: false,
+        _mediaForceRefreshPending: false,
         libraryJobRefreshInFlight: false,
         mediaScanTicks: 0,
+        pollInFlight: false,
+        _initialized: false,
+        _destroyed: false,
+        _deferredTimers: new Set(),
+        _healthPollGeneration: 0,
 
         isShowOpen(title) {
           return Boolean(this.openShows[title]);
@@ -2461,6 +2513,37 @@ docker compose up -d babel</pre>
         availableLanguages: [],
         fetchedModels: {},
         fetchingModels: {},
+        modelDiscovery: {},
+        _modelRequests: {},
+        _modelRequestCounter: 0,
+        modelOptions(provider, selected) {
+          const list = this.fetchedModels[provider] || [];
+          if (selected && !list.some(m => m.id === selected)) {
+            return [{ id: selected, name: selected + ' — selection not in current list' }, ...list];
+          }
+          return list;
+        },
+        modelStatus(provider) {
+          if (this.fetchingModels[provider]) return 'Loading model list…';
+          const info = this.modelDiscovery[provider];
+          if (!info) return 'Model list has not been refreshed.';
+          const labels = {
+            live: 'Live model listing', cache: 'Cached model listing',
+            fallback: 'Offline suggestions — availability unverified',
+            configuration: 'Translation strategies'
+          };
+          let text = labels[info.source] || 'Model availability unverified';
+          if (info.stale) text += ' (stale)';
+          if (info.source !== 'fallback' && !(this.fetchedModels[provider] || []).length) text += ' — no compatible models listed';
+          const errors = {
+            missing_credentials: 'Save an API key and refresh.', authentication: 'Check the saved API key and permissions.',
+            timeout: 'Discovery timed out. Try Refresh Models.', unavailable: 'Discovery is unavailable. Try again later.',
+            invalid_response: 'The endpoint returned an invalid model list.', invalid_endpoint: 'Use an HTTP(S) endpoint without credentials, query or fragment.'
+          };
+          if (info.error) text += '. ' + (errors[info.error] || 'Refresh failed.');
+          if (provider === 'ollama' && info.source === 'fallback') text += ' — no installed models verified';
+          return text;
+        },
         getProviderLabel(provider) {
           const map = {
             gemini: 'Google Gemini',
@@ -2480,7 +2563,7 @@ docker compose up -d babel</pre>
             openai: 'gpt-4o-mini',
             anthropic: 'claude-sonnet-5',
             openrouter: 'google/gemini-3.7-flash',
-            deepseek: 'deepseek-v4-flash',
+            deepseek: 'deepseek-flash',
             custom: 'default',
             ollama: 'llama3',
             deepl: 'prefer_quality_optimized'
@@ -2500,9 +2583,8 @@ docker compose up -d babel</pre>
             return;
           }
           await this.fetchProviderModels(prov);
-          const models = this.fetchedModels[prov] || [];
           const currentModel = this.settingsData.ai.escalation_model;
-          if (!models.some(m => m.id === currentModel)) {
+          if (!currentModel) {
             this.settingsData.ai.escalation_model = this.getProviderDefaultModel(prov);
           }
         },
@@ -2537,7 +2619,7 @@ docker compose up -d babel</pre>
             openrouter_api_key: '',
             openrouter_model: 'google/gemini-3.7-flash',
             deepseek_api_key: '',
-            deepseek_model: 'deepseek-v4-flash',
+            deepseek_model: 'deepseek-flash',
             custom_openai_url: 'http://localhost:8000/v1',
             custom_openai_api_key: '',
             custom_openai_model: 'default',
@@ -2550,6 +2632,7 @@ docker compose up -d babel</pre>
             escalate_to_pro: false,
             batch_size: 150,
             batch_concurrency: 2,
+            llm_request_timeout_seconds: 0,
             max_concurrent_jobs: 3,
             custom_translation_instructions: '',
             glossary: '',
@@ -2584,6 +2667,7 @@ docker compose up -d babel</pre>
             bazarr_url: '',
             bazarr_api_key: '',
             bazarr_container_name: 'bazarr',
+            grace_period_hours: 0,
             bazarr_container_status: { running: true },
             notify_jellyfin: false,
             jellyfin_url: '',
@@ -2596,9 +2680,14 @@ docker compose up -d babel</pre>
           }
         },
         pollTimer: null,
+        gracePeriodDays: 0,
+        gracePeriodHours: 0,
         updatePollTimer: null,
 
         async init() {
+          // Alpine calls init automatically; repeated calls must not duplicate I/O or timers.
+          if (this._initialized || this._destroyed) return;
+          this._initialized = true;
           let pendingMarker = null;
           try {
             const rawMarker = sessionStorage.getItem('babelUpdateSuccess');
@@ -2611,12 +2700,17 @@ docker compose up -d babel</pre>
             }
           } catch(e) {}
 
-          await this.loadStats();
-
-          // 1. Check updates using cached/runtime logic upon page initialization
+          // Library data must not wait for update checks or remote model discovery.
+          const initialLoads = Promise.all([
+            this.loadMediaFiles(), this.loadStats(), this.loadJobs(),
+            this.loadAllSettings(), this.loadQuotaStatus(), this.loadTodayUsage(),
+            this.loadUsageStats(), this.loadDeferredQueue()
+          ]);
           await this.checkUpdates();
+          await initialLoads;
+          if (this._destroyed) return;
 
-          // 2. Only show "Updated to X" if current verified backend version matches marker
+          // Only show "Updated to X" if current verified backend version matches marker
           if (pendingMarker && pendingMarker.version && this.updateData && this.updateData.current_version) {
             const normCurrent = (this.updateData.current_version || '').replace(/^v/, '').trim();
             const normMarker = (pendingMarker.version || '').replace(/^v/, '').trim();
@@ -2630,43 +2724,36 @@ docker compose up -d babel</pre>
             }
           }
 
-          await this.loadJobs();
-          await this.loadAllSettings();
-          await this.loadQuotaStatus();
-          await this.loadTodayUsage();
-          await this.loadUsageStats();
-          await this.loadDeferredQueue();
-          await this.loadMediaFiles();
-
-          this.pollTimer = setInterval(() => {
-            if (this.currentTab === 'dashboard' || this.modalOpen) {
-              this.mediaScanTicks = 0;
-              this.loadStats();
-              this.loadJobs();
-              this.loadQuotaStatus();
-              if (this.modalOpen && this.selectedJob && this.selectedJob.id && ['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING'].includes(this.selectedJob.status)) {
-                this.loadJobUsage(this.selectedJob.id);
-              }
-            } else if (this.currentTab === 'usage') {
-              this.mediaScanTicks = 0;
-              this.loadQuotaStatus();
-              this.loadTodayUsage();
-              this.loadUsageStats();
-              this.loadDeferredQueue();
-            } else if (this.currentTab === 'settings' && this.settingsTab === 'ai') {
-              this.mediaScanTicks = 0;
-              this.loadQuotaStatus();
-            } else if (this.currentTab === 'media') {
-              // 1. Real-time active job state refresh (cheap DB query, 2s)
-              this.refreshLibraryJobState();
-              // 2. Low-frequency silent background scan for external subtitle changes (~10s)
-              this.mediaScanTicks = (this.mediaScanTicks || 0) + 1;
-              if (this.mediaScanTicks >= 5) {
+          this.pollTimer = setInterval(async () => {
+            if (this._destroyed || this.pollInFlight) return;
+            this.pollInFlight = true;
+            try {
+              if (this.currentTab === 'dashboard' || this.modalOpen) {
                 this.mediaScanTicks = 0;
-                this.loadMediaFiles(true, { silent: true });
+                const requests = [this.loadStats(), this.loadJobs(), this.loadQuotaStatus()];
+                if (this.modalOpen && this.selectedJob && this.selectedJob.id && ['TRANSLATING', 'PROCESSING', 'QUEUED', 'RECOVERING'].includes(this.selectedJob.status)) {
+                  requests.push(this.loadJobUsage(this.selectedJob.id));
+                }
+                await Promise.all(requests);
+              } else if (this.currentTab === 'usage') {
+                this.mediaScanTicks = 0;
+                await Promise.all([this.loadQuotaStatus(), this.loadTodayUsage(), this.loadUsageStats(), this.loadDeferredQueue()]);
+              } else if (this.currentTab === 'settings' && this.settingsTab === 'ai') {
+                this.mediaScanTicks = 0;
+                await this.loadQuotaStatus();
+              } else if (this.currentTab === 'media') {
+                // Active jobs use a cheap DB query; filesystem refreshes respect the server cache.
+                await this.refreshLibraryJobState();
+                this.mediaScanTicks = (this.mediaScanTicks || 0) + 1;
+                if (!this.mediaLoaded || this.mediaScanTicks >= 30) {
+                  this.mediaScanTicks = 0;
+                  await this.loadMediaFiles(false, { silent: true, refresh: true });
+                }
+              } else {
+                this.mediaScanTicks = 0;
               }
-            } else {
-              this.mediaScanTicks = 0;
+            } finally {
+              this.pollInFlight = false;
             }
           }, 2000);
 
@@ -2676,7 +2763,35 @@ docker compose up -d babel</pre>
           }, 60000);
         },
 
+        // Track short-lived action timers as well as the named polling timers.
+        defer(callback, delay) {
+          if (this._destroyed) return null;
+          const timer = setTimeout(() => {
+            this._deferredTimers.delete(timer);
+            if (!this._destroyed) callback();
+          }, delay);
+          this._deferredTimers.add(timer);
+          return timer;
+        },
+
+        destroy() {
+          this._destroyed = true;
+          clearInterval(this.pollTimer);
+          clearInterval(this.updatePollTimer);
+          this.pollTimer = this.updatePollTimer = null;
+          this.stopHealthPoll();
+          for (const key of ['_embeddedPollTimer', 'toastTimeout', 'updateSuccessTimer']) {
+            clearTimeout(this[key]);
+            this[key] = null;
+          }
+          for (const timer of this._deferredTimers) clearTimeout(timer);
+          this._deferredTimers.clear();
+          for (const request of Object.values(this._modelRequests)) request.controller.abort();
+          this._modelRequests = {};
+        },
+
         showToast(msg, type = 'success') {
+          if (this._destroyed) return;
           this.toastMessage = msg;
           this.toastType = type;
           if (this.toastTimeout) clearTimeout(this.toastTimeout);
@@ -2721,7 +2836,7 @@ docker compose up -d babel</pre>
             document.body.removeChild(temp);
           }
           this.copiedWebhook = type;
-          setTimeout(() => {
+          this.defer(() => {
             this.copiedWebhook = null;
           }, 2000);
         },
@@ -2763,7 +2878,7 @@ docker compose up -d babel</pre>
           try {
             await Promise.all([this.loadJobs(), this.loadStats()]);
           } finally {
-            setTimeout(() => { this.refreshingActivity = false; }, 400);
+            this.defer(() => { this.refreshingActivity = false; }, 400);
           }
         },
 
@@ -2883,7 +2998,12 @@ docker compose up -d babel</pre>
         async loadAllSettings() {
           try {
             const res = await fetch('/api/settings/all');
-            this.settingsData = await res.json();
+            const settings = await res.json();
+            if (this._destroyed) return;
+            this.settingsData = settings;
+            const graceHours = this.settingsData.integrations?.grace_period_hours || 0;
+            this.gracePeriodDays = Math.floor(graceHours / 24);
+            this.gracePeriodHours = graceHours % 24;
             this.availableLanguages = this.settingsData.available_languages || [];
             if (this.settingsData.ai && this.settingsData.ai.ai_provider) {
               await this.fetchProviderModels(this.settingsData.ai.ai_provider);
@@ -2898,27 +3018,58 @@ docker compose up -d babel</pre>
         },
 
         async fetchProviderModels(prov, forceRefresh = false) {
-          if (!prov || prov === 'none' || prov === 'deepl') return;
+          if (this._destroyed || !prov || prov === 'none' || prov === 'deepl') return;
+          let endpoint = '';
+          if (prov === 'ollama') endpoint = this.settingsData.ai.ollama_url || '';
+          else if (prov === 'custom') endpoint = this.settingsData.ai.custom_openai_url || '';
+          // Never put endpoint credentials or query secrets into a browser URL.
+          if (/[?#\\\s]/.test(endpoint) || /:\/\/[^/]*@/.test(endpoint)) {
+            this._modelRequests[prov]?.controller.abort();
+            delete this._modelRequests[prov];
+            this.fetchingModels[prov] = false;
+            this.fetchedModels[prov] = [];
+            this.modelDiscovery[prov] = { source: 'fallback', error: 'invalid_endpoint' };
+            return;
+          }
+          const existing = this._modelRequests[prov];
+          if (existing && existing.endpoint === endpoint) return existing.promise;
+          if (existing) existing.controller.abort();
+          const request = { id: ++this._modelRequestCounter, endpoint, controller: new AbortController(), promise: null };
+          this._modelRequests[prov] = request;
           this.fetchingModels[prov] = true;
-          try {
-            let url = '';
-            if (prov === 'ollama') url = this.settingsData.ai.ollama_url;
-            else if (prov === 'custom') url = this.settingsData.ai.custom_openai_url;
-            const refreshParam = forceRefresh ? '&refresh=true' : '';
-            const res = await fetch(`/api/settings/models?provider=${encodeURIComponent(prov)}&url=${encodeURIComponent(url || '')}${refreshParam}`);
-            if (res.ok) {
+          if (this.modelDiscovery[prov]?.endpoint !== endpoint) this.fetchedModels[prov] = [];
+          request.promise = (async () => {
+            try {
+              const params = new URLSearchParams({ provider: prov });
+              if (endpoint) params.set('url', endpoint);
+              if (forceRefresh) params.set('refresh', 'true');
+              const res = await fetch('/api/settings/models?' + params, { signal: request.controller.signal });
+              if (!res.ok) throw new Error('Discovery failed');
               const data = await res.json();
-              this.fetchedModels[prov] = data.models || [];
+              if (this._destroyed || this._modelRequests[prov]?.id !== request.id) return;
+              const seen = new Set();
+              this.fetchedModels[prov] = (Array.isArray(data.models) ? data.models : []).filter(model => {
+                if (!model || typeof model.id !== 'string' || !model.id || seen.has(model.id)) return false;
+                seen.add(model.id); return true;
+              });
+              this.modelDiscovery[prov] = { source: data.source, stale: data.stale, error: data.error, endpoint };
               const key = this.currentModelKey(prov);
-              if (this.settingsData.ai && (this.settingsData.ai[key] === undefined || this.settingsData.ai[key] === '')) {
+              if (this.settingsData.ai && !this.settingsData.ai[key]) {
                 this.settingsData.ai[key] = data.default_model || this.getProviderDefaultModel(prov);
               }
+            } catch(e) {
+              if (this._destroyed || this._modelRequests[prov]?.id !== request.id || request.controller.signal.aborted) return;
+              this.modelDiscovery[prov] = {
+                source: this.fetchedModels[prov]?.length ? 'cache' : 'fallback', stale: true, error: 'unavailable', endpoint
+              };
+            } finally {
+              if (this._modelRequests[prov]?.id === request.id) {
+                this.fetchingModels[prov] = false;
+                delete this._modelRequests[prov];
+              }
             }
-          } catch(e) {
-            console.error('Failed to fetch models for', prov, e);
-          } finally {
-            this.fetchingModels[prov] = false;
-          }
+          })();
+          return request.promise;
         },
 
         async testAIConnection(provParam = null) {
@@ -3265,7 +3416,7 @@ docker compose up -d babel</pre>
             if (manual) this.showToast('Usage & Quota refreshed', 'info');
           } finally {
             if (manual) {
-              setTimeout(() => { this.loadingUsage = false; }, 300);
+              this.defer(() => { this.loadingUsage = false; }, 300);
             }
           }
         },
@@ -3352,6 +3503,12 @@ docker compose up -d babel</pre>
 
         async saveIntegrationsSettings() {
           try {
+            const days = Number(this.gracePeriodDays), hours = Number(this.gracePeriodHours);
+            const total = days * 24 + hours;
+            if (!Number.isInteger(days) || !Number.isInteger(hours) || days < 0 || hours < 0 || hours > 23 || total > 8760) {
+              throw new Error('Grace Period must be between 0 and 365 days, with 0–23 additional hours.');
+            }
+            this.settingsData.integrations.grace_period_hours = total;
             const res = await fetch('/api/settings/integrations', {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
@@ -3369,8 +3526,13 @@ docker compose up -d babel</pre>
         },
 
         async loadMediaFiles(force = false, options = {}) {
-          if (!force && this.mediaLoaded) return;
-          if (this.mediaRefreshInFlight) return;
+          if (this._destroyed) return;
+          if (!force && this.mediaLoaded && !options.refresh) return;
+          if (this.mediaRefreshInFlight) {
+            // A completion/manual scan must survive a concurrent cached load.
+            if (force) this._mediaForceRefreshPending = true;
+            return;
+          }
           const silent = Boolean(options && options.silent);
           if (!silent) {
             this.scanningFolders = true;
@@ -3381,6 +3543,7 @@ docker compose up -d babel</pre>
             const res = await fetch(url);
             if (res.ok) {
               const data = await res.json();
+              if (this._destroyed) return;
               this.mediaData = data;
               this.mediaLoaded = true;
 
@@ -3400,17 +3563,22 @@ docker compose up -d babel</pre>
             if (!silent) {
               this.scanningFolders = false;
             }
+            if (this._mediaForceRefreshPending) {
+              this._mediaForceRefreshPending = false;
+              await this.loadMediaFiles(true, { silent: true });
+            }
           }
         },
 
         scheduleEmbeddedStatusPoll() {
-          if (this._embeddedPollTimer) return;
+          if (this._destroyed || this._embeddedPollTimer) return;
           this._embeddedPollTimer = setTimeout(() => {
             this._pollEmbeddedStatus();
           }, 2500);
         },
 
         async _pollEmbeddedStatus() {
+          if (this._destroyed) return;
           this._embeddedPollTimer = null;
           if (this._embeddedStatusPollInFlight) return;
           this._embeddedStatusPollInFlight = true;
@@ -3418,6 +3586,7 @@ docker compose up -d babel</pre>
             const res = await fetch('/api/media-files/status');
             if (res.ok) {
               const status = await res.json();
+              if (this._destroyed) return;
               if (this.mediaData) {
                 this.mediaData.scanning_embedded = Boolean(status.scanning_embedded);
                 this.mediaData.embedded_pending = status.pending || 0;
@@ -3434,7 +3603,7 @@ docker compose up -d babel</pre>
               }
             }
           } catch(e) {
-            if (this.mediaData && this.mediaData.scanning_embedded) {
+            if (!this._destroyed && this.mediaData && this.mediaData.scanning_embedded) {
               this._embeddedPollTimer = setTimeout(() => {
                 this._pollEmbeddedStatus();
               }, 3000);
@@ -3449,12 +3618,13 @@ docker compose up -d babel</pre>
         // When a job transitions from active → terminal (disappears from active-jobs),
         // triggers a silent loadMediaFiles() so the subtitle file-state is refreshed.
         async refreshLibraryJobState() {
-          if (this.libraryJobRefreshInFlight) return;
+          if (this._destroyed || this.libraryJobRefreshInFlight) return;
           this.libraryJobRefreshInFlight = true;
           try {
             const res = await fetch('/api/active-jobs');
             if (!res.ok) return;
             const activeJobsMap = await res.json();  // { normpath: {id, status, ...} }
+            if (this._destroyed) return;
 
             let anyCompleted = false;
 
@@ -3496,6 +3666,7 @@ docker compose up -d babel</pre>
           if (!job) return '';
           const s = job.status;
           if (s === 'QUEUED' || s === 'WAITING_SOURCE') return 'Queued';
+          if (s === 'WAITING_GRACE') return job.grace_until ? 'Grace Period until ' + new Date(job.grace_until).toLocaleString() : 'Grace Period';
           if (s === 'TRANSLATING' || s === 'PARTIAL') {
             if (job.total_lines) {
               const pct = Math.round((job.processed_lines || 0) / job.total_lines * 100);
@@ -3773,7 +3944,7 @@ docker compose up -d babel</pre>
                 body: JSON.stringify({video_path: ep.path, force_retranslate: false})
               });
             }
-            setTimeout(() => {
+            this.defer(() => {
               this.loadJobs();
               this.loadStats();
             }, 300);
@@ -3832,7 +4003,7 @@ docker compose up -d babel</pre>
                 body: JSON.stringify({video_path: item.path, force_retranslate: false})
               });
             }
-            setTimeout(() => {
+            this.defer(() => {
               this.loadJobs();
               this.loadStats();
             }, 300);
@@ -3858,7 +4029,7 @@ docker compose up -d babel</pre>
                 body: JSON.stringify({video_path: ep.path, force_retranslate: false})
               });
             }
-            setTimeout(() => {
+            this.defer(() => {
               this.loadJobs();
               this.loadStats();
             }, 300);
@@ -3890,7 +4061,7 @@ docker compose up -d babel</pre>
                 body: JSON.stringify({video_path: ep.path, force_retranslate: true})
               });
             }
-            setTimeout(() => {
+            this.defer(() => {
               this.loadJobs();
               this.loadStats();
             }, 300);
@@ -3951,12 +4122,14 @@ docker compose up -d babel</pre>
         },
 
         async checkUpdates(force=false) {
+            if (this._destroyed) return;
             if (this.checkingUpdates) return;
             this.checkingUpdates = true;
             try {
                 let res = await fetch('/api/updates' + (force ? '?force=true' : ''));
                 if (res.ok) {
                     const data = await res.json();
+                    if (this._destroyed) return;
                     this.updateData = data;
                     if (data.update_check_ok === false) {
                         if (!data.update_available) {
@@ -4044,6 +4217,7 @@ docker compose up -d babel</pre>
         },
 
         pollHealth(expectedVersion) {
+            if (this._destroyed) return;
             if (this.healthPollActive) return;
             this.healthPollActive = true;
 
@@ -4051,6 +4225,21 @@ docker compose up -d babel</pre>
             const maxAttempts = 60; // 60 * 2.5s = 150 seconds
             const intervalTime = 2500;
             let hasTriggeredReload = false;
+            let inFlight = false;
+            const generation = ++this._healthPollGeneration;
+            const stopped = () => this._destroyed || generation !== this._healthPollGeneration;
+            const controller = new AbortController();
+            this._healthAbortController = controller;
+            const timedOut = () => {
+                if (stopped()) return;
+                this.stopHealthPoll();
+                this.updateInProgress = false;
+                this.updateFailed = true;
+                this.updateData.updater_status = 'failed';
+                this.showToast('Update timed out. Please check container status on host.', 'error');
+            };
+            // A stalled fetch must not extend the overall restart-monitoring deadline.
+            this._healthDeadlineTimer = setTimeout(timedOut, maxAttempts * intervalTime);
 
             if (this.healthPollTimer) {
                 clearInterval(this.healthPollTimer);
@@ -4058,14 +4247,19 @@ docker compose up -d babel</pre>
             }
 
             this.healthPollTimer = setInterval(async () => {
+                if (stopped() || inFlight) return;
+                inFlight = true;
                 attempts++;
                 try {
-                    const res = await fetch('/health?t=' + Date.now());
+                    const res = await fetch('/health?t=' + Date.now(), { signal: controller.signal });
+                    if (stopped()) return;
                     if (res.ok) {
                         try {
-                            const upRes = await fetch('/api/updates/runtime?t=' + Date.now());
+                            const upRes = await fetch('/api/updates/runtime?t=' + Date.now(), { signal: controller.signal });
+                            if (stopped()) return;
                             if (upRes.ok) {
                                 const upData = await upRes.json();
+                                if (stopped()) return;
 
                                 const normCurrent = (upData.current_version || '').replace(/^v/, '');
                                 const normExpected = (expectedVersion || this.updateTargetVersion || '').replace(/^v/, '');
@@ -4124,19 +4318,23 @@ docker compose up -d babel</pre>
                     }
                 } catch(e) {
                     // Connection errors during restart are expected
+                } finally {
+                    inFlight = false;
                 }
 
-                if (attempts >= maxAttempts) {
-                    this.stopHealthPoll();
-                    this.updateInProgress = false;
-                    this.updateFailed = true;
-                    this.updateData.updater_status = 'failed';
-                    this.showToast('Update timed out. Please check container status on host.', 'error');
-                }
+                if (stopped()) return;
+                if (attempts >= maxAttempts) timedOut();
             }, intervalTime);
         },
 
         stopHealthPoll() {
+            this._healthPollGeneration++;
+            clearTimeout(this._healthDeadlineTimer);
+            this._healthDeadlineTimer = null;
+            if (this._healthAbortController) {
+                this._healthAbortController.abort();
+                this._healthAbortController = null;
+            }
             if (this.healthPollTimer) {
                 clearInterval(this.healthPollTimer);
                 this.healthPollTimer = null;

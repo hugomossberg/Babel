@@ -1250,10 +1250,10 @@ async def test_embedded_target_provenance_full_forced_commentary(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_trust_cache_schema_v3_and_transient_unknown_not_persisted(tmp_path):
+async def test_trust_cache_policy_version_and_transient_unknown_not_persisted(tmp_path):
     """
     Verify:
-    1. Schema version is v3.
+    1. Timing-policy version is v4; previous timing verdicts are re-evaluated.
     2. UNKNOWN results are never persisted to SQLite DB.
     3. Reference-less external PASS is impossible and never cached as PASS.
     4. Valid reference PASS is cached and retrieved on cache hit using cryptographic fingerprint.
@@ -1268,7 +1268,7 @@ async def test_trust_cache_schema_v3_and_transient_unknown_not_persisted(tmp_pat
 
     engine = SubtitleTrustEngine()
     assert engine.schema_version == SCHEMA_VERSION
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
 
     # Unverified external candidate
     res_unverified = await engine.evaluate_candidate(
@@ -1528,15 +1528,15 @@ def test_old_schema_v2_cache_entry_invalidated_in_v3(tmp_path):
              "PASS", 95, "HIGH", json.dumps({"reasons": [], "warnings": [], "metrics": {}}), now)
         )
 
-    # Looking up with current schema_version (3) must return None
-    res_v3 = get_cached_trust_result(
+    # Looking up under the current policy must never reuse a legacy verdict.
+    res_current = get_cached_trust_result(
         cand_path,
         "sv",
         ref_fingerprint="legacy_fp",
-        schema_version=3,
+        schema_version=SCHEMA_VERSION,
         origin=CandidateOrigin.EXTERNAL,
     )
-    assert res_v3 is None
+    assert res_current is None
 
 
 @pytest.mark.asyncio

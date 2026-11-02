@@ -257,7 +257,7 @@ async def manual_process(req: ManualProcessRequest, background_tasks: Background
         )
     job_id = result["job_id"]
 
-    if not result["created"]:
+    if not result["created"] and not result.get("resumed"):
         existing = result["existing_job"]
         logger.info(
             f"Manual process: active job {job_id} already exists for {req.video_path} "
@@ -271,6 +271,8 @@ async def manual_process(req: ManualProcessRequest, background_tasks: Background
             "defer_reason": existing.get("defer_reason"),
         }
 
+    if result.get("resumed"):
+        db.append_job_log(job_id, "Manual translation requested: Grace Period bypassed on the existing job.")
     logger.info(f"Queueing manual Babel processing: {req.video_path} (Job ID: {job_id})")
 
     background_tasks.add_task(

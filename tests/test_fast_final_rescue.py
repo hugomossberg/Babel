@@ -151,7 +151,7 @@ async def test_2_normalized_echoes_rejected(mock_db_settings, tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_3_second_batch_only_contains_failures(mock_db_settings, tmp_path, monkeypatch):
+async def test_3_second_batch_only_contains_failures(mock_db_settings, tmp_path, monkeypatch, empty_gemini_provider):
     """Test 3: Attempt 2 contains ONLY the failed cues from Attempt 1."""
     video_path = tmp_path / "Episode.S01E03.mkv"
     video_path.touch()
@@ -252,7 +252,7 @@ async def test_4_max_two_rescue_calls(mock_db_settings, tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_5_final_qa_still_blocks(mock_db_settings, tmp_path, monkeypatch):
+async def test_5_final_qa_still_blocks(mock_db_settings, tmp_path, monkeypatch, empty_gemini_provider):
     """Test 5: If any cue remains English after Fast Final Rescue, publishing is blocked."""
     video_path = tmp_path / "Episode.S01E05.mkv"
     video_path.touch()

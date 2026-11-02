@@ -7,21 +7,24 @@ from unittest.mock import patch, MagicMock
 
 from app.services.pipeline import SubtitlePipeline
 from app.core.db import get_job_by_id
+from app.core import db
 
-@pytest.fixture
-def mock_db_settings(monkeypatch):
-    def mock_get_setting(key, default=""):
-        settings = {
-            "ai_provider": "gemini",
-            "gemini_api_key": "dummy_api_key",
-            "gemini_model": "gemini-3.5-flash-lite",
-            "batch_size": "50",
-            "languages": '[{"code": "sv", "name": "Swedish", "enabled": true}]',
-            "enable_bazarr_check": "false",
-        }
-        return settings.get(key, default)
-    monkeypatch.setattr("app.services.pipeline.get_setting", mock_get_setting)
-    monkeypatch.setattr("app.services.translator.get_setting", mock_get_setting)
+@pytest.fixture(autouse=True)
+def mock_db_settings(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, 'DB_PATH', str(tmp_path / 'race.db'))
+    db.init_db()
+    settings = {
+        "ai_provider": "gemini",
+        "gemini_api_key": "dummy_api_key",
+        "gemini_model": "gemini-3.5-flash-lite",
+        "batch_size": "50",
+        "languages": '[{"code": "sv", "name": "Swedish", "enabled": true}]',
+        "enable_bazarr_check": "false",
+        "extract_source_embedded": "false",
+        "extract_target_embedded": "false",
+    }
+    for key, value in settings.items():
+        db.set_setting(key, value)
 
 @pytest.mark.asyncio
 async def test_a_target_appears_after_extraction(mock_db_settings, tmp_path, monkeypatch):
@@ -136,27 +139,19 @@ async def test_b_target_appears_before_publish(mock_db_settings, tmp_path, monke
     assert "Hej" not in content
 
 @pytest.mark.asyncio
-async def test_c_qa_fail_no_target_created(mock_db_settings, tmp_path, monkeypatch):
+async def test_c_qa_fail_no_target_created(mock_db_settings, empty_gemini_provider, tmp_path, monkeypatch):
     video_path = tmp_path / "test.mkv"
     video_path.touch()
     en_srt = tmp_path / "test.en.srt"
-    # Create 100 lines so QA can fail if translated poorly
-    with open(en_srt, "w") as f:
-        lines = []
-        for i in range(1, 101):
-            lines.append(f"{i}\n00:00:0{i%10},000 --> 00:00:0{i%10},500\nHello {i}\n")
-        f.write("\n".join(lines))
+    # Valid source timing ensures this fails for unusable provider output,
+    # rather than malformed or repeating fixture timestamps.
+    en_srt.write_text(srt.compose([
+        srt.Subtitle(i + 1, timedelta(seconds=i * 3), timedelta(seconds=i * 3 + 2),
+                     f'We should discuss the missing map before the journey {i}.')
+        for i in range(100)
+    ]))
 
     pipeline = SubtitlePipeline()
-
-    async def mock_translate_batch(*args, **kwargs):
-        # Return empty list to simulate total failure/dropped lines -> QA FAIL
-        return []
-    monkeypatch.setattr(pipeline.translator, "translate_batch", mock_translate_batch)
-
-    async def mock_escalate(*args, **kwargs):
-        return None  # Fail escalation too, so QA fails
-    monkeypatch.setattr(pipeline.translator, "escalate_single_line", mock_escalate)
 
     def mock_find(vp, lang):
         if lang == "en": return str(en_srt)
@@ -165,7 +160,14 @@ async def test_c_qa_fail_no_target_created(mock_db_settings, tmp_path, monkeypat
     with patch("app.services.pipeline.find_external_subtitle", side_effect=mock_find):
         res = await pipeline.process_video_file(str(video_path), event_source="MANUAL")
 
-    assert res["status"] in ["failed", "recovering"]
+    assert res["status"] == 'failed'
+    job = get_job_by_id(res['job_id'])
+    assert job['status'] == 'FAILED'
+    assert job['primary_provider'] == 'gemini'
+    assert job['next_retry_at'] is None
+    assert 'QA Gate FAILED' in '\n'.join(job['logs'])
+    assert any('translations' in call['properties'] for call in empty_gemini_provider['calls'])
+    assert any('results' in call['properties'] for call in empty_gemini_provider['calls'])
 
     sv_srt_path = tmp_path / "test.sv.srt"
     assert not sv_srt_path.exists()

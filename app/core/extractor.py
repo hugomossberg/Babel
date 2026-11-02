@@ -3,9 +3,37 @@ import json
 import os
 import time
 import logging
+import re
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
+
+
+_FONT_TAG = re.compile(r'''<font(?=\s|>)(?:[^>"']|"[^"]*"|'[^']*')*>''', re.IGNORECASE)
+_FONT_ATTRIBUTE = re.compile(r'''\s+([^\s=/>]+)(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?''')
+
+
+def _player_sized_ass_srt(content: str, codec: str) -> str:
+    """Drop ASS canvas sizes from converted SRT, leaving other styling intact.
+
+    FFmpeg copies ASS font sizes (in PlayRes coordinates) into absolute SRT
+    font sizes without the canvas resolution. SRT cannot represent that scale;
+    use the player's configured size instead. Native SRT/WebVTT sizes remain
+    untouched. Apply on cache reads too, for extractions made by older versions.
+    """
+    if not any(name in codec.lower() for name in ("ass", "ssa", "substation", "alpha")):
+        return content
+
+    def normalize_font(tag):
+        # Consume whole attributes so a quoted font name containing "size=..."
+        # cannot be mistaken for a separate size attribute.
+        return _FONT_ATTRIBUTE.sub(
+            lambda attr: "" if attr.group(1).lower() == "size" else attr.group(0),
+            tag.group(0),
+        )
+
+    return _FONT_TAG.sub(normalize_font, content)
+
 
 def inspect_mkv_tracks(video_path: str) -> Dict[str, List[Dict]]:
     """
@@ -32,7 +60,9 @@ def inspect_mkv_tracks(video_path: str) -> Dict[str, List[Dict]]:
         for track in data.get("tracks", []):
             track_type = track.get("type")
             properties = track.get("properties", {})
-            lang = properties.get("language", "und")
+            lang = properties.get("language_ietf")
+            if not lang or lang.lower() in ("und", "unknown"):
+                lang = properties.get("language", "und")
             track_id = track.get("id")
             codec = track.get("codec")
             forced = properties.get("forced_track", False)
@@ -291,6 +321,18 @@ def _run_cancellable_cmd(
             pass
 
 
+def subtitle_track_language(track: Dict[str, Any]) -> str:
+    """Prefer explicit metadata; use a title only when the language is unspecified."""
+    from app.core.languages import get_language, normalize_language_code
+    declared = track.get("language_ietf") or ""
+    if declared.strip().lower() in ("", "und", "unknown"):
+        declared = track.get("language") or ""
+    if declared.strip().lower() not in ("", "und", "unknown"):
+        return normalize_language_code(declared, default=declared).lower()
+    title_language = get_language(track.get("title") or "")
+    return title_language.code.lower() if title_language else "und"
+
+
 def extract_embedded_srt(
     video_path: str,
     output_srt_path: str,
@@ -327,53 +369,37 @@ def extract_embedded_srt(
     if not sub_tracks:
         return False
 
-    selected_track_id = None
-    selected_sub_index = None
-    from app.core.languages import get_language, normalize_language_code
-    lang_obj = get_language(preferred_lang)
-    lang_prefixes = lang_obj.aliases if lang_obj else [preferred_lang.lower()]
+    from app.core.languages import normalize_language_code
     norm_lang = normalize_language_code(preferred_lang, default=preferred_lang.lower()).lower()
-    TEXT_CODECS = {"SubRip/SRT", "S_TEXT/UTF8", "S_TEXT/ASS", "S_TEXT/SSA", "S_TEXT/WEBVTT", "SubStationAlpha", "WebVTT"}
-
     candidates = []
     for i, track in enumerate(sub_tracks):
-        lang = track.get("language", "").lower()
-        forced = track.get("forced", False)
-        codec = track.get("codec", "")
-        title = track.get("title", "").lower() if track.get("title") else ""
-
-        # Skip outright bad tracks
-        if any(bad in title for bad in ["commentary", "director", "description", "audio description"]):
+        codec = track.get("codec") or ""
+        title = (track.get("title") or "").lower()
+        if any(bad in title for bad in ("commentary", "director", "description", "forced", "signs", "songs", "foreign", "parts", "descriptive")):
             continue
-
-        is_text_codec = any(tc.lower() in codec.lower() for tc in TEXT_CODECS) or "srt" in codec.lower() or "text" in codec.lower() or "ass" in codec.lower() or "ssa" in codec.lower() or "vtt" in codec.lower() or "utf" in codec.lower()
-
-        track_norm = normalize_language_code(lang, default=lang).lower() if lang else None
-        title_lang_obj = get_language(title) if title else None
-        title_norm = title_lang_obj.code.lower() if title_lang_obj else None
-
-        lang_matches = (
-            (track_norm is not None and track_norm == norm_lang)
-            or (title_norm is not None and title_norm == norm_lang)
-            or (not track_norm and not title_norm and any(lp == lang for lp in lang_prefixes))
-        )
-
-        if lang_matches and is_text_codec:
-            score = 100
-            if forced or any(kw in title for kw in ["forced", "signs", "songs", "foreign", "parts", "descriptive"]):
-                continue  # Skip forced tracks entirely for full translation
-
-            if any(kw in title for kw in ["full", "sdh", "normal", "dialogue"]):
-                score += 20
-
-            if track.get("default"):
-                score += 10
-
-            candidates.append({"score": score, "id": track.get("id"), "index": i, "codec": codec})
+        if track.get("forced"):
+            continue
+        is_text_codec = any(token in codec.lower() for token in
+                            ("srt", "text", "ass", "ssa", "vtt", "utf", "substation", "alpha"))
+        if subtitle_track_language(track) != norm_lang or not is_text_codec:
+            continue
+        score = 100
+        if any(kw in title for kw in ("full", "sdh", "normal", "dialogue")):
+            score += 20
+        if track.get("default"):
+            score += 10
+        candidates.append({"score": score, "id": track.get("id"), "index": i, "codec": codec})
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
     if not candidates:
         return False
+
+    # Validate cache hits and fresh output alike, so a partial track cannot hide
+    # the next full same-language track. Other callers retain extraction behavior.
+    candidate_validator = kwargs.get("candidate_validator")
+
+    def candidate_is_usable():
+        return candidate_validator is None or candidate_validator(output_srt_path)
 
     duration = tracks_info.get("duration", 0.0)
     import srt
@@ -405,8 +431,11 @@ def extract_embedded_srt(
             logger.info(f"Source cache: HIT for track {selected_track_id} ({preferred_lang}) in {t_cache_lookup:.4f}s")
             try:
                 with open(output_srt_path, "w", encoding="utf-8") as f:
-                    f.write(cached_content)
+                    f.write(_player_sized_ass_srt(cached_content, selected_codec))
                 if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 0:
+                    if not candidate_is_usable():
+                        os.remove(output_srt_path)
+                        continue
                     logger.info(f"Extraction skipped: cached source (track={selected_track_id}, lang={preferred_lang})")
                     return True
             except Exception as write_err:
@@ -440,8 +469,11 @@ def extract_embedded_srt(
             if cached_after:
                 try:
                     with open(output_srt_path, "w", encoding="utf-8") as f:
-                        f.write(cached_after)
+                        f.write(_player_sized_ass_srt(cached_after, selected_codec))
                     if os.path.exists(output_srt_path) and os.path.getsize(output_srt_path) > 0:
+                        if not candidate_is_usable():
+                            os.remove(output_srt_path)
+                            continue
                         logger.info(f"Extraction reused from concurrent in-flight lead extractor (track {selected_track_id})")
                         return True
                 except Exception as write_err:
@@ -617,6 +649,12 @@ def extract_embedded_srt(
                     with open(output_srt_path, "r", encoding="utf-8-sig") as f:
                         content = f.read()
 
+                    normalized = _player_sized_ass_srt(content, selected_codec)
+                    if normalized != content:
+                        with open(output_srt_path, "w", encoding="utf-8") as f:
+                            f.write(normalized)
+                        content = normalized
+
                     subs = list(srt.parse(content))
                     t_parse = time.perf_counter() - t_parse_start
                     if not subs:
@@ -640,6 +678,10 @@ def extract_embedded_srt(
                                 except Exception:
                                     pass
                             continue
+
+                    if not candidate_is_usable():
+                        os.remove(output_srt_path)
+                        continue
 
                     t_total = time.perf_counter() - t_total_start
                     throughput_mb_s = (media_file_size_bytes / (1024 * 1024)) / subproc_duration if subproc_duration > 0 else 0.0

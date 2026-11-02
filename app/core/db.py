@@ -2,7 +2,7 @@ import sqlite3
 import os
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 
 # ---------------------------------------------------------------------------
@@ -40,6 +40,7 @@ class DeferStage:
 #  • DEFERRED        — daily budget exhausted; will auto-resume same job
 #  • WAITING_FOR_BAZARR — QA passed, publication deferred waiting for Bazarr
 #  • WAITING_FOR_PUBLICATION — QA passed, publication deferred waiting for ownership
+#  • WAITING_GRACE — waiting for human subtitles before the first AI attempt
 #
 # Terminal statuses (TRANSLATED, FAILED, CANCELLED, ALREADY EXISTS) are NOT
 # included — they do not block a new legitimate job or force-retranslate.
@@ -55,7 +56,11 @@ ACTIVE_JOB_STATUSES: tuple = (
     "DEFERRED",
     "WAITING_FOR_BAZARR",
     "WAITING_FOR_PUBLICATION",
+    "WAITING_GRACE",
 )
+
+MAX_GRACE_PERIOD_HOURS = 365 * 24
+GRACE_CHECK_INTERVAL_SECONDS = 15 * 60
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +111,9 @@ def init_db():
             retry_count INTEGER DEFAULT 0,
             next_retry_at TEXT,
             last_error TEXT,
+            grace_started_at TEXT,
+            grace_until TEXT,
+            grace_completed INTEGER DEFAULT 0,
             -- Provider/model pinning (set on first real AI dispatch, immutable after)
             primary_provider        TEXT,
             primary_model           TEXT,
@@ -249,6 +257,9 @@ def init_db():
             ("retry_count",        "INTEGER DEFAULT 0"),
             ("next_retry_at",      "TEXT"),
             ("last_error",         "TEXT"),
+            ("grace_started_at",   "TEXT"),
+            ("grace_until",        "TEXT"),
+            ("grace_completed",    "INTEGER DEFAULT 0"),
             # Provider pinning (Phase 1)
             ("primary_provider",   "TEXT"),
             ("primary_model",      "TEXT"),
@@ -353,32 +364,36 @@ def init_db():
             if row_jf:
                 cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('notify_jellyfin', ?)", (row_jf[0],))
 
+        from app.core.ai_providers import get_default_model
+
         defaults = {
             "gemini_api_key": "",
-            "gemini_model": "gemini-3.5-flash-lite",
+            "gemini_model": get_default_model("gemini"),
             "openai_api_key": "",
-            "openai_model": "gpt-4o-mini",
+            "openai_model": get_default_model("openai"),
             "deepl_api_key": "",
             "ollama_url": "http://localhost:11434",
-            "ollama_model": "llama3",
+            "ollama_model": get_default_model("ollama"),
             "anthropic_api_key": "",
-            "anthropic_model": "claude-sonnet-5",
+            "anthropic_model": get_default_model("anthropic"),
             "openrouter_api_key": "",
-            "openrouter_model": "anthropic/claude-sonnet-5",
+            "openrouter_model": get_default_model("openrouter"),
             "deepseek_api_key": "",
-            "deepseek_model": "deepseek-v4-flash",
+            "deepseek_model": get_default_model("deepseek"),
             "custom_openai_url": "http://localhost:8000/v1",
             "custom_openai_api_key": "",
-            "custom_openai_model": "default",
+            "custom_openai_model": get_default_model("custom"),
             "batch_size": "150",
             "max_concurrent_jobs": "3",
             "batch_concurrency": "2",
+            "llm_request_timeout_seconds": "0",
             "custom_translation_instructions": "",
             "glossary": "",
             "enable_bazarr_check": "true",
             "bazarr_url": "http://bazarr:6767",
             "bazarr_api_key": "",
             "wait_time_seconds": "15",
+            "grace_period_hours": "0",
             "clean_sdh": "true",
             "notify_jellyfin": "false",
             "jellyfin_enabled": "false",
@@ -503,6 +518,58 @@ def get_float_setting(key: str, default: float, min_val: Optional[float] = None,
         value = min(max_val, value)
     return value
 
+def grace_period_deadline(job: Dict[str, Any], hours: int) -> datetime:
+    """Use the persisted first observation, including after settings changes."""
+    started = datetime.fromisoformat(job["grace_started_at"])
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return started + timedelta(hours=hours)
+
+
+def apply_grace_period(job_id: int, event_source: str, hours: int, now=None) -> Dict[str, Any]:
+    """Atomically schedule grace or complete it; never re-enter after AI/recovery.
+
+    No network or long-lived worker is needed. WAITING_GRACE is owned by the
+    existing retry scheduler, and manual deduplication can release the same row.
+    """
+    now = now or datetime.now(timezone.utc)
+    hours = max(0, min(MAX_GRACE_PERIOD_HOURS, hours))
+    with sqlite3.connect(DB_PATH, timeout=15.0) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise ValueError("Grace Period job does not exist")
+        job = dict(row)
+        result = {"waiting": False, "expired": False}
+        if job.get("grace_completed"):
+            return result
+        started = job.get("grace_started_at")
+        if event_source == "MANUAL":
+            if started:
+                conn.execute("UPDATE jobs SET grace_completed=1, next_retry_at=NULL WHERE id=?", (job_id,))
+            return result
+        if not started:
+            if (hours == 0 or event_source not in ("SONARR", "RADARR")
+                    or job.get("event_source") == "MANUAL" or job.get("primary_provider")
+                    or job.get("processed_lines") or job.get("retry_count")):
+                return result
+            job["grace_started_at"] = now.isoformat()
+        until = grace_period_deadline(job, hours)
+        if hours == 0 or now >= until:
+            conn.execute("UPDATE jobs SET grace_completed=1, grace_until=?, next_retry_at=NULL, reason=NULL WHERE id=?",
+                         (until.isoformat(), job_id))
+            result["expired"] = hours > 0
+            return result
+        next_check = min(until, now + timedelta(seconds=GRACE_CHECK_INTERVAL_SECONDS))
+        conn.execute("""UPDATE jobs SET status='WAITING_GRACE', grace_started_at=?, grace_until=?,
+                        next_retry_at=?, reason=?, error_message=NULL, updated_at=? WHERE id=?""",
+                     (job["grace_started_at"], until.isoformat(), next_check.isoformat(),
+                      f"Grace Period: waiting for subtitles until {until.isoformat()}", now.isoformat(), job_id))
+        return {"waiting": True, "expired": False, "until": until.isoformat(),
+                "changed": not started or job.get("grace_until") != until.isoformat()}
+
+
 def create_job(video_path: str, event_source: str = "MANUAL", title: Optional[str] = None) -> int:
     now = datetime.now(timezone.utc).isoformat()
     if not title:
@@ -596,6 +663,9 @@ def create_job_if_no_active(
     Fail-closed: if the exclusive dedupe check fails due to a DB error, we do
     NOT fall back to an unconditional create_job().  The caller receives the
     exception and should return a retryable error to the client.
+
+    Grace exception: a manual request resumes the same WAITING_GRACE row,
+    preserving its id and force intent, rather than creating a parallel job.
     """
     if not title:
         title = os.path.basename(video_path)
@@ -638,8 +708,25 @@ def create_job_if_no_active(
             (norm, *ACTIVE_JOB_STATUSES),
         ).fetchone()
         if existing:
-            conn.execute("ROLLBACK")
             d = dict(existing)
+            resumed = False
+            # A manual request bypasses grace on the existing job. If a retry
+            # already claimed it, mark the bypass without scheduling a second owner.
+            if (event_source == "MANUAL" and not d.get("grace_completed")
+                    and (d["status"] == "WAITING_GRACE" or
+                         (d.get("event_source") in ("SONARR", "RADARR")
+                          and d["status"] in ("QUEUED", "TRANSLATING")
+                          and not d.get("primary_provider") and not d.get("processed_lines")))):
+                resumed = d["status"] == "WAITING_GRACE"
+                conn.execute("UPDATE jobs SET grace_completed=1 WHERE id=?", (d["id"],))
+                if resumed:
+                    conn.execute("""UPDATE jobs SET status='QUEUED', next_retry_at=NULL, reason=NULL,
+                                    force_retranslate=?, updated_at=? WHERE id=?""",
+                                 (int(force_retranslate or bool(d.get("force_retranslate"))), now, d["id"]))
+                d = dict(conn.execute("SELECT * FROM jobs WHERE id=?", (d["id"],)).fetchone())
+                conn.execute("COMMIT")
+            else:
+                conn.execute("ROLLBACK")
             if d.get("logs"):
                 try:
                     d["logs"] = json.loads(d["logs"])
@@ -647,7 +734,7 @@ def create_job_if_no_active(
                     d["logs"] = []
             else:
                 d["logs"] = []
-            return {"job_id": d["id"], "created": False, "existing_job": d}
+            return {"job_id": d["id"], "created": False, "existing_job": d, "resumed": resumed}
 
         # No active job: create a new QUEUED job, storing the force flag.
         conn.execute(
@@ -786,7 +873,7 @@ def claim_job_for_retry(job_id: int) -> bool:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE jobs SET status = 'QUEUED' WHERE id = ? AND status IN "
-            "('WAITING_PROVIDER', 'RETRY_PENDING', 'RECOVERING', 'PARTIAL', 'WAITING_SOURCE', 'DEFERRED', 'WAITING_FOR_BAZARR', 'WAITING_FOR_PUBLICATION')",
+            "('WAITING_PROVIDER', 'RETRY_PENDING', 'RECOVERING', 'PARTIAL', 'WAITING_SOURCE', 'DEFERRED', 'WAITING_FOR_BAZARR', 'WAITING_FOR_PUBLICATION', 'WAITING_GRACE')",
             (job_id,)
         )
         conn.commit()
@@ -823,6 +910,7 @@ CASE status
     -- 2. Waiting / deferred states
     WHEN 'WAITING_PROVIDER' THEN 20
     WHEN 'WAITING_SOURCE' THEN 21
+    WHEN 'WAITING_GRACE' THEN 21
     WHEN 'WAITING_FOR_BAZARR' THEN 22
     WHEN 'WAITING_FOR_PUBLICATION' THEN 23
     WHEN 'DEFERRED' THEN 24

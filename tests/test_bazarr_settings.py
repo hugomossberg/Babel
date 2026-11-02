@@ -160,7 +160,7 @@ async def test_9_bazarr_controller_get_status_unreachable_and_timeout():
 
 def test_10_ai_secret_helpers_and_resolution():
     """TEST 10: Secret masking, checking, and resolution helpers behave consistently."""
-    assert mask_secret("short") == "short"
+    assert mask_secret("short") == "••••••••"
     assert mask_secret("12345678") == "••••••••5678"
     assert mask_secret("my_super_long_secret_key_abcd") == "••••••••abcd"
     

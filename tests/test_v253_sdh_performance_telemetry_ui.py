@@ -1079,7 +1079,7 @@ def test_n_stats_no_ai_external_target_excluded_from_translated_average(tmp_path
 # ===========================================================================
 
 @pytest.mark.asyncio
-async def test_o_mid_translation_external_target_wins_truthfully(tmp_path, monkeypatch):
+async def test_o_mid_translation_external_target_wins_truthfully(tmp_path, monkeypatch, empty_gemini_provider):
     """
     Proves that when an external verified target appears while AI translation is in progress:
     - Bazarr is disabled
@@ -1165,7 +1165,7 @@ async def test_o_mid_translation_external_target_wins_truthfully(tmp_path, monke
 # ===========================================================================
 
 @pytest.mark.asyncio
-async def test_p_mixed_ai_and_external_multilang_yields_translated(tmp_path, monkeypatch):
+async def test_p_mixed_ai_and_external_multilang_yields_translated(tmp_path, monkeypatch, empty_gemini_provider):
     """
     Proves that in a multi-language job where one language is satisfied by an external target
     and another language is translated and published by Babel AI:

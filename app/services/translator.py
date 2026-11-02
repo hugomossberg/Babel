@@ -1,4 +1,4 @@
-from app.core.ai_providers import ProviderContext, resolve_job_provider_context
+from app.core.ai_providers import ProviderContext, resolve_job_provider_context, get_default_model
 import asyncio
 import json
 import logging
@@ -88,6 +88,10 @@ from app.core.quota import QuotaError, DailyQuotaExhaustedError, RequestBudgetEx
 class ProviderUnavailableError(Exception):
     """Transient error: rate limit, network timeout, 5xx server error."""
     pass
+
+class ProviderRequestTimeout(ProviderUnavailableError):
+    """Inference timed out; stop the current pass instead of starting more chunks."""
+
 
 class ProviderConfigurationError(Exception):
     """Permanent error: 401 Unauthorized, 403 Forbidden, invalid API key, invalid model name."""
@@ -336,6 +340,13 @@ def with_retry(func_or_provider=None, **decorator_kwargs):
                         _cancel_or_fail(type(e).__name__)
                         raise
 
+                    # Timeout exceptions often have an empty message. Classify by type,
+                    # otherwise QA treats them as per-chunk parse failures and starts
+                    # dozens of equally expensive requests on slow inference hardware.
+                    if isinstance(e, (httpx.TimeoutException, TimeoutError, openai.APITimeoutError)):
+                        _cancel_or_fail("REQUEST_TIMEOUT")
+                        raise _request_timeout_error(provider, e) from e
+
                     # Re-raise already-classified errors immediately
                     if isinstance(e, (ProviderConfigurationError, ProviderUnavailableError)):
                         _cancel_or_fail(type(e).__name__)
@@ -408,6 +419,47 @@ import httpx
 import srt
 
 from app.core.db import DB_PATH, get_setting, update_job, append_job_log, save_translation_memory, get_translation_memory, get_positive_int_setting
+
+
+def get_llm_request_timeout() -> Optional[int]:
+    """Return an explicit timeout override, preserving each provider's default at 0.
+
+    Defend against manually edited or old databases as well as validated API input.
+    SDK units differ: seconds for httpx/OpenAI, milliseconds for Google GenAI.
+    """
+    try:
+        timeout = int(get_setting("llm_request_timeout_seconds", "0"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return timeout if 1 <= timeout <= 3600 else None
+
+
+def _request_timeout_error(provider: str, exc: Exception) -> ProviderRequestTimeout:
+    configured = get_llm_request_timeout()
+    limit = f"{configured}s" if configured else "the provider default"
+    return ProviderRequestTimeout(
+        f"{provider} request timeout ({type(exc).__name__}, {limit}). "
+        "Increase AI Request Timeout in settings for slower inference."
+    )
+
+
+def _normalize_request_timeout(func):
+    @functools.wraps(func)
+    async def wrapper(self, provider, *args, **kwargs):
+        try:
+            return await func(self, provider, *args, **kwargs)
+        except (httpx.TimeoutException, TimeoutError, openai.APITimeoutError) as exc:
+            raise _request_timeout_error(provider, exc) from exc
+    return wrapper
+
+
+def _llm_client_options(provider: str) -> dict:
+    timeout = get_llm_request_timeout()
+    if timeout is None:
+        return {}
+    if provider == "gemini":
+        return {"http_options": types.HttpOptions(timeout=timeout * 1000)}
+    return {"timeout": timeout}
 
 def _infer_usage_stage(func_name: str, kwargs: dict) -> str:
     """
@@ -1643,6 +1695,7 @@ class SubtitleTranslator:
         """Strict JSON Schema for OpenAI-compatible providers (all properties required)."""
         return self._convert_to_strict_json_schema(schema, force_all_required=True)
 
+    @_normalize_request_timeout
     async def _dispatch_llm_completion(
         self,
         provider: str,
@@ -1660,7 +1713,7 @@ class SubtitleTranslator:
             from google import genai
             from google.genai import types
             api_key = get_setting("gemini_api_key", "")
-            client = genai.Client(api_key=api_key or "dummy")
+            client = genai.Client(api_key=api_key or "dummy", **_llm_client_options("gemini"))
             m_name = model_name or get_setting("gemini_model", "gemini-3.5-flash-lite")
             caps = get_model_capabilities("gemini", m_name)
             config_kwargs = {
@@ -1693,13 +1746,14 @@ class SubtitleTranslator:
             import openai
             if p == "openai":
                 api_key = get_setting("openai_api_key", "")
-                client = openai.OpenAI(api_key=api_key or "dummy")
+                client = openai.OpenAI(api_key=api_key or "dummy", **_llm_client_options(p))
                 m_name = model_name or get_setting("openai_model", "gpt-4o-mini")
             elif p == "openrouter":
                 api_key = get_setting("openrouter_api_key", "")
                 client = openai.OpenAI(
                     api_key=api_key or "dummy",
                     base_url="https://openrouter.ai/api/v1",
+                    **_llm_client_options(p),
                     default_headers={"HTTP-Referer": "https://github.com/hugomossberg/Babel", "X-Title": "Babel"},
                 )
                 m_name = model_name or get_setting("openrouter_model", "")
@@ -1708,14 +1762,16 @@ class SubtitleTranslator:
                 client = openai.OpenAI(
                     api_key=api_key or "dummy",
                     base_url="https://api.deepseek.com",
+                    **_llm_client_options(p),
                 )
-                m_name = model_name or get_setting("deepseek_model", "deepseek-v4-flash")
+                m_name = model_name or get_setting("deepseek_model", get_default_model("deepseek"))
             else:  # custom
                 api_key = get_setting("custom_openai_api_key", "") or "dummy"
                 base_url = get_setting("custom_openai_url", "http://localhost:8000/v1")
                 client = openai.OpenAI(
                     api_key=api_key,
                     base_url=base_url,
+                    **_llm_client_options(p),
                 )
                 m_name = model_name or get_setting("custom_openai_model", "default")
 
@@ -1816,7 +1872,7 @@ class SubtitleTranslator:
                         "schema": _anthropic_schema,
                     }
                 }
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=get_llm_request_timeout() or 60.0) as client:
                 resp = await client.post(
                     "https://api.anthropic.com/v1/messages",
                     headers={
@@ -1856,7 +1912,7 @@ class SubtitleTranslator:
                 req_payload["format"] = "json"
             if temperature is not None and caps.temperature:
                 req_payload["options"] = {"temperature": temperature}
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=get_llm_request_timeout() or 60.0) as client:
                 resp = await client.post(
                     f"{ollama_url}/api/generate",
                     json=req_payload,
@@ -2226,29 +2282,40 @@ CRITICAL RULES:
     def __init__(self):
         self._cached_gemini_key = None
         self._cached_gemini_client = None
+        self._cached_gemini_timeout = None
         self._cached_openai_key = None
         self._cached_openai_client = None
+        self._cached_openai_timeout = None
 
     def get_gemini_client(self):
         api_key = get_setting("gemini_api_key", "")
         if not api_key:
             raise ValueError("Gemini API Key is not configured in settings.")
-        if self._cached_gemini_client and self._cached_gemini_key == api_key:
+        timeout = get_llm_request_timeout()
+        if self._cached_gemini_client and self._cached_gemini_key == api_key and self._cached_gemini_timeout == timeout:
             return self._cached_gemini_client
-        self._cached_gemini_key = api_key
         from google import genai
-        self._cached_gemini_client = genai.Client(api_key=api_key)
+        client = genai.Client(api_key=api_key, **_llm_client_options("gemini"))
+        self._cached_gemini_key = api_key
+        self._cached_gemini_timeout = timeout
+        # Do not close a replaced client while a thread may still be using it.
+        # The SDK releases its transport when the final reference is collected.
+        self._cached_gemini_client = client
         return self._cached_gemini_client
 
     def get_openai_client(self):
         api_key = get_setting("openai_api_key", "")
         if not api_key:
             raise ValueError("OpenAI API Key is not configured in settings.")
-        if self._cached_openai_client and self._cached_openai_key == api_key:
+        timeout = get_llm_request_timeout()
+        if self._cached_openai_client and self._cached_openai_key == api_key and self._cached_openai_timeout == timeout:
             return self._cached_openai_client
-        self._cached_openai_key = api_key
         import openai
-        self._cached_openai_client = openai.OpenAI(api_key=api_key)
+        client = openai.OpenAI(api_key=api_key, **_llm_client_options("openai"))
+        self._cached_openai_key = api_key
+        self._cached_openai_timeout = timeout
+        # Keep in-flight calls alive; the SDK transport closes on collection.
+        self._cached_openai_client = client
         return self._cached_openai_client
 
     @with_retry
@@ -2273,7 +2340,7 @@ CRITICAL RULES:
             source_lang_code = get_deepl_source_code(source_language)
             url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
             _mark_sdk_started(_usage_token_ctx.get(None))
-            async with httpx.AsyncClient(timeout=30.0) as http_client:
+            async with httpx.AsyncClient(timeout=get_llm_request_timeout() or 30.0) as http_client:
                 resp = await http_client.post(
                     url,
                     headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
@@ -2428,7 +2495,7 @@ CRITICAL RULES:
                                     show_title=show_title,
                                     job_id=job_id
                                 )
-                            except (DailyQuotaExhaustedError, RequestBudgetExhaustedError, ProviderConfigurationError):
+                            except (DailyQuotaExhaustedError, RequestBudgetExhaustedError, ProviderConfigurationError, ProviderRequestTimeout):
                                 raise
                             except Exception as e:
                                 logger.error(f"Escalation line {target_idx} semantic invariant audit failed: {e}")
@@ -2452,7 +2519,7 @@ CRITICAL RULES:
                 elif exhausted_strategies is not None:
                     exhausted_strategies.add(strategy_key)
 
-            except (DailyQuotaExhaustedError, RequestBudgetExhaustedError, ProviderConfigurationError):
+            except (DailyQuotaExhaustedError, RequestBudgetExhaustedError, ProviderConfigurationError, ProviderRequestTimeout):
                 raise
             except Exception as e:
                 logger.error(f"Escalation line {target_idx} API call failed: {e}")
@@ -2578,7 +2645,7 @@ CRITICAL RULES:
         texts = [it["text"] for it in items]
         model_type = get_setting("deepl_model_type", "prefer_quality_optimized")
         _mark_sdk_started(_usage_token_ctx.get(None))
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=get_llm_request_timeout() or 30.0) as client:
             resp = await client.post(
                 url,
                 headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
@@ -2621,7 +2688,7 @@ CRITICAL RULES:
             req_payload["options"] = {"temperature": 0.1}
 
         _mark_sdk_started(_usage_token_ctx.get(None))
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=get_llm_request_timeout() or 60.0) as client:
             resp = await client.post(
                 f"{ollama_url}/api/generate",
                 json=req_payload
@@ -2702,6 +2769,8 @@ CRITICAL RULES:
             data = json.loads(clean)
             if isinstance(data, dict) and "alignment_verdict" in data:
                 return data
+        except ProviderRequestTimeout:
+            raise
         except Exception as e:
             logger.warning(f"Alignment audit exception: {e}")
 
@@ -2829,6 +2898,8 @@ CRITICAL RULES:
                             "confidence": focused_res.get("confidence", "LOW"),
                             "details": focused_res.get("details", "Focused single-window escalation")
                         }
+                    except ProviderRequestTimeout:
+                        raise
                     except Exception as e:
                         logger.warning(f"Focused escalation for window {wid} failed: {e}")
                         if wid not in valid_map:
@@ -3035,6 +3106,8 @@ CRITICAL RULES:
                         "details": "Batch result absent from AI response (fail-closed)"
                     }
             return results
+        except ProviderRequestTimeout:
+            raise
         except Exception as e:
             logger.warning(f"Consolidated batch semantic audit exception: {e}")
             return {}
@@ -3119,6 +3192,8 @@ CRITICAL RULES:
                     "confidence": data.get("confidence", "LOW"),
                     "details": data.get("details", "")
                 }
+        except ProviderRequestTimeout:
+            raise
         except Exception as e:
             logger.warning(f"Batch confirmation exception: {e}")
 
@@ -3290,6 +3365,41 @@ CRITICAL RULES:
             from app.core.ai_providers import get_provider_spec
             raise ValueError(f"Unsupported AI provider for translation: {provider}")
 
+
+    def save_partial_progress(self, subs, translated_subs, target_language: str, job_id: int) -> bool:
+        """Checkpoint QA candidates; resumption still runs the full QA gate.
+
+        Use the primary translation checkpoint format, with atomic replacement so
+        an interrupted write cannot destroy the last successfully saved progress.
+        """
+        if not job_id or len(subs) != len(translated_subs):
+            return False
+        import os
+        import hashlib
+        import tempfile
+        import app.core.db
+        from app.core.languages import normalize_language_code
+        lang_code = normalize_language_code(target_language)
+        data_dir = os.path.dirname(app.core.db.DB_PATH)
+        partial_file = os.path.join(data_dir, f"job_{job_id}_{lang_code}_partial.json")
+        fingerprint = hashlib.md5("".join(s.content for s in subs).encode("utf-8")).hexdigest() + "_" + lang_code
+        wrapper = {"fingerprint": fingerprint, "lines": {i: cue.content for i, cue in enumerate(translated_subs)}}
+        tmp_file = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=data_dir, delete=False) as stream:
+                tmp_file = stream.name
+                json.dump(wrapper, stream, ensure_ascii=False)
+            os.replace(tmp_file, partial_file)
+            return True
+        except OSError as exc:
+            logger.error("Failed to checkpoint QA progress for job %s: %s", job_id, exc)
+            return False
+        finally:
+            if tmp_file:
+                try:
+                    os.remove(tmp_file)
+                except OSError:
+                    pass
 
     async def translate_srt_content(
         self,
@@ -3473,6 +3583,10 @@ CRITICAL RULES:
                                     if job_id:
                                         append_job_log(job_id, f"Primary batch lines {sub_start_id}-{sub_end_id}: Retry succeeded (clean ID contract verified).")
                                     return r_valid_map
+                            except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
+                                # A provider failure is not a malformed ID response.
+                                # Partitioning would repeat the same failed inference.
+                                raise
                             except Exception as e:
                                 logger.warning(f"Primary batch retry failed: {e}")
 
@@ -3579,7 +3693,11 @@ CRITICAL RULES:
             async with sem:
                 if stop_event.is_set():
                     return
-                await process_batch(batch_idx, start_idx, chunk, payload)
+                try:
+                    await process_batch(batch_idx, start_idx, chunk, payload)
+                except ProviderRequestTimeout:
+                    stop_event.set()
+                    raise
                 if early_stop_check:
                     try:
                         if await early_stop_check():
@@ -3592,7 +3710,14 @@ CRITICAL RULES:
             tasks.append(run_batch_with_sem(batch_idx, start_idx, chunk, payload))
 
         if tasks:
-            await asyncio.gather(*tasks)
+            pending = [asyncio.create_task(task) for task in tasks]
+            try:
+                await asyncio.gather(*pending)
+            except ProviderRequestTimeout:
+                # Let already running bounded requests settle and checkpoint their
+                # successes; the stop flag prevents queued batches from starting.
+                await asyncio.gather(*pending, return_exceptions=True)
+                raise
 
         if stop_event.is_set():
             return translated_subs
@@ -3658,6 +3783,11 @@ CRITICAL RULES:
                                 if 0 <= rid < len(subs) and is_meaningful_translation(subs[rid].content, cand):
                                     translated_subs[rid].content = cand
                                     total_recovered_micro += 1
+                except ProviderRequestTimeout:
+                    # Preserve earlier successful micro-repair chunks, just as in
+                    # primary QA recovery. Resumption still runs the full QA gate.
+                    self.save_partial_progress(subs, translated_subs, target_language, job_id)
+                    raise
                 except (ProviderUnavailableError, ProviderConfigurationError, DailyQuotaExhaustedError, RequestBudgetExhaustedError):
                     raise
                 except Exception as e:
@@ -3790,7 +3920,7 @@ STRICT RULES:
             url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
             texts = [it["target"] for it in repair_items]
             _mark_sdk_started(_usage_token_ctx.get(None))
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=get_llm_request_timeout() or 30.0) as client:
                 resp = await client.post(
                     url,
                     headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
@@ -3896,7 +4026,7 @@ STRICT RULES:
             url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
             texts = [it["target"] for it in recovery_items]
             _mark_sdk_started(_usage_token_ctx.get(None))
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=get_llm_request_timeout() or 30.0) as client:
                 resp = await client.post(
                     url,
                     headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
@@ -3998,7 +4128,7 @@ STRICT RULES:
             url = "https://api-free.deepl.com/v2/translate" if api_key.endswith(":fx") else "https://api.deepl.com/v2/translate"
             texts = [it["target"] for it in recovery_items]
             _mark_sdk_started(_usage_token_ctx.get(None))
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=get_llm_request_timeout() or 30.0) as client:
                 resp = await client.post(
                     url,
                     headers={"Authorization": f"DeepL-Auth-Key {api_key}"},
@@ -4160,7 +4290,7 @@ STRICT CONTRACT:
             filtered_sources = [it for it in source_context_items if it["id"] in repair_set]
             texts = [it["text"] for it in filtered_sources]
             _mark_sdk_started(_usage_token_ctx.get(None))
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=get_llm_request_timeout() or 30.0) as client:
                 resp = await client.post(
                     url,
                     headers={"Authorization": f"DeepL-Auth-Key {api_key}"},

@@ -320,7 +320,7 @@ class TestRegressionFreshJobBudgetExhausted:
 class TestFreshJobWithCapacity:
 
     @pytest.mark.asyncio
-    async def test_fresh_job_with_budget_reaches_translator(self, isolated_db, tmp_path):
+    async def test_fresh_job_with_budget_reaches_translator(self, isolated_db, tmp_path, empty_gemini_provider):
         """
         When budget is available, fresh job must NOT be deferred at admission.
         Translator mock must be called.
