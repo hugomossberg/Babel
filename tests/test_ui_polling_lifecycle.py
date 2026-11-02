@@ -23,6 +23,7 @@ def test_alpine_initializes_component_once():
     "destroy_timers", "destroy_init", "destroy_embedded", "destroy_updates",
     "destroy_health", "health_overlap", "health_terminal", "health_timeout", "health_deadline",
     "job_completion", "embedded_completion", "queued_refresh", "null_job_bindings", "grace_settings",
+    "source_preparation_labels",
 ])
 def test_ui_runtime_lifecycle(scenario):
     node = shutil.which("node")
