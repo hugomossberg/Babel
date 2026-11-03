@@ -5,21 +5,54 @@
 [![Docker](https://img.shields.io/badge/Docker-ghcr.io%2Fhugomossberg%2Fbabel-blue?logo=docker)](https://github.com/hugomossberg/Babel/pkgs/container/babel)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Babel** is a self-hosted subtitle automation engine built for Sonarr, Radarr, Bazarr, and modern media servers.
+**Babel** is a self-hosted subtitle automation tool for Sonarr, Radarr, Bazarr, and media servers such as Jellyfin.
 
-It automatically finds the best available subtitle source, translates missing languages using AI, validates output against a multi-tier QA gate, recovers recoverable failures, and publishes subtitles with exact source-to-target timestamp preservation.
+It looks for subtitles in your preferred language first. If none are available, Babel can use an existing text subtitle track — including one embedded in an MKV — translate it with AI, check the result, and publish it alongside your media.
 
-> **Install it. Connect your media stack. Forget about subtitles.**
+> **Set it up once. Let Babel handle missing subtitle translations.**
 
 ### At a Glance
-- **Docker-first:** Recommended Compose setup with Babel + lightweight updater sidecar
-- **Automated:** Sonarr & Radarr webhooks
-- **Smart Sourcing:** Hybrid Bazarr search + Embedded AI extraction
-- **AI Freedom:** Google Gemini, OpenAI, DeepL, or local Ollama models
-- **Zero Drift:** 0 ms translation-induced timestamp drift
-- **Safe:** Strict QA gate, 0 dropped cues policy, automatic recovery
+- **Works with your media stack:** Sonarr/Radarr webhooks, Bazarr coordination, and Jellyfin refresh.
+- **Uses existing subtitles:** Embedded or external text tracks; no need to transcribe audio when a suitable source already exists.
+- **Translates to your language:** Cloud providers or local Ollama models.
+- **Checks the output:** Cue counts, language, structure, timestamps, and targeted recovery when something goes wrong.
+- **Preserves source timing:** Translation does not rewrite the source subtitle timestamps.
+- **Runs in Docker:** Web dashboard, progress tracking, and provider cost estimates.
 
 ---
+
+## Quick Start
+
+Babel runs in Docker. The recommended setup uses **Docker Compose v2** and includes a separate updater container.
+
+```bash
+mkdir babel && cd babel
+curl -fsSLO https://raw.githubusercontent.com/hugomossberg/Babel/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/hugomossberg/Babel/main/.env.example
+cp .env.example .env
+```
+
+Set the **host paths** to your TV shows and movies in `.env`:
+
+```env
+TV_PATH=/your/host/path/to/tv
+MOVIES_PATH=/your/host/path/to/movies
+```
+
+Then start Babel:
+
+```bash
+docker compose up -d
+```
+
+Open **`http://YOUR-SERVER-IP:8765`** and configure your target language, AI provider, media folders, and integrations.
+
+> **Important:** Babel sees media at `/tv` and `/movies` *inside its container* with the standard Compose setup. Use these container paths in Babel's media settings, not the original host paths.
+
+Need help with mounts, authentication, webhooks, or the updater? See [Detailed Installation](#detailed-installation) and [Sonarr & Radarr Integration](#sonarr--radarr-integration).
+
+---
+
 ## Screenshots
 
 See Babel in action — from subtitle discovery and translation to QA, usage tracking, and publishing.
@@ -73,41 +106,34 @@ Monitor provider usage, estimated cost, request limits, and deferred translation
 <p align="center">
   <img src="docs/screenshots/ai-usage.png" alt="Babel AI Usage and Queue" width="700">
 </p>
+
 ---
 
 ## Why Babel?
 
-AI translation models are powerful, but non-deterministic. Without strict validation, language models can:
+Most of the time, the problem isn't that a video has no subtitles at all. It's that the subtitles aren't in the language you want.
 
-- Silently skip subtitle lines or entire dialogue blocks
-- Leave untranslated source dialogue in the output
-- Hallucinate or return malformed subtitle formats
-- Misclassify names, sound effects, or speech codes
-- Fail temporarily due to provider rate limits or timeouts
+Babel is built for that gap. It works alongside Bazarr: let Bazarr look for a suitable subtitle first, and use AI translation as a fallback when there's an existing source track but no matching target language.
 
-Babel treats AI providers as **untrusted components**. Every generated subtitle must pass an automated Quality Assurance gate before it is published to your media library.
+AI translations can still skip dialogue, leave lines untranslated, or return broken subtitle structure. Babel checks the output and attempts targeted repairs before publishing. Structural or timing failures block publication; limited unresolved dialogue may be allowed under the configurable **PASS_WITH_WARNINGS** policy.
 
-> **No valid subtitle → no publish.**
+**What Babel doesn't do (yet):** It does not transcribe speech from audio. For videos with no usable text subtitle track, a speech-to-text tool such as Whisper is the appropriate first step.
 
 ---
 
 ## Features
 
 ### Subtitle Resolution & Extraction
-- **Embedded Track Extraction:** Extracts embedded text subtitle tracks directly from MKV/MP4 containers with `ffmpeg`/`mkvextract`.
+- **Embedded Track Extraction:** Extracts existing text subtitle tracks directly from MKV/MP4 files with `ffmpeg`/`mkvextract`.
 - **Existing Subtitle Protection:** Detects existing target language subtitles and skips redundant translation.
-- **Bazarr Coordination:** In Hybrid Mode, checks Bazarr for human subtitles while preparing AI fallback, eliminating fixed delay windows.
-- **Grace Period:** Under Settings → Integrations → Bazarr, configure days and hours (up to 365 days) before automatic AI fallback for new Sonarr/Radarr jobs. The default is **0 hours**, preserving immediate preparation. Waiting jobs survive restarts and retain their original start across scans; changing the duration applies from that start. Babel checks for eligible targets at most every 15 minutes during the wait, without repeated Bazarr search requests. At expiry, Bazarr gets another bounded search opportunity before the existing validated AI fallback. **Translate now** or a manual request bypasses the wait on the same job. Grace requires Hybrid Mode and a configured Bazarr API key; disabling either releases waiting jobs. Existing recovery and provider-retry jobs do not acquire a new grace period.
-- **Source Fallback:** Automatically falls back to external source files (`.en.srt`) or Bazarr-downloaded source tracks if embedded tracks are absent.
+- **Bazarr Coordination:** In Hybrid Mode, gives Bazarr a chance to find the requested language before AI translation.
+- **Optional Grace Period:** Choose how long new Sonarr/Radarr imports should wait for Bazarr before AI translation starts. The default is 0 hours; see [Advanced Settings](#advanced-settings).
+- **Source Fallback:** Uses external source files (such as `.en.srt`) or Bazarr-downloaded source tracks if an embedded source is unavailable.
 
 ### AI Translation Engine
-- **Multiple Providers:** Supported backends include:
-  - **Google Gemini** (via official SDK, default: `gemini-3.5-flash-lite`)
-  - **OpenAI** (e.g., `gpt-4o-mini`, `gpt-4o`)
-  - **DeepL** (Free and Pro API)
-  - **Ollama / Local Models** (local OpenAI-compatible or Ollama endpoints)
+- **Multiple Providers:** Gemini, OpenAI, Anthropic, DeepSeek, OpenRouter, DeepL, Ollama, and custom OpenAI-compatible endpoints.
 - **Batch Processing:** Processes subtitles in optimal chunks (default: 50 lines) to minimize token overhead and latency while maintaining context.
-- **Configurable Request Timeout:** Under Settings → AI, set **AI Request Timeout (Seconds)** to 1–3600 for slower inference, including CPU-only Ollama. `0` preserves existing provider defaults (60 seconds for Ollama). The override applies to translation, QA, and recovery; it is a per-request transport timeout, and SDK retries may extend total elapsed time. A timeout stops the current pass, keeps completed batch checkpoints, and allows up to three automatic job retries before requiring a manual retry. Increase the timeout or reduce batch size before retrying. QA validation still runs before publication.
+- **Configurable Request Timeout:** Adjust provider timeouts for slow endpoints and local models; see [Advanced Settings](#advanced-settings).
 - **Context-Aware Translation:** Uses dialogue context and optional series-specific glossaries for consistent terminology.
 
 ### Multi-Stage Automatic Recovery
@@ -124,12 +150,86 @@ Babel treats AI providers as **untrusted components**. Every generated subtitle 
 ### Media Stack Automation
 - **Sonarr & Radarr Webhooks:** Automated processing triggered on new media import and upgrade events.
 - **Remote Path Mapping:** Built-in path translation for Docker setups with differing host/container mount structures.
-- **Jellyfin Notification:** Automatically notifies Jellyfin (`/Library/Refresh`) upon subtitle publication for instant media player availability.
+- **Jellyfin Notification:** Notifies Jellyfin (`/Library/Refresh`) after publishing so the media library can refresh.
 - **Modern Web Dashboard:** Dark-mode management UI with live activity logging, manual file processing, and interactive settings.
 
 ---
 
-## Quick Start
+## How It Works
+
+```text
+Media imported (Sonarr / Radarr / Manual)
+       │
+       ▼
+Target subtitle already present?
+       │
+       ├── Yes ──► Validate / Keep existing
+       │
+       ▼
+[Hybrid Mode] Trigger Bazarr search
+while preparing AI fallback in parallel
+       │
+       ├─► Source resolution
+       ├─► Embedded / external source preparation
+       ├─► SDH sanitize / normalization
+       └─► Source validation
+       │
+       ▼
+Final Target / Bazarr Check
+(immediately before first AI provider call)
+       │
+       ├── Found ──► Adopt human subtitle
+       │             AI provider calls = 0
+       │
+       ▼ Miss
+AI Translation in batched chunks
+       │
+       ▼
+Multi-Stage Recovery
+(Micro-repair → Targeted recovery → Context escalation)
+       │
+       ▼
+Quality Assurance Gate
+       │
+       ├── FAIL ──► Block publication & log diagnostics
+       │
+       ▼
+      PASS 
+       │
+       ▼
+Atomic publication (.target.srt)
+       │
+       ▼
+Media Server Refresh
+```
+
+---
+
+## Pipeline Modes
+
+### Hybrid Mode (Recommended for mixed libraries)
+Babel checks Bazarr for an existing human subtitle while preparing its AI fallback. With the default grace period of 0 hours, there is no additional configured waiting period. You can optionally give Bazarr more time before AI translation starts.
+
+### Pure AI Mode
+Babel immediately extracts the embedded source track and translates it with AI, bypassing Bazarr searches entirely.
+
+---
+
+## Quality Assurance Policy
+
+Babel validates every subtitle before writing to disk using a three-tier decision model:
+
+| Result | Criteria | Action |
+|---|---|---|
+| **`PASS`** | 100% of cues translated or verified safe invariants. 0 dropped lines, 0 ms timestamp drift, verified language match. | Published after validation. |
+| **`PASS_WITH_WARNINGS`** | All timing and structural checks pass. By default, allows at most 3 unresolved dialogue cues AND at most 1% of total cues (configurable). Remaining stubborn cues are preserved as source text to avoid deadlock. | Published with warnings recorded. |
+| **`FAIL`** | Structural defect, dropped cue blocks, timestamp corruption, excessive untranslated dialogue, or detected wrong language. | **Blocked.** File is not published. |
+
+> **Timestamp Precision Note:** Babel guarantees **source-to-target timestamp preservation** (zero translation-induced timing drift). It preserves the timing relative to the selected source track. If the source subtitle track itself has pre-existing broadcast timing offsets, Babel preserves those timestamps faithful to the source.
+
+---
+
+## Detailed Installation
 Install Babel using **Docker Compose v2**. The standard installation includes Babel and the `babel-updater` sidecar for zero-configuration One-Click in-app updates.
 
 > **Prerequisite:** Babel requires Docker with **Docker Compose v2**.
@@ -253,100 +353,6 @@ Configure your preferred settings:
 
 ---
 
-## Updating Babel
-
-See the [v2.5.6-beta release notes](docs/releases/v2.5.6-beta.md) for Grace Period, model discovery, security updates and upgrade requirements. The [changelog](CHANGELOG.md) lists the changes in this beta.
-
-### Recommended: One-Click In-App Updates
-If you use the recommended Docker Compose setup with `babel-updater`:
-- Babel automatically checks for new releases when the web UI is opened and periodically in the background.
-- When an update is released, an **Update available** badge appears in the header and Settings.
-- Click **Update now** (or review changes in "What's new").
-- The updater pulls the latest image, replaces the container, and verifies health.
-- If health verification fails, the updater automatically rolls back to the previous working container.
-
-### Manual Fallback
-You can also update manually via the terminal at any time:
-
-```bash
-docker compose pull
-docker compose up -d
-```
-
----
-
-## How It Works
-
-```text
-Media imported (Sonarr / Radarr / Manual)
-       │
-       ▼
-Target subtitle already present?
-       │
-       ├── Yes ──► Validate / Keep existing
-       │
-       ▼
-[Hybrid Mode] Trigger Bazarr search
-while preparing AI fallback in parallel
-       │
-       ├─► Source resolution
-       ├─► Embedded / external source preparation
-       ├─► SDH sanitize / normalization
-       └─► Source validation
-       │
-       ▼
-Final Target / Bazarr Check
-(immediately before first AI provider call)
-       │
-       ├── Found ──► Adopt human subtitle
-       │             AI provider calls = 0
-       │
-       ▼ Miss
-AI Translation in batched chunks
-       │
-       ▼
-Multi-Stage Recovery
-(Micro-repair → Targeted recovery → Context escalation)
-       │
-       ▼
-Quality Assurance Gate
-       │
-       ├── FAIL ──► Block publication & log diagnostics
-       │
-       ▼
-      PASS 
-       │
-       ▼
-Atomic publication (.target.srt)
-       │
-       ▼
-Media Server Refresh
-```
-
----
-
-## Pipeline Modes
-
-### Hybrid Mode (Recommended for mixed libraries)
-Babel checks Bazarr for an existing human subtitle while preparing its AI fallback. This avoids a fixed waiting delay. If no target subtitle is available when preparation is complete, AI translation begins immediately.
-
-### Pure AI Mode
-Babel immediately extracts the embedded source track and translates it with AI, bypassing Bazarr searches entirely.
-
----
-
-## Quality Assurance Policy
-
-Babel validates every subtitle before writing to disk using a three-tier decision model:
-
-| Result | Criteria | Action |
-|---|---|---|
-| **`PASS`** | 100% of cues translated or verified safe invariants. 0 dropped lines, 0 ms timestamp drift, verified language match. | Published immediately with full confidence. |
-| **`PASS_WITH_WARNINGS`** | All timing and structural checks pass. By default, allows at most 3 unresolved dialogue cues AND at most 1% of total cues (configurable). Remaining stubborn cues are preserved as source text to avoid deadlock. | Published cleanly. |
-| **`FAIL`** | Structural defect, dropped cue blocks, timestamp corruption, excessive untranslated dialogue, or detected wrong language. | **Blocked.** File is not published. |
-
-> **Timestamp Precision Note:** Babel guarantees **source-to-target timestamp preservation** (zero translation-induced timing drift). It preserves the timing relative to the selected source track. If the source subtitle track itself has pre-existing broadcast timing offsets, Babel preserves those timestamps faithful to the source.
-
 ## Sonarr & Radarr Integration
 
 Babel can process media automatically upon file import or upgrade.
@@ -389,7 +395,9 @@ Configure Remote Path Mapping in Settings:
 
 ## Bazarr Integration
 
-Babel coordinates with Bazarr's REST API:
+Babel **works alongside** Bazarr rather than replacing it. In Hybrid Mode, it checks for subtitles in your preferred language before using AI translation.
+
+To connect Bazarr through its REST API:
 - In Settings, enter your **Bazarr Host URL** (e.g. `http://YOUR-SERVER-IP:6767`) and **API Key**.
 - Use **Test Connection** to verify connectivity.
 
@@ -401,7 +409,7 @@ Most configuration is handled in the web interface and stored in `/app/data/babe
 
 ### Environment Variables
 
-Configuration is mostly handled in the web interface and stored in `/app/data/babel.db`. For advanced deployments, you can specify these environment variables in your `.env` file:
+For advanced deployments, you can specify these environment variables in `.env`:
 
 | Variable | Default | Description |
 |---|---|---|
@@ -433,6 +441,60 @@ Older single-container installations will not receive `babel-updater` automatica
    docker compose pull
    docker compose up -d
    ```
+
+---
+
+## Updating Babel
+
+For release notes and upgrade changes, check the [GitHub releases](https://github.com/hugomossberg/Babel/releases) and [changelog](CHANGELOG.md).
+
+### Recommended: One-Click In-App Updates
+If you use the recommended Docker Compose setup with `babel-updater`:
+- Babel automatically checks for new releases when the web UI is opened and periodically in the background.
+- When an update is released, an **Update available** badge appears in the header and Settings.
+- Click **Update now** (or review changes in "What's new").
+- The updater pulls the latest image, replaces the container, and verifies health.
+- If health verification fails, the updater automatically rolls back to the previous working container.
+
+### Manual Fallback
+You can also update manually via the terminal at any time:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+---
+
+## Advanced Settings
+
+### Bazarr Grace Period
+
+Under Settings → Integrations → Bazarr, configure days and hours (up to 365 days) before automatic AI fallback for new Sonarr/Radarr jobs. The default is **0 hours**, preserving immediate preparation. Waiting jobs survive restarts and retain their original start across scans; changing the duration applies from that start. Babel checks for eligible targets at most every 15 minutes during the wait, without repeated Bazarr search requests. At expiry, Bazarr gets another bounded search opportunity before the existing validated AI fallback. **Translate now** or a manual request bypasses the wait on the same job. Grace requires Hybrid Mode and a configured Bazarr API key; disabling either releases waiting jobs. Existing recovery and provider-retry jobs do not acquire a new grace period.
+
+### AI Request Timeout
+
+Under Settings → AI, set **AI Request Timeout (Seconds)** to 1–3600 for slower inference, including CPU-only Ollama. `0` preserves existing provider defaults (60 seconds for Ollama). The override applies to translation, QA, and recovery; it is a per-request transport timeout, and SDK retries may extend total elapsed time. A timeout stops the current pass, keeps completed batch checkpoints, and allows up to three automatic job retries before requiring a manual retry. Increase the timeout or reduce batch size before retrying. QA validation still runs before publication.
+
+---
+
+## Frequently Asked Questions
+
+**Does Babel replace Bazarr?**
+
+No. Babel can work alongside Bazarr, which gets the first chance to find subtitles in your preferred language.
+
+**Can Babel generate subtitles directly from audio?**
+
+Not currently. Babel translates existing text subtitle tracks. Audio transcription needs a separate speech-to-text tool.
+
+**Can I use it on Unraid?**
+
+Babel is distributed as a Docker image, so it can be deployed on Unraid with the appropriate port and media volume mappings. There isn't an official Community Apps template at the moment; the [Docker Compose setup](#quick-start) is the reference.
+
+**Does translation require a paid cloud API?**
+
+Not necessarily. Babel also supports local Ollama models. Translation speed and quality depend on the model, hardware, and language pair.
 
 ---
 
