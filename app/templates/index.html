@@ -566,7 +566,8 @@
     </section>
 
     <!-- 2. MEDIA FILES TAB -->
-    <section x-show="currentTab === 'media'" x-cloak>
+    <template x-if="currentTab === 'media'">
+    <section x-cloak>
       <div class="space-y-6">
 
         <!-- Header Controls -->
@@ -662,8 +663,15 @@
           </div>
         </div>
 
+        <nav aria-label="Library pages" x-show="getLibraryPageCount() > 1" class="flex items-center justify-end gap-3 mb-4 text-sm text-slate-300">
+          <button aria-label="Previous library page" @click="libraryPage = getLibraryPage() - 1" :disabled="getLibraryPage() <= 1" class="px-3 py-2 bg-slate-800 rounded-lg disabled:opacity-40">Previous</button>
+          <span x-text="'Page ' + getLibraryPage() + ' of ' + getLibraryPageCount()"></span>
+          <button aria-label="Next library page" @click="libraryPage = getLibraryPage() + 1" :disabled="getLibraryPage() >= getLibraryPageCount()" class="px-3 py-2 bg-slate-800 rounded-lg disabled:opacity-40">Next</button>
+        </nav>
+
         <!-- TV Series Group View -->
-        <div x-show="mediaCategory === 'series'" class="space-y-4 transition-opacity duration-200" :class="scanningFolders ? 'opacity-50 pointer-events-none' : 'opacity-100'">
+        <template x-if="mediaCategory === 'series'">
+        <div class="space-y-4 transition-opacity duration-200" :class="scanningFolders ? 'opacity-50 pointer-events-none' : 'opacity-100'">
           <template x-if="getFilteredSeries().length === 0">
             <div class="p-8 text-center bg-slate-900/60 border border-slate-800 rounded-2xl space-y-3">
               <div class="w-10 h-10 mx-auto rounded-xl bg-slate-800/60 border border-slate-700/50 flex items-center justify-center text-slate-500">
@@ -679,7 +687,7 @@
             </div>
           </template>
 
-          <template x-for="show in getFilteredSeries()" :key="show.title">
+          <template x-for="show in getLibraryPageItems()" :key="show.title">
             <div class="bg-slate-900/60 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
               <div @click="toggleShow(show.title)" class="p-5 bg-slate-800/40 border-b border-slate-800 flex items-center justify-between cursor-pointer hover:bg-slate-800/60 transition">
                 <div class="flex items-center space-x-3">
@@ -708,7 +716,8 @@
                 </div>
               </div>
 
-              <div x-show="isShowOpen(show.title)" class="p-4 space-y-4">
+              <template x-if="isShowOpen(show.title)">
+              <div class="p-4 space-y-4">
                 <!-- Season & Episode Filter Controls Header -->
                 <div class="p-2.5 bg-slate-950/80 border border-slate-800 rounded-xl flex items-center justify-between gap-3 overflow-x-auto flex-wrap">
                   <!-- Seasons List -->
@@ -779,8 +788,8 @@
                     </div>
                   </template>
 
-                  <template x-for="ep in getFilteredEpisodes(show, getSelectedSeason(show.title))" :key="ep.path">
-                    <div class="p-3.5 bg-slate-950/60 border border-slate-800/60 rounded-xl flex items-center justify-between hover:border-slate-700 transition">
+                  <template x-for="ep in getEpisodePageItems(show)" :key="ep.path">
+                    <div data-episode-row class="p-3.5 bg-slate-950/60 border border-slate-800/60 rounded-xl flex items-center justify-between hover:border-slate-700 transition">
                       <div class="flex items-center space-x-3">
                         <i class="fa-solid fa-video text-purple-400 text-lg"></i>
                         <div>
@@ -857,13 +866,22 @@
                     </div>
                   </template>
                 </div>
+                <nav aria-label="Episode pages" x-show="getEpisodePageCount(show) > 1" class="flex items-center justify-end gap-3 text-sm text-slate-300">
+                  <button aria-label="Previous episodes" @click="episodePages[show.title] = getEpisodePage(show) - 1" :disabled="getEpisodePage(show) <= 1" class="px-3 py-2 bg-slate-800 rounded-lg disabled:opacity-40">Previous</button>
+                  <span x-text="'Page ' + getEpisodePage(show) + ' of ' + getEpisodePageCount(show)"></span>
+                  <button aria-label="Next episodes" @click="episodePages[show.title] = getEpisodePage(show) + 1" :disabled="getEpisodePage(show) >= getEpisodePageCount(show)" class="px-3 py-2 bg-slate-800 rounded-lg disabled:opacity-40">Next</button>
+                </nav>
               </div>
+              </template>
             </div>
           </template>
         </div>
 
+        </template>
+
         <!-- Movies View -->
-        <div x-show="mediaCategory === 'movies'" class="space-y-3 transition-opacity duration-200" :class="scanningFolders ? 'opacity-50 pointer-events-none' : 'opacity-100'">
+        <template x-if="mediaCategory === 'movies'">
+        <div class="space-y-3 transition-opacity duration-200" :class="scanningFolders ? 'opacity-50 pointer-events-none' : 'opacity-100'">
           <template x-if="getFilteredMovies().length === 0">
             <div class="p-8 text-center bg-slate-900/60 border border-slate-800 rounded-2xl space-y-3">
               <div class="w-10 h-10 mx-auto rounded-xl bg-slate-800/60 border border-slate-700/50 flex items-center justify-center text-slate-500">
@@ -879,8 +897,8 @@
             </div>
           </template>
 
-          <template x-for="movie in getFilteredMovies()" :key="movie.path">
-            <div class="p-4 bg-slate-900/60 border border-slate-800 rounded-2xl flex items-center justify-between shadow-xl hover:border-purple-500/40 transition">
+          <template x-for="movie in getLibraryPageItems()" :key="movie.path">
+            <div data-movie-row class="p-4 bg-slate-900/60 border border-slate-800 rounded-2xl flex items-center justify-between shadow-xl hover:border-purple-500/40 transition">
               <div class="flex items-center space-x-3">
                 <i class="fa-solid fa-film text-2xl text-purple-400"></i>
                 <div>
@@ -956,9 +974,12 @@
             </div>
           </template>
         </div>
+        </template>
 
       </div>
     </section>
+
+    </template>
 
     <!-- 3. USAGE & QUEUE TAB -->
     <section x-show="currentTab === 'usage'" x-cloak>
@@ -2454,6 +2475,10 @@ docker compose up -d babel</pre>
         mediaData: { series: [], movies: [] },
         mediaSearchQuery: '',
         mediaFilter: 'all',
+        libraryPage: 1,
+        libraryPageSize: 25,
+        episodePageSize: 50,
+        episodePages: {},
         selectedEpisodeFilters: {},
         openShows: {},
         selectedSeasons: {},
@@ -2481,6 +2506,7 @@ docker compose up -d babel</pre>
 
         setSelectedSeason(title, season) {
           this.selectedSeasons[title] = season;
+          this.episodePages[title] = 1;
         },
 
         modalOpen: false,
@@ -2690,6 +2716,9 @@ docker compose up -d babel</pre>
           // Alpine calls init automatically; repeated calls must not duplicate I/O or timers.
           if (this._initialized || this._destroyed) return;
           this._initialized = true;
+          for (const property of ['mediaCategory', 'mediaSearchQuery', 'mediaFilter']) {
+            this.$watch(property, () => { this.libraryPage = 1; });
+          }
           let pendingMarker = null;
           try {
             const rawMarker = sessionStorage.getItem('babelUpdateSuccess');
@@ -2702,9 +2731,9 @@ docker compose up -d babel</pre>
             }
           } catch(e) {}
 
-          // Library data must not wait for update checks or remote model discovery.
+          // Load the library only when the Library tab is opened.
           const initialLoads = Promise.all([
-            this.loadMediaFiles(), this.loadStats(), this.loadJobs(),
+            this.loadStats(), this.loadJobs(),
             this.loadAllSettings(), this.loadQuotaStatus(), this.loadTodayUsage(),
             this.loadUsageStats(), this.loadDeferredQueue()
           ]);
@@ -3779,6 +3808,36 @@ docker compose up -d babel</pre>
           return Boolean(movie.mtime && movie.mtime >= cutoff);
         },
 
+        getLibraryItems() {
+          return this.mediaCategory === 'series' ? this.getFilteredSeries() : this.getFilteredMovies();
+        },
+
+        getLibraryPageCount() {
+          return Math.max(1, Math.ceil(this.getLibraryItems().length / this.libraryPageSize));
+        },
+
+        getLibraryPage() {
+          return Math.min(this.libraryPage, this.getLibraryPageCount());
+        },
+
+        getLibraryPageItems() {
+          const start = (this.getLibraryPage() - 1) * this.libraryPageSize;
+          return this.getLibraryItems().slice(start, start + this.libraryPageSize);
+        },
+
+        getEpisodePageCount(show) {
+          return Math.max(1, Math.ceil(this.getFilteredEpisodes(show, this.getSelectedSeason(show.title)).length / this.episodePageSize));
+        },
+
+        getEpisodePage(show) {
+          return Math.min(this.episodePages[show.title] || 1, this.getEpisodePageCount(show));
+        },
+
+        getEpisodePageItems(show) {
+          const start = (this.getEpisodePage(show) - 1) * this.episodePageSize;
+          return this.getFilteredEpisodes(show, this.getSelectedSeason(show.title)).slice(start, start + this.episodePageSize);
+        },
+
         getFilteredSeries() {
           let list = this.mediaData.series || [];
           const q = (this.mediaSearchQuery || '').trim().toLowerCase();
@@ -3834,6 +3893,7 @@ docker compose up -d babel</pre>
 
         setSelectedEpisodeFilter(title, filter) {
           this.selectedEpisodeFilters[title] = filter;
+          this.episodePages[title] = 1;
         },
 
         getEpisodeFilterCount(show, season, filter) {

@@ -35,6 +35,7 @@ function harness() {
   vm.runInContext(source, context);
   const app = context.babelApp();
   app.$nextTick = callback => callback();
+  app.$watch = () => {};
   const fire = ms => {
     const pending = [];
     for (const [id, timer] of [...timers]) {
@@ -210,7 +211,10 @@ const scenarios = {
     h.context.fetch = url => url === '/api/updates' ? update.promise : url.startsWith('/api/settings/models') ? models.promise : original(url);
     const init = h.app.init();
     await flush();
-    assert.equal(h.app.mediaLoaded, true, 'library must load independently of updater/model discovery');
+    assert.equal(h.app.mediaLoaded, false, 'dashboard must not load the library');
+    assert.equal(h.calls.filter(u => u.startsWith('/api/media-files')).length, 0);
+    await h.app.loadMediaFiles();
+    assert.equal(h.app.mediaLoaded, true, 'opening the library must not wait for updater/model discovery');
     assert.equal(h.app.mediaData.movies[0].title, 'Cached movie');
     update.resolve(response({ updater_status: 'idle' })); models.resolve(response({ models: [] }));
     await init;
@@ -225,7 +229,7 @@ const scenarios = {
     assert.equal(loads, 2);
   },
   async library_refresh() {
-    const h = harness(); await h.app.init(); h.calls.length = 0; h.app.currentTab = 'media';
+    const h = harness(); await h.app.init(); await h.app.loadMediaFiles(); h.calls.length = 0; h.app.currentTab = 'media';
     for (let i = 0; i < 5; i++) { await Promise.all(h.fire(2000)); await flush(); }
     assert.equal(h.calls.filter(u => u.startsWith('/api/media-files')).length, 0, 'no forced scan every ten seconds');
     for (let i = 0; i < 25; i++) { await Promise.all(h.fire(2000)); await flush(); }

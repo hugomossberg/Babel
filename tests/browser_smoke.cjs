@@ -64,10 +64,12 @@ const alpine = path.join(path.dirname(require.resolve('alpinejs/package.json')),
       return route.continue();
     });
     await page.goto(base, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => window.Alpine && Alpine.$data(document.body).mediaLoaded);
-    assert.equal(counts.get('/api/media-files'), 1, 'Alpine must initialize exactly once');
+    await page.waitForFunction(() => window.Alpine && Alpine.$data(document.body)._initialized);
+    assert.equal(counts.get('/api/media-files') || 0, 0, 'Dashboard must not load the library');
     assert.equal(counts.get('/api/stats'), 1);
     await page.getByRole('button', { name: 'Library', exact: true }).click();
+    await page.waitForFunction(() => Alpine.$data(document.body).mediaLoaded);
+    assert.equal(counts.get('/api/media-files'), 1, 'Opening Library loads it once');
     assert.equal(await page.evaluate(() => Alpine.$data(document.body).mediaData.series.length), 1);
     await page.evaluate(() => { const app = Alpine.$data(document.body); app.toggleShow(app.mediaData.series[0].title); });
     await page.getByText('Smoke Show - S01E01.mkv', { exact: true }).waitFor({ state: 'visible' });
@@ -98,7 +100,7 @@ const alpine = path.join(path.dirname(require.resolve('alpinejs/package.json')),
     await page.evaluate(() => Alpine.$data(document.body).loadMediaFiles(true));
     await page.getByText('Smoke Movie.mkv', { exact: true }).waitFor({ state: 'visible' });
     await page.evaluate(() => { Alpine.$data(document.body).mediaData.movies[0].active_job = { status: 'TRANSLATING', processed_lines: 5, total_lines: 10 }; });
-    await page.getByText('TRANSLATING 50%', { exact: true }).waitFor({ state: 'visible' });
+    await page.getByText('Translating 50%', { exact: true }).filter({ visible: true }).first().waitFor({ state: 'visible' });
     await page.evaluate(() => { Alpine.$data(document.body).mediaData.movies[0].active_job = null; });
     // Exercise the shipped selects and Alpine DOM bindings, with only discovery HTTP mocked.
     await page.evaluate(() => {
@@ -148,7 +150,7 @@ const alpine = path.join(path.dirname(require.resolve('alpinejs/package.json')),
       app.currentTab = 'media';
       app.mediaData.movies[0].active_job = { status: 'WAITING_GRACE', grace_until: '2026-11-04T12:00:00Z' };
     });
-    await page.getByText(/Grace Period until/).waitFor({ state: 'visible' });
+    await page.getByText(/Grace Period until/).filter({ visible: true }).first().waitFor({ state: 'visible' });
     await page.getByRole('button', { name: 'Translate now', exact: true }).click();
     const manualDeadline = Date.now() + 5000;
     while (!manualOverride && Date.now() < manualDeadline) await page.waitForTimeout(50);
