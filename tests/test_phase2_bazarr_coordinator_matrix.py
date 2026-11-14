@@ -718,7 +718,9 @@ async def test_matrix_j_ai_qa_pass_bazarr_sync_active_publication_prohibited(tmp
             target_lang="sv",
             bazarr_url="http://bazarr:6767",
             bazarr_api_key="key",
-            timeout_sec=0.1,
+            # Polls cost no wall time on the virtual clock; this leaves room
+            # for HTTP client setup on a loaded machine.
+            timeout_sec=2.0,
         )
         assert res.granted is False
         assert res.defer is True
@@ -740,14 +742,16 @@ async def test_matrix_k_bazarr_completes_no_target_ai_qa_pass_publication_permit
             target_lang="sv",
             bazarr_url="http://bazarr:6767",
             bazarr_api_key="key",
-            timeout_sec=0.1,
+            # Polls cost no wall time on the virtual clock; this leaves room
+            # for HTTP client setup on a loaded machine.
+            timeout_sec=2.0,
         )
         assert res.granted is True
         assert res.reason == "quiescent_and_verified"
 
 
 @pytest.mark.asyncio
-async def test_matrix_l_probe_reports_no_embedded_tracks_no_24lang_loop(tmp_path, monkeypatch):
+async def test_matrix_l_probe_reports_no_embedded_tracks_no_24lang_loop(tmp_path, monkeypatch, indexed_bazarr_http):
     """Matrix L: Container probe reports no embedded subtitle tracks -> no redundant extraction loop."""
     setup_mock_settings(monkeypatch)
     video_path = tmp_path / "MatrixL.mkv"

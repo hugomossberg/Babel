@@ -1,6 +1,5 @@
 import pytest
 import asyncio
-import time
 import httpx
 from unittest.mock import patch, MagicMock
 
@@ -59,7 +58,7 @@ async def test_bazarr_readiness_retry_eventually_succeeds():
     with patch("httpx.AsyncClient", lambda **kwargs: orig_client(transport=transport, **{k: v for k, v in kwargs.items() if k != "transport"})), \
          patch("app.core.db.append_job_log", lambda j_id, msg: logs.append(msg)):
 
-        t0 = time.monotonic()
+        t0 = asyncio.get_running_loop().time()
         res = await coordinator.trigger_or_attach_target_search(
             video_path=video_path,
             target_lang="sv",
@@ -68,7 +67,7 @@ async def test_bazarr_readiness_retry_eventually_succeeds():
             job_id=99,
             readiness_timeout=3.0,
         )
-        elapsed = time.monotonic() - t0
+        elapsed = asyncio.get_running_loop().time() - t0
 
     assert res.code == BazarrResultCode.TRIGGERED
     assert res.was_accepted is True
@@ -118,7 +117,7 @@ async def test_bazarr_readiness_retry_timeout_fails_cleanly():
     with patch("httpx.AsyncClient", lambda **kwargs: orig_client(transport=transport, **{k: v for k, v in kwargs.items() if k != "transport"})), \
          patch("app.core.db.append_job_log", lambda j_id, msg: logs.append(msg)):
 
-        t0 = time.monotonic()
+        t0 = asyncio.get_running_loop().time()
         res = await coordinator.trigger_or_attach_target_search(
             video_path=video_path,
             target_lang="sv",
@@ -127,7 +126,7 @@ async def test_bazarr_readiness_retry_timeout_fails_cleanly():
             job_id=100,
             readiness_timeout=1.0,
         )
-        elapsed = time.monotonic() - t0
+        elapsed = asyncio.get_running_loop().time() - t0
 
     assert res.code == BazarrResultCode.MEDIA_NOT_FOUND
     assert elapsed >= 0.9
@@ -163,7 +162,7 @@ async def test_already_indexed_no_delay():
     orig_client = httpx.AsyncClient
     transport = httpx.MockTransport(mock_handler)
 
-    t0 = time.monotonic()
+    t0 = asyncio.get_running_loop().time()
     with patch("httpx.AsyncClient", lambda **kwargs: orig_client(transport=transport, **{k: v for k, v in kwargs.items() if k != "transport"})):
         res = await coordinator.trigger_or_attach_target_search(
             video_path=video_path,
@@ -172,7 +171,7 @@ async def test_already_indexed_no_delay():
             bazarr_api_key="secret",
             readiness_timeout=5.0,
         )
-    elapsed = time.monotonic() - t0
+    elapsed = asyncio.get_running_loop().time() - t0
 
     assert res.code == BazarrResultCode.TRIGGERED
     assert elapsed < 0.5  # Immediate match, no waiting

@@ -16,7 +16,6 @@ test_v2_3_43_source_resolver.py — v2.3.43-beta Acceptance Tests (A–Z)
 
 import asyncio
 import os
-import time
 import srt
 import pytest
 import tempfile
@@ -550,7 +549,7 @@ async def test_L_bazarr_runs_without_blocking_pipeline(isolated_db, tmp_path):
         return [srt.Subtitle(index=i+1, start=s.start, end=s.end, content=SV_LINES[i % len(SV_LINES)]) for i, s in enumerate(subs)]
 
     pipeline = SubtitlePipeline()
-    start = time.monotonic()
+    start = asyncio.get_running_loop().time()
     with patch("app.services.pipeline.get_setting",
                side_effect=default_settings({"enable_bazarr_check": "true", "extract_source_embedded": "false"})), \
          patch("app.services.pipeline.find_external_subtitle",
@@ -560,7 +559,7 @@ async def test_L_bazarr_runs_without_blocking_pipeline(isolated_db, tmp_path):
         job_id = create_job(str(video))
         res = await pipeline._run_pipeline_logic(job_id, str(video), wait_seconds=0)
 
-    total = time.monotonic() - start
+    total = asyncio.get_running_loop().time() - start
     assert res["status"] == "translated"
     # Pipeline must complete in well under 5s despite Bazarr having a 5s delay
     # This proves Bazarr task is cancelled/non-blocking, not awaited sequentially

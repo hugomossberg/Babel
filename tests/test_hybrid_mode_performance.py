@@ -1,7 +1,6 @@
 import pytest
 import os
 import srt
-import time
 import asyncio
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -211,9 +210,9 @@ async def test_4_legacy_wait_time_seconds_in_db_ignored(hybrid_db_settings, tmp_
 
     monkeypatch.setattr("asyncio.sleep", tracking_sleep)
 
-    t0 = time.monotonic()
+    t0 = asyncio.get_running_loop().time()
     res = await pipeline.process_video_file(str(video_path), wait_seconds=999, event_source="MANUAL")
-    elapsed = time.monotonic() - t0
+    elapsed = asyncio.get_running_loop().time() - t0
 
     assert res["status"] == "translated"
     assert translate_called is True
@@ -481,7 +480,7 @@ async def test_11_performance_benchmark_time_to_first_ai_request(hybrid_db_setti
 
     async def mock_translate(subs, target_language, source_language="English", batch_size=150, job_id=None, show_title=None):
         nonlocal time_at_ai_call
-        time_at_ai_call = time.monotonic()
+        time_at_ai_call = asyncio.get_running_loop().time()
         return [
             srt.Subtitle(index=i+1, start=sub.start, end=sub.end, content=f"Hej {i+1} detta är en svensk text")
             for i, sub in enumerate(subs)
@@ -490,7 +489,7 @@ async def test_11_performance_benchmark_time_to_first_ai_request(hybrid_db_setti
     monkeypatch.setattr(pipeline.translator, "translate_srt_content", mock_translate)
     monkeypatch.setattr(pipeline, "trigger_bazarr_search", AsyncMock(return_value=BazarrResult(code=BazarrResultCode.MEDIA_NOT_FOUND, language="sv", detail="Not found")))
 
-    start_time = time.monotonic()
+    start_time = asyncio.get_running_loop().time()
     res = await pipeline.process_video_file(str(video_path), event_source="SONARR")
     time_to_first_ai = time_at_ai_call - start_time
 
@@ -525,7 +524,7 @@ async def test_12_slow_bazarr_trigger_does_not_delay_source_prep_start(hybrid_db
 
     async def tracking_translate(subs, target_language, source_language="English", batch_size=150, job_id=None, show_title=None):
         nonlocal ai_call_timestamp
-        ai_call_timestamp = time.monotonic()
+        ai_call_timestamp = asyncio.get_running_loop().time()
         return [
             srt.Subtitle(index=i+1, start=sub.start, end=sub.end, content=f"Hej {i+1} svensk text")
             for i, sub in enumerate(subs)
@@ -533,9 +532,9 @@ async def test_12_slow_bazarr_trigger_does_not_delay_source_prep_start(hybrid_db
 
     monkeypatch.setattr(pipeline.translator, "translate_srt_content", tracking_translate)
 
-    job_start_timestamp = time.monotonic()
+    job_start_timestamp = asyncio.get_running_loop().time()
     res = await pipeline.process_video_file(str(video_path), event_source="SONARR")
-    total_elapsed = time.monotonic() - job_start_timestamp
+    total_elapsed = asyncio.get_running_loop().time() - job_start_timestamp
 
     assert res["status"] == "translated"
     # The whole job completed in sub-second time without waiting for the 2.0s Bazarr request

@@ -14,7 +14,7 @@ def setup_teardown_db(tmp_path):
     # Use a test db
     import app.core.db
     original_db = app.core.db.DB_PATH
-    app.core.db.DB_PATH = "/tmp/test_babel_retry.db"
+    app.core.db.DB_PATH = str(tmp_path / "retry.db")
     app.core.db.init_db()
     app.core.db.clear_all_jobs()
 
