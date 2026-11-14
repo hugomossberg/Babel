@@ -20,7 +20,7 @@ def test_is_usable_translation():
 @pytest.fixture(autouse=True)
 def setup_teardown_db(tmp_path):
     original_db = app.core.db.DB_PATH
-    app.core.db.DB_PATH = "/tmp/test_blank_babel.db"
+    app.core.db.DB_PATH = str(tmp_path / "blank.db")
     app.core.db.init_db()
     app.core.db.clear_all_jobs()
 

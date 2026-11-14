@@ -12,7 +12,7 @@ import os
 @pytest.fixture(autouse=True)
 def setup_teardown_db(tmp_path):
     original_db = app.core.db.DB_PATH
-    app.core.db.DB_PATH = "/tmp/test_dropped_babel.db"
+    app.core.db.DB_PATH = str(tmp_path / "dropped.db")
     app.core.db.init_db()
     app.core.db.clear_all_jobs()
 
