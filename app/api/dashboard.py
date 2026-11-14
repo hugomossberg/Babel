@@ -11,7 +11,8 @@ from google import genai
 
 from app.core.db import (
     get_jobs, get_job_by_id, get_job_stats, delete_job, clear_all_jobs,
-    get_setting, set_setting, get_positive_int_setting, get_int_setting, get_jobs_by_status
+    get_setting, set_setting, get_positive_int_setting, get_int_setting, get_jobs_by_status,
+    list_title_contexts, set_title_context, delete_title_context
 )
 from app.core.security import mask_secret, is_masked_secret, resolve_secret_key
 from app.services.docker_controller import docker_controller
@@ -371,6 +372,30 @@ async def api_get_all_settings() -> Dict[str, Any]:
             "webhook_secret_configured": bool(get_setting("webhook_secret", "").strip())
         }
     }
+
+class TitleContextKey(BaseModel):
+    series_title: str
+    source_language: str
+    target_language: str
+
+class TitleContextRequest(TitleContextKey):
+    context: str
+
+@router.get("/title-contexts")
+async def api_list_title_contexts() -> List[Dict[str, Any]]:
+    return list_title_contexts()
+
+@router.put("/title-contexts")
+async def api_save_title_context(req: TitleContextRequest) -> Dict[str, Any]:
+    if not req.context.strip():
+        raise HTTPException(status_code=400, detail="Context must not be empty")
+    set_title_context(req.series_title, req.source_language, req.target_language, req.context)
+    return {"status": "saved"}
+
+@router.delete("/title-contexts")
+async def api_delete_title_context(req: TitleContextKey) -> Dict[str, Any]:
+    delete_title_context(req.series_title, req.source_language, req.target_language)
+    return {"status": "deleted"}
 
 @router.post("/integrations/container-action")
 async def api_container_action(req: ContainerActionRequest):

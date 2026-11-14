@@ -1,5 +1,6 @@
 from app.core.ai_providers import ProviderContext, resolve_job_provider_context, get_default_model
 import asyncio
+import weakref
 import json
 import logging
 import functools
@@ -418,7 +419,7 @@ import openai
 import httpx
 import srt
 
-from app.core.db import DB_PATH, get_setting, update_job, append_job_log, save_translation_memory, get_translation_memory, get_positive_int_setting
+from app.core.db import DB_PATH, get_setting, update_job, append_job_log, save_translation_memory, get_translation_memory, get_positive_int_setting, get_title_context, set_title_context
 
 
 def get_llm_request_timeout() -> Optional[int]:
@@ -579,13 +580,161 @@ def format_glossary_section(glossary: str) -> str:
     return ""
 
 
-def get_system_instruction(target_language: str, glossary: str = "", show_title: str = "", source_language: str = "English", custom_instructions: str = "") -> str:
+def format_title_context_section(title_context: str) -> str:
+    if title_context and title_context.strip():
+        return (
+            "\n\nTITLE CONTEXT - characters, forms of address, setting and fixed "
+            "terms for this title. Follow it for names, genders, ranks and "
+            "formal/informal address. The GLOSSARY wins any conflict:\n"
+            + title_context.strip() + "\n"
+        )
+    return ""
+
+
+TITLE_CONTEXT_INPUT_CHARS = 60000
+
+
+def build_title_context_prompt(subs: List[srt.Subtitle], show_title: str, source_language: str, target_language: str) -> Tuple[str, str]:
+    """Prompt for a short per-title brief drawn from the source dialogue."""
+    from app.core.languages import get_display_language_name
+    src_name = get_display_language_name(source_language)
+    tgt_name = get_display_language_name(target_language)
+    system_prompt = (
+        f"You prepare a brief for subtitle translators working from {src_name} "
+        f"to {tgt_name} on \"{show_title}\". Read the dialogue and write at most "
+        "300 words, plain text, no markdown, no plot summary, in exactly these "
+        "sections:\n"
+        "CHARACTERS: one line per recurring named character: "
+        "Name - male/female/unknown - role.\n"
+        f"ADDRESS: who uses formal or informal address with whom, in {tgt_name} "
+        f"terms (write n/a if {tgt_name} makes no such distinction).\n"
+        "SETTING: setting, era, genre and tone in one or two lines.\n"
+        "TERMS: one line per recurring rank, title, institution, place or "
+        f"invented term: source term = fixed {tgt_name} rendering. Use "
+        f"{tgt_name} grammatical gender that matches the character holding "
+        "the title.\n"
+        "Only state what the dialogue supports; write unknown rather than guess."
+    )
+    lines = []
+    size = 0
+    for sub in subs:
+        text = re.sub(r"\{[^}]*\}|<[^>]+>", "", sub.content).replace("\n", " ").strip()
+        if not text:
+            continue
+        size += len(text) + 1
+        if size > TITLE_CONTEXT_INPUT_CHARS:
+            break
+        lines.append(text)
+    return system_prompt, "DIALOGUE:\n" + "\n".join(lines)
+
+
+# One update at a time per event loop, so parallel jobs extend the stored
+# context instead of overwriting each other.
+_TITLE_CONTEXT_LOCKS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = weakref.WeakKeyDictionary()
+
+
+def _title_context_lock() -> asyncio.Lock:
+    return _TITLE_CONTEXT_LOCKS.setdefault(asyncio.get_running_loop(), asyncio.Lock())
+
+
+TITLE_CONTEXT_MAX_WORDS = 1000
+TITLE_CONTEXT_SECTIONS = ("CHARACTERS", "ADDRESS", "SETTING", "TERMS")
+_NOT_NAMES = {
+    "Mr", "Mrs", "Ms", "Miss", "Dr", "Sir", "God", "Christmas", "Halloween",
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+    "January", "February", "March", "April", "May", "June", "July", "August",
+    "September", "October", "November", "December",
+}
+
+
+def new_recurring_names(subs: List[srt.Subtitle], title_context: str, min_count: int = 3, limit: int = 15) -> List[str]:
+    """Capitalised words used mid-sentence at least min_count times, never in
+    lowercase, that the title context does not mention yet."""
+    counts: Dict[str, int] = {}
+    texts = [re.sub(r"\{[^}]*\}|<[^>]+>", "", sub.content).replace("\n", " ") for sub in subs]
+    lowercase = set(re.findall(r"\b[a-z]+\b", " ".join(texts)))
+    for text in texts:
+        for m in re.finditer(r"\b[A-Z][a-z]+(?:['’-][A-Za-z]+)*\b", text):
+            before = text[:m.start()].rstrip(" \"'“‘")
+            if not before or before[-1] in ".!?-–—…♪":
+                continue
+            word = re.sub(r"['’]s$", "", m.group(0))
+            if word not in _NOT_NAMES and word.lower() not in lowercase:
+                counts[word] = counts.get(word, 0) + 1
+    known = title_context.casefold()
+    names = [w for w, n in counts.items() if n >= min_count and not re.search(r"\b" + re.escape(w.casefold()) + r"\b", known)]
+    return sorted(names, key=lambda w: -counts[w])[:limit]
+
+
+def build_title_context_update_prompt(subs: List[srt.Subtitle], show_title: str, source_language: str, target_language: str, title_context: str, names: List[str]) -> Tuple[str, str]:
+    """Prompt for lines to add to an existing title context for names it lacks."""
+    system_prompt, dialogue = build_title_context_prompt(subs, show_title, source_language, target_language)
+    system_prompt += (
+        "\n\nA brief already exists:\n" + title_context.strip() + "\n\n"
+        "It does not mention these names from the new dialogue: " + ", ".join(names) + ".\n"
+        "Return ONLY new lines to add, under the CHARACTERS, ADDRESS and TERMS "
+        "headings, in the same format, omitting empty sections. Give each person "
+        "one CHARACTERS line listing every form of their name (e.g. Vincent Mair / "
+        "Mair). Add a TERMS line only for a place, rank, institution or invented "
+        "term that needs a fixed rendering; skip anything else. Write in the "
+        "language of the existing brief. Never repeat, change or contradict it."
+    )
+    return system_prompt, dialogue
+
+
+def merge_title_context(title_context: str, additions: str, names: Optional[List[str]] = None) -> str:
+    """Append new section lines under the matching headings, leaving existing
+    lines untouched. With names, keep only lines that mention one of them."""
+    wanted = re.compile(r"\b(%s)\b" % "|".join(map(re.escape, names)), re.I) if names else None
+    new: Dict[str, List[str]] = {}
+    section = None
+    existing_lines = {l.strip() for l in title_context.splitlines()}
+    for line in additions.splitlines():
+        line = line.strip()
+        head = re.match(r"^(%s):\s*(.*)$" % "|".join(TITLE_CONTEXT_SECTIONS), line)
+        if head:
+            section, line = head.group(1), head.group(2).strip()
+        about = line.split(" - ")[0] if section == "CHARACTERS" else line
+        if section and line and line.upper() != "NONE" and line not in existing_lines and (not wanted or wanted.search(about)):
+            new.setdefault(section, []).append(line)
+    if not new:
+        return title_context
+    lines = title_context.strip().splitlines()
+    for section, added in new.items():
+        start = next((i for i, l in enumerate(lines) if l.strip().startswith(section + ":")), None)
+        if start is None:
+            lines += ["", section + ":"] + added
+            continue
+        end = start + 1
+        while end < len(lines) and not re.match(r"^(%s|NOTED)\b" % "|".join(TITLE_CONTEXT_SECTIONS), lines[end].strip()):
+            end += 1
+        while end > start + 1 and not lines[end - 1].strip():
+            end -= 1
+        lines[end:end] = added
+    return "\n".join(lines)
+
+
+def note_title_context_names(title_context: str, names: List[str]) -> str:
+    """Record names that need no entry, so later episodes do not ask about them again."""
+    known = title_context.casefold()
+    missing = [n for n in names if not re.search(r"\b" + re.escape(n.casefold()) + r"\b", known)]
+    if not missing:
+        return title_context
+    lines = title_context.strip().splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("NOTED (no entry needed):"):
+            lines[i] = line + ", " + ", ".join(missing)
+            return "\n".join(lines)
+    return "\n".join(lines + ["", "NOTED (no entry needed): " + ", ".join(missing)])
+
+
+def get_system_instruction(target_language: str, glossary: str = "", show_title: str = "", source_language: str = "English", custom_instructions: str = "", title_context: str = "") -> str:
     from app.core.languages import get_display_language_name
     tgt_name = get_display_language_name(target_language)
     src_name = get_display_language_name(source_language)
 
     custom_section = format_custom_instructions_section(custom_instructions)
-    glossary_section = format_glossary_section(glossary)
+    glossary_section = format_glossary_section(glossary) + format_title_context_section(title_context)
 
     show_context = ""
     if show_title:
@@ -677,6 +826,43 @@ def extract_json_safely(raw_text: str) -> List[dict]:
         return recovered
 
     raise ValueError(f"Could not extract JSON translation array from response: {raw_text[:100]}...")
+
+
+CONTEXT_SECTION_HEADERS = {
+    "memory": (
+        "SERIES TRANSLATION MEMORY (earlier translations from other episodes of "
+        "this series; NOT adjacent dialogue. Use only for consistent names, "
+        "terms and register):"
+    ),
+    "before": (
+        "PRECEDING DIALOGUE (the lines immediately before the first item; "
+        "DO NOT translate):"
+    ),
+    "after": (
+        "FOLLOWING DIALOGUE (the lines immediately after the last item; "
+        "DO NOT translate, use only to understand sentences that continue):"
+    ),
+}
+
+
+def format_context_section(context_lines: Optional[List[dict]]) -> str:
+    """Render batch context as separately labelled sections.
+
+    Each entry has "original", optionally "translated", and a "role" of
+    "memory", "before" (the default) or "after".
+    """
+    section = ""
+    for role, header in CONTEXT_SECTION_HEADERS.items():
+        entries = [c for c in context_lines or [] if c.get("role", "before") == role]
+        if not entries:
+            continue
+        section += f"\n\n{header}\n"
+        for ctx in entries:
+            if ctx.get("translated"):
+                section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
+            else:
+                section += f'  Original: "{ctx["original"]}"\n'
+    return section
 
 
 def build_translation_prompt(items: List[dict], target_language: str, context_section: str = "") -> str:
@@ -2534,14 +2720,7 @@ CRITICAL RULES:
     async def translate_batch_gemini(self, items: List[dict], target_language: str, model_name: str, source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
         client = self.get_gemini_client()
 
-        context_section = ""
-        if context_lines:
-            context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
-            for ctx in context_lines:
-                if ctx.get("translated"):
-                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-                else:
-                    context_section += f'  Original: "{ctx["original"]}"\n'
+        context_section = format_context_section(context_lines)
 
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
@@ -2551,7 +2730,7 @@ CRITICAL RULES:
         from app.core.ai_providers import get_model_capabilities
         caps = get_model_capabilities("gemini", model_name)
         config_kwargs = {
-            "system_instruction": get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions),
+            "system_instruction": get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions, title_context=get_title_context(show_title, source_language, target_language)),
             "response_mime_type": "application/json",
             "response_schema": schema,
             "max_output_tokens": 8192,
@@ -2577,14 +2756,7 @@ CRITICAL RULES:
     async def translate_batch_openai(self, items: List[dict], target_language: str, model_name: str, source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
         client = self.get_openai_client()
 
-        context_section = ""
-        if context_lines:
-            context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
-            for ctx in context_lines:
-                if ctx.get("translated"):
-                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-                else:
-                    context_section += f'  Original: "{ctx["original"]}"\n'
+        context_section = format_context_section(context_lines)
 
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
@@ -2599,7 +2771,7 @@ CRITICAL RULES:
             kwargs = {
                 "model": model_to_use,
                 "messages": [
-                    {"role": "system", "content": get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)},
+                    {"role": "system", "content": get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions, title_context=get_title_context(show_title, source_language, target_language))},
                     {"role": "user", "content": prompt}
                 ],
             }
@@ -2662,18 +2834,11 @@ CRITICAL RULES:
     async def translate_batch_ollama(self, items: List[dict], target_language: str, model_name: str, source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None, provider: str = "ollama") -> List[dict]:
         ollama_url = get_setting("ollama_url", "http://localhost:11434").rstrip("/")
 
-        context_section = ""
-        if context_lines:
-            context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
-            for ctx in context_lines:
-                if ctx.get("translated"):
-                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-                else:
-                    context_section += f'  Original: "{ctx["original"]}"\n'
+        context_section = format_context_section(context_lines)
 
         glossary = get_setting("glossary", "")
         custom_instructions = get_setting("custom_translation_instructions", "")
-        prompt = f"{get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)}\n\n{build_translation_prompt(items, target_language, context_section)}"
+        prompt = f"{get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions, title_context=get_title_context(show_title, source_language, target_language))}\n\n{build_translation_prompt(items, target_language, context_section)}"
 
         from app.core.ai_providers import get_model_capabilities
         caps = get_model_capabilities(provider or "ollama", model_name)
@@ -3229,20 +3394,13 @@ CRITICAL RULES:
 
     @with_retry
     async def translate_batch_anthropic(self, items: List[dict], target_language: str, model_name: str, source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
-        context_section = ""
-        if context_lines:
-            context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
-            for ctx in context_lines:
-                if ctx.get("translated"):
-                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-                else:
-                    context_section += f'  Original: "{ctx["original"]}"\n'
+        context_section = format_context_section(context_lines)
 
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
         glossary = get_setting("glossary", "")
         custom_instructions = get_setting("custom_translation_instructions", "")
-        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)
+        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions, title_context=get_title_context(show_title, source_language, target_language))
 
         raw = await self._dispatch_llm_completion(
             provider="anthropic",
@@ -3257,20 +3415,13 @@ CRITICAL RULES:
 
     @with_retry
     async def translate_batch_openrouter(self, items: List[dict], target_language: str, model_name: str, source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
-        context_section = ""
-        if context_lines:
-            context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
-            for ctx in context_lines:
-                if ctx.get("translated"):
-                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-                else:
-                    context_section += f'  Original: "{ctx["original"]}"\n'
+        context_section = format_context_section(context_lines)
 
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
         glossary = get_setting("glossary", "")
         custom_instructions = get_setting("custom_translation_instructions", "")
-        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)
+        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions, title_context=get_title_context(show_title, source_language, target_language))
 
         raw = await self._dispatch_llm_completion(
             provider="openrouter",
@@ -3285,20 +3436,13 @@ CRITICAL RULES:
 
     @with_retry
     async def translate_batch_deepseek(self, items: List[dict], target_language: str, model_name: str, source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
-        context_section = ""
-        if context_lines:
-            context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
-            for ctx in context_lines:
-                if ctx.get("translated"):
-                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-                else:
-                    context_section += f'  Original: "{ctx["original"]}"\n'
+        context_section = format_context_section(context_lines)
 
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
         glossary = get_setting("glossary", "")
         custom_instructions = get_setting("custom_translation_instructions", "")
-        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)
+        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions, title_context=get_title_context(show_title, source_language, target_language))
 
         raw = await self._dispatch_llm_completion(
             provider="deepseek",
@@ -3313,20 +3457,13 @@ CRITICAL RULES:
 
     @with_retry
     async def translate_batch_custom(self, items: List[dict], target_language: str, model_name: str, source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
-        context_section = ""
-        if context_lines:
-            context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
-            for ctx in context_lines:
-                if ctx.get("translated"):
-                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-                else:
-                    context_section += f'  Original: "{ctx["original"]}"\n'
+        context_section = format_context_section(context_lines)
 
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
         glossary = get_setting("glossary", "")
         custom_instructions = get_setting("custom_translation_instructions", "")
-        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)
+        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions, title_context=get_title_context(show_title, source_language, target_language))
 
         raw = await self._dispatch_llm_completion(
             provider="custom",
@@ -3338,6 +3475,56 @@ CRITICAL RULES:
             job_id=job_id,
         )
         return extract_json_safely(raw or "{}")
+
+    async def ensure_title_context(self, subs: List[srt.Subtitle], show_title: str, source_language: str, target_language: str, job_id: Optional[int] = None) -> str:
+        """Return the title context: generated from the first episode, then extended with recurring names it lacks."""
+        async with _title_context_lock():
+            existing = get_title_context(show_title, source_language, target_language)
+            names = new_recurring_names(subs, existing) if existing else []
+            if existing and names and len(existing.split()) >= TITLE_CONTEXT_MAX_WORDS:
+                if job_id:
+                    append_job_log(job_id, f"Title context for \"{show_title}\" is at its size limit; not adding: {', '.join(names)}")
+                return existing
+            if existing and not names:
+                return existing
+            from app.core.ai_providers import resolve_job_provider_context, context_from_settings
+            ctx = resolve_job_provider_context(job_id) if job_id else context_from_settings()
+            if ctx.provider == "deepl":
+                return existing
+            if ctx.provider in ("gemini", "openai", "openrouter", "deepseek", "anthropic") and not get_setting(f"{ctx.provider}_api_key", ""):
+                return existing
+            if existing:
+                system_prompt, user_prompt = build_title_context_update_prompt(subs, show_title, source_language, target_language, existing, names)
+            else:
+                system_prompt, user_prompt = build_title_context_prompt(subs, show_title, source_language, target_language)
+            try:
+                generated = await self._dispatch_llm_completion(
+                    provider=ctx.provider,
+                    model_name=ctx.model,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    temperature=0.2,
+                    job_id=job_id,
+                )
+            except Exception as e:
+                logger.warning("Title context generation failed for %s: %s", show_title, type(e).__name__)
+                if job_id:
+                    append_job_log(job_id, "Title context generation failed; translating without it" if not existing else "Title context update failed; using the stored one")
+                return existing
+            generated = (generated or "").strip()
+            if existing:
+                merged = note_title_context_names(merge_title_context(existing, generated, names), names)
+                if merged != existing:
+                    set_title_context(show_title, source_language, target_language, merged)
+                    if job_id:
+                        append_job_log(job_id, f"Updated the title context for \"{show_title}\" (new names: {', '.join(names)})")
+                return merged
+            if not generated:
+                return ""
+            set_title_context(show_title, source_language, target_language, generated)
+            if job_id:
+                append_job_log(job_id, f"Generated title context for \"{show_title}\" ({len(generated.split())} words)")
+            return generated
 
     async def translate_batch(self, items: List[dict], target_language: str = "English", source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None, provider_ctx=None) -> List[dict]:
         from app.core.ai_providers import resolve_job_provider_context, context_from_settings, normalize_provider
@@ -3455,7 +3642,10 @@ CRITICAL RULES:
         processed_count = 0
         context_window_size = 5
         global_tm_context = []
+        title_context = ""
         if show_title:
+            title_context = await self.ensure_title_context(subs, show_title, source_language, target_language, job_id)
+        if show_title and not title_context:
             try:
                 tm_context = get_translation_memory(
                     show_title,
@@ -3464,7 +3654,7 @@ CRITICAL RULES:
                     target_language=target_language
                 )
                 if tm_context:
-                    global_tm_context.extend(tm_context)
+                    global_tm_context.extend({**tm, "role": "memory"} for tm in tm_context)
             except Exception:
                 pass
 
@@ -3508,8 +3698,17 @@ CRITICAL RULES:
                         if subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>":
                             batch_context.append({
                                 "original": subs[idx].content,
-                                "translated": partial_dict.get(idx, "")
+                                "translated": partial_dict.get(idx, ""),
+                                "role": "before",
                             })
+                following = []
+                for idx in range(end_idx, total_lines):
+                    if len(following) >= context_window_size:
+                        break
+                    text = subs[idx].content.strip()
+                    if text and text != "<i></i>":
+                        following.append({"original": subs[idx].content, "role": "after"})
+                batch_context.extend(following)
 
                 # Build missing payload preserving contiguous item sequence
                 missing_payload = []
@@ -3601,11 +3800,19 @@ CRITICAL RULES:
                                     f"Primary batch lines {sub_start_id}-{sub_end_id}: Partitioning into sub-batches "
                                     f"({len(left_payload)} + {len(right_payload)} cues) to isolate structural anomaly."
                                 )
-                            left_map = await _translate_sub_payload_atomic(left_payload, sub_context=sub_context, depth=depth + 1)
-                            right_ctx = list(sub_context) if sub_context else []
+                            # The left half is followed by the right half, not by
+                            # whatever followed the whole payload.
+                            left_ctx = [c for c in sub_context or [] if c.get("role") != "after"]
+                            left_ctx += [
+                                {"original": p["text"], "role": "after"}
+                                for p in right_payload[:context_window_size]
+                            ]
+                            left_map = await _translate_sub_payload_atomic(left_payload, sub_context=left_ctx, depth=depth + 1)
+                            right_ctx = [c for c in sub_context or [] if c.get("role") != "after"]
                             for p in left_payload[-3:]:
                                 if p["id"] in left_map:
-                                    right_ctx.append({"original": p["text"], "translated": left_map[p["id"]]})
+                                    right_ctx.append({"original": p["text"], "translated": left_map[p["id"]], "role": "before"})
+                            right_ctx += [c for c in sub_context or [] if c.get("role") == "after"]
                             right_map = await _translate_sub_payload_atomic(right_payload, sub_context=right_ctx, depth=depth + 1)
                             combined = dict(left_map)
                             combined.update(right_map)
