@@ -1570,6 +1570,29 @@
                 <span class="text-xs text-slate-500 mt-1 block">Optional. One rule per line: <code>English term = Target translation</code>. Use this to force the AI to keep specific names or places intact.</span>
               </div>
 
+              <!-- Per-title context -->
+              <div>
+                <label class="block text-sm font-medium text-slate-300 mb-1.5">Per-Title Context</label>
+                <template x-if="titleContexts.length === 0">
+                  <span class="text-xs text-slate-500 block">None yet. Babel writes one from the source subtitles the first time it translates a series or movie into a language.</span>
+                </template>
+                <template x-if="titleContexts.length > 0">
+                  <div class="space-y-2">
+                    <select x-model.number="titleContextIndex" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm">
+                      <template x-for="(tc, i) in titleContexts" :key="tc.series_title + tc.source_language + tc.target_language">
+                        <option :value="i" :selected="i === titleContextIndex" x-text="tc.series_title + ' (' + tc.source_language + ' → ' + tc.target_language + ')'"></option>
+                      </template>
+                    </select>
+                    <textarea x-model="titleContexts[titleContextIndex].context" rows="10" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-purple-500 transition text-sm font-mono leading-relaxed resize-y"></textarea>
+                    <div class="flex gap-2">
+                      <button @click="saveTitleContext()" class="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium transition text-sm">Save Context</button>
+                      <button @click="deleteTitleContext()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl font-medium transition text-sm">Delete</button>
+                    </div>
+                  </div>
+                </template>
+                <span class="text-xs text-slate-500 mt-1 block">Characters (with gender), who uses formal or informal address with whom, setting, and fixed translations for ranks and terms. Added to every translation prompt for that title; the glossary wins any conflict. Delete one to have the next episode write a fresh one.</span>
+              </div>
+
               <!-- API RATE LIMIT GUIDELINES NOTE (ONLY SHOWN FOR GEMINI) -->
               <div x-show="settingsData.ai.ai_provider === 'gemini'" class="p-4 bg-slate-950/70 border border-slate-800/80 rounded-xl flex items-start gap-3 text-xs text-slate-400">
                 <i class="fa-solid fa-circle-info text-purple-400 text-sm mt-0.5"></i>
@@ -2683,6 +2706,8 @@ docker compose up -d babel</pre>
         },
         pollTimer: null,
         gracePeriodDays: 0,
+        titleContexts: [],
+        titleContextIndex: 0,
         gracePeriodHours: 0,
         updatePollTimer: null,
 
@@ -3007,6 +3032,7 @@ docker compose up -d babel</pre>
             this.gracePeriodDays = Math.floor(graceHours / 24);
             this.gracePeriodHours = graceHours % 24;
             this.availableLanguages = this.settingsData.available_languages || [];
+            await this.loadTitleContexts();
             if (this.settingsData.ai && this.settingsData.ai.ai_provider) {
               await this.fetchProviderModels(this.settingsData.ai.ai_provider);
             }
@@ -3218,6 +3244,54 @@ docker compose up -d babel</pre>
           } finally {
             this.testingPlex = false;
           }
+        },
+
+        async loadTitleContexts() {
+          try {
+            const res = await fetch('/api/title-contexts');
+            if (!res.ok) return;
+            this.titleContexts = await res.json();
+            if (this.titleContextIndex >= this.titleContexts.length) this.titleContextIndex = 0;
+          } catch(e) {}
+        },
+
+        async saveTitleContext() {
+          const tc = this.titleContexts[this.titleContextIndex];
+          if (!tc) return;
+          try {
+            const res = await fetch('/api/title-contexts', {
+              method: 'PUT',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify(tc)
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              throw new Error(err.detail || `Server returned ${res.status}`);
+            }
+            this.showToast('Context saved for ' + tc.series_title);
+          } catch(e) {
+            this.showToast('Error: ' + e.message, 'error');
+          }
+        },
+
+        deleteTitleContext() {
+          const tc = this.titleContexts[this.titleContextIndex];
+          if (!tc) return;
+          this.showConfirm('Delete Context', 'Delete the context for "' + tc.series_title + '"? The next episode will write a new one.', async () => {
+            try {
+              const res = await fetch('/api/title-contexts', {
+                method: 'DELETE',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({series_title: tc.series_title, source_language: tc.source_language, target_language: tc.target_language})
+              });
+              if (!res.ok) throw new Error(`Server returned ${res.status}`);
+              this.titleContextIndex = 0;
+              await this.loadTitleContexts();
+              this.showToast('Context deleted for ' + tc.series_title);
+            } catch(e) {
+              this.showToast('Error: ' + e.message, 'error');
+            }
+          });
         },
 
         async saveAISettings() {
