@@ -67,6 +67,7 @@ def inspect_mkv_tracks(video_path: str) -> Dict[str, List[Dict]]:
             codec = track.get("codec")
             forced = properties.get("forced_track", False)
             default = properties.get("default_track", False)
+            hearing_impaired = properties.get("flag_hearing_impaired", False)
             title = properties.get("track_name", "")
 
             track_info = {
@@ -75,6 +76,7 @@ def inspect_mkv_tracks(video_path: str) -> Dict[str, List[Dict]]:
                 "codec": codec,
                 "forced": forced,
                 "default": default,
+                "hearing_impaired": hearing_impaired,
                 "title": title
             }
 
@@ -106,6 +108,7 @@ def inspect_mkv_tracks(video_path: str) -> Dict[str, List[Dict]]:
                 disposition = stream.get("disposition", {})
                 forced = bool(disposition.get("forced", 0))
                 default = bool(disposition.get("default", 0))
+                hearing_impaired = bool(disposition.get("hearing_impaired", 0))
                 title = tags.get("title", "")
 
                 track_info = {
@@ -114,6 +117,7 @@ def inspect_mkv_tracks(video_path: str) -> Dict[str, List[Dict]]:
                     "codec": codec,
                     "forced": forced,
                     "default": default,
+                    "hearing_impaired": hearing_impaired,
                     "title": title
                 }
 
@@ -384,8 +388,11 @@ def extract_embedded_srt(
         if subtitle_track_language(track) != norm_lang or not is_text_codec:
             continue
         score = 100
-        if any(kw in title for kw in ("full", "sdh", "normal", "dialogue")):
+        if any(kw in title for kw in ("full", "normal", "dialogue")):
             score += 20
+        # SDH needs cleaning and leaves defects; use it only without a plain track.
+        if track.get("hearing_impaired") or "sdh" in title:
+            score -= 50
         if track.get("default"):
             score += 10
         candidates.append({"score": score, "id": track.get("id"), "index": i, "codec": codec})

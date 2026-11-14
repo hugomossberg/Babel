@@ -435,6 +435,18 @@ def strip_speaker_prefix(line: str) -> str:
     return line
 
 
+def removed_speaker_labels(prov: Optional[CueProvenance]) -> str:
+    """Speaker labels the cleaner removed from a cue, e.g. 'Lucy / Tom'."""
+    labels = []
+    for seg in getattr(prov, "segments", None) or []:
+        if (seg.structural_type == StructuralType.SPEAKER_PREFIX
+                and seg.classification == SegmentClassification.NON_DIALOGUE):
+            label = re.sub(r"\{[^}]*\}|<[^>]+>", "", seg.inner).strip(" -\u2013\u2014")
+            if label:
+                labels.append(label)
+    return " / ".join(labels)
+
+
 def sanitize_srt_content(srt_content: str) -> Tuple[List[srt.Subtitle], int]:
     """
     Synchronous backward-compatible SRT sanitizer.

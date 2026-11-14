@@ -52,6 +52,28 @@ def test_track_selection_mkv_primary(mock_inspect, tmp_path):
 
 
 @patch("app.core.extractor.inspect_mkv_tracks")
+def test_track_selection_prefers_plain_over_sdh(mock_inspect, tmp_path):
+    """SDH tracks, by title or hearing-impaired flag, lose to a plain one."""
+    eng = {"language": "eng", "codec": "SubRip/SRT", "forced": False}
+    mock_inspect.return_value = {"subtitles": [
+        {**eng, "id": 1, "title": "English", "default": True,
+         "hearing_impaired": True},
+        {**eng, "id": 2, "title": "English Full SDH"},
+        {**eng, "id": 3, "title": "English"},
+    ]}
+
+    def mock_subprocess(cmd, *args, **kwargs):
+        _create_mock_srt(cmd[-1].split(":", 1)[1])
+        return MagicMock(returncode=0)
+
+    with patch("app.core.extractor.subprocess.run",
+               side_effect=mock_subprocess) as mock_run:
+        assert extract_embedded_srt("fake.mkv", str(tmp_path / "out.srt"),
+                                    preferred_lang="eng")
+        assert mock_run.call_args_list[0][0][0][-1].startswith("3:")
+
+
+@patch("app.core.extractor.inspect_mkv_tracks")
 def test_track_selection_non_mkv_uses_ffmpeg_first(mock_inspect, tmp_path):
     """For non-MKV containers (.mp4, .avi) ffmpeg is the primary tool."""
     tracks_info = {

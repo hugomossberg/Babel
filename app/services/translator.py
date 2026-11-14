@@ -419,6 +419,7 @@ import httpx
 import srt
 
 from app.core.db import DB_PATH, get_setting, update_job, append_job_log, save_translation_memory, get_translation_memory, get_positive_int_setting
+from app.core.cleaner import removed_speaker_labels
 
 
 def get_llm_request_timeout() -> Optional[int]:
@@ -601,6 +602,7 @@ STRICT RULES:
 4. Preserve all subtitle formatting tags exactly as they appear (e.g. <i>, </i>, and ASS tags like {{\\an8}}). Do not encode them into HTML entities.
 5. If a block is empty or contains only '<i></i>', keep it exactly as '<i></i>'.
 6. If a line starts with a speaker name or label in capital letters (e.g. ALICE:, OFFICER:), keep character names intact and only translate descriptive titles if appropriate, maintaining the colon separator.
+   An item may have a "speaker" field naming who says it (several names follow the order of the lines). Use it only as context for gender agreement and formal/informal address; never write it into the translation.
 7. You MUST return a JSON object with a key "translations" containing the array of objects with integer "id" and string "text".
 8. Keep translations concise and natural. Split lines naturally using "\\n" if a line exceeds 42 characters, but NEVER exceed 2 lines per subtitle block. Combine or condense text if necessary.
 9. STRICT 1-TO-1 CUE SYNCHRONIZATION & ID CONTRACT:
@@ -677,6 +679,43 @@ def extract_json_safely(raw_text: str) -> List[dict]:
         return recovered
 
     raise ValueError(f"Could not extract JSON translation array from response: {raw_text[:100]}...")
+
+
+CONTEXT_SECTION_HEADERS = {
+    "memory": (
+        "SERIES TRANSLATION MEMORY (earlier translations from other episodes of "
+        "this series; NOT adjacent dialogue. Use only for consistent names, "
+        "terms and register):"
+    ),
+    "before": (
+        "PRECEDING DIALOGUE (the lines immediately before the first item; "
+        "DO NOT translate):"
+    ),
+    "after": (
+        "FOLLOWING DIALOGUE (the lines immediately after the last item; "
+        "DO NOT translate, use only to understand sentences that continue):"
+    ),
+}
+
+
+def format_context_section(context_lines: Optional[List[dict]]) -> str:
+    """Render batch context as separately labelled sections.
+
+    Each entry has "original", optionally "translated", and a "role" of
+    "memory", "before" (the default) or "after".
+    """
+    section = ""
+    for role, header in CONTEXT_SECTION_HEADERS.items():
+        entries = [c for c in context_lines or [] if c.get("role", "before") == role]
+        if not entries:
+            continue
+        section += f"\n\n{header}\n"
+        for ctx in entries:
+            if ctx.get("translated"):
+                section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
+            else:
+                section += f'  Original: "{ctx["original"]}"\n'
+    return section
 
 
 def build_translation_prompt(items: List[dict], target_language: str, context_section: str = "") -> str:
@@ -2534,14 +2573,7 @@ CRITICAL RULES:
     async def translate_batch_gemini(self, items: List[dict], target_language: str, model_name: str, source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
         client = self.get_gemini_client()
 
-        context_section = ""
-        if context_lines:
-            context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
-            for ctx in context_lines:
-                if ctx.get("translated"):
-                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-                else:
-                    context_section += f'  Original: "{ctx["original"]}"\n'
+        context_section = format_context_section(context_lines)
 
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
@@ -2577,14 +2609,7 @@ CRITICAL RULES:
     async def translate_batch_openai(self, items: List[dict], target_language: str, model_name: str, source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
         client = self.get_openai_client()
 
-        context_section = ""
-        if context_lines:
-            context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
-            for ctx in context_lines:
-                if ctx.get("translated"):
-                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-                else:
-                    context_section += f'  Original: "{ctx["original"]}"\n'
+        context_section = format_context_section(context_lines)
 
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
@@ -2662,14 +2687,7 @@ CRITICAL RULES:
     async def translate_batch_ollama(self, items: List[dict], target_language: str, model_name: str, source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None, provider: str = "ollama") -> List[dict]:
         ollama_url = get_setting("ollama_url", "http://localhost:11434").rstrip("/")
 
-        context_section = ""
-        if context_lines:
-            context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
-            for ctx in context_lines:
-                if ctx.get("translated"):
-                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-                else:
-                    context_section += f'  Original: "{ctx["original"]}"\n'
+        context_section = format_context_section(context_lines)
 
         glossary = get_setting("glossary", "")
         custom_instructions = get_setting("custom_translation_instructions", "")
@@ -3229,14 +3247,7 @@ CRITICAL RULES:
 
     @with_retry
     async def translate_batch_anthropic(self, items: List[dict], target_language: str, model_name: str, source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
-        context_section = ""
-        if context_lines:
-            context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
-            for ctx in context_lines:
-                if ctx.get("translated"):
-                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-                else:
-                    context_section += f'  Original: "{ctx["original"]}"\n'
+        context_section = format_context_section(context_lines)
 
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
@@ -3257,14 +3268,7 @@ CRITICAL RULES:
 
     @with_retry
     async def translate_batch_openrouter(self, items: List[dict], target_language: str, model_name: str, source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
-        context_section = ""
-        if context_lines:
-            context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
-            for ctx in context_lines:
-                if ctx.get("translated"):
-                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-                else:
-                    context_section += f'  Original: "{ctx["original"]}"\n'
+        context_section = format_context_section(context_lines)
 
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
@@ -3285,14 +3289,7 @@ CRITICAL RULES:
 
     @with_retry
     async def translate_batch_deepseek(self, items: List[dict], target_language: str, model_name: str, source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
-        context_section = ""
-        if context_lines:
-            context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
-            for ctx in context_lines:
-                if ctx.get("translated"):
-                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-                else:
-                    context_section += f'  Original: "{ctx["original"]}"\n'
+        context_section = format_context_section(context_lines)
 
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
@@ -3313,14 +3310,7 @@ CRITICAL RULES:
 
     @with_retry
     async def translate_batch_custom(self, items: List[dict], target_language: str, model_name: str, source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None) -> List[dict]:
-        context_section = ""
-        if context_lines:
-            context_section = "\n\nCONTEXT from previous batch (DO NOT translate these, use them only for tone and consistency):\n"
-            for ctx in context_lines:
-                if ctx.get("translated"):
-                    context_section += f'  Original: "{ctx["original"]}" → Translated: "{ctx["translated"]}"\n'
-                else:
-                    context_section += f'  Original: "{ctx["original"]}"\n'
+        context_section = format_context_section(context_lines)
 
         prompt = build_translation_prompt(items, target_language, context_section)
         schema = build_translation_output_schema(items, target_language)
@@ -3416,7 +3406,13 @@ CRITICAL RULES:
         batches = []
         for i in range(0, total_lines, batch_size):
             chunk = subs[i:i + batch_size]
-            batch_payload = [{"id": j, "text": sub.content} for j, sub in enumerate(chunk, start=i)]
+            batch_payload = []
+            for j, sub in enumerate(chunk, start=i):
+                item = {"id": j, "text": sub.content}
+                speaker = removed_speaker_labels(provenance_map.get(j)) if provenance_map else ""
+                if speaker:
+                    item["speaker"] = speaker
+                batch_payload.append(item)
             batches.append((i, chunk, batch_payload))
 
         translated_subs = [
@@ -3464,7 +3460,7 @@ CRITICAL RULES:
                     target_language=target_language
                 )
                 if tm_context:
-                    global_tm_context.extend(tm_context)
+                    global_tm_context.extend({**tm, "role": "memory"} for tm in tm_context)
             except Exception:
                 pass
 
@@ -3508,8 +3504,17 @@ CRITICAL RULES:
                         if subs[idx].content.strip() and subs[idx].content.strip() != "<i></i>":
                             batch_context.append({
                                 "original": subs[idx].content,
-                                "translated": partial_dict.get(idx, "")
+                                "translated": partial_dict.get(idx, ""),
+                                "role": "before",
                             })
+                following = []
+                for idx in range(end_idx, total_lines):
+                    if len(following) >= context_window_size:
+                        break
+                    text = subs[idx].content.strip()
+                    if text and text != "<i></i>":
+                        following.append({"original": subs[idx].content, "role": "after"})
+                batch_context.extend(following)
 
                 # Build missing payload preserving contiguous item sequence
                 missing_payload = []
@@ -3601,11 +3606,19 @@ CRITICAL RULES:
                                     f"Primary batch lines {sub_start_id}-{sub_end_id}: Partitioning into sub-batches "
                                     f"({len(left_payload)} + {len(right_payload)} cues) to isolate structural anomaly."
                                 )
-                            left_map = await _translate_sub_payload_atomic(left_payload, sub_context=sub_context, depth=depth + 1)
-                            right_ctx = list(sub_context) if sub_context else []
+                            # The left half is followed by the right half, not by
+                            # whatever followed the whole payload.
+                            left_ctx = [c for c in sub_context or [] if c.get("role") != "after"]
+                            left_ctx += [
+                                {"original": p["text"], "role": "after"}
+                                for p in right_payload[:context_window_size]
+                            ]
+                            left_map = await _translate_sub_payload_atomic(left_payload, sub_context=left_ctx, depth=depth + 1)
+                            right_ctx = [c for c in sub_context or [] if c.get("role") != "after"]
                             for p in left_payload[-3:]:
                                 if p["id"] in left_map:
-                                    right_ctx.append({"original": p["text"], "translated": left_map[p["id"]]})
+                                    right_ctx.append({"original": p["text"], "translated": left_map[p["id"]], "role": "before"})
+                            right_ctx += [c for c in sub_context or [] if c.get("role") == "after"]
                             right_map = await _translate_sub_payload_atomic(right_payload, sub_context=right_ctx, depth=depth + 1)
                             combined = dict(left_map)
                             combined.update(right_map)
