@@ -1,9 +1,91 @@
+import asyncio
 import pytest
 import json
 import socket
+import sys
+import time
 import httpx
 from unittest.mock import patch, AsyncMock
 from app.services.updates_controller import updates_controller
+
+
+class _VirtualClock:
+    """time.monotonic plus whatever idle time the virtual loop skipped.
+
+    Everything else, time.sleep included, stays real: synchronous code may
+    be pacing a real subprocess.
+    """
+
+    offset = 0.0
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def monotonic(self):
+        return time.monotonic() + self.offset
+
+
+_virtual_clock = _VirtualClock()
+
+
+class _VirtualTimeLoop(asyncio.SelectorEventLoop):
+    """Skip idle waits instead of sleeping through them.
+
+    When nothing is ready, the loop jumps the clock to its next timer rather
+    than blocking, so polls, backoffs and deadlines cost no wall time and do
+    not race the machine's load. Executor jobs (provider SDK calls,
+    to_thread) and open pipes or sockets (subprocesses, loopback servers)
+    keep real time.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._executor_jobs = 0
+        real_select = self._selector.select
+
+        def select(timeout=None):
+            # The loop's own self-pipe is always registered.
+            busy = self._executor_jobs or len(self._selector.get_map()) > 1
+            if not timeout or busy:
+                return real_select(timeout)
+            events = real_select(0)
+            if not events:
+                _virtual_clock.offset += timeout
+            return events
+
+        self._selector.select = select
+
+    def time(self):
+        return _virtual_clock.monotonic()
+
+    def run_in_executor(self, executor, func, *args):
+        future = super().run_in_executor(executor, func, *args)
+        self._executor_jobs += 1
+
+        def done(_):
+            self._executor_jobs -= 1
+
+        future.add_done_callback(done)
+        return future
+
+    async def shutdown_default_executor(self, timeout=None):
+        self._executor_jobs += 1  # joining worker threads takes real time
+        await super().shutdown_default_executor(timeout)
+
+
+def pytest_asyncio_loop_factories(config, item):
+    return {'virtual_clock': _VirtualTimeLoop}
+
+
+@pytest.fixture(autouse=True)
+def virtual_monotonic(monkeypatch):
+    """App code measures its waits on the virtual loop's clock.
+
+    Tests timing themselves use asyncio.get_running_loop().time().
+    """
+    for name, module in list(sys.modules.items()):
+        if name.startswith('app.') and getattr(module, 'time', None) is time:
+            monkeypatch.setattr(module, 'time', _virtual_clock)
 
 
 @pytest.fixture(autouse=True)
