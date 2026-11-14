@@ -418,7 +418,7 @@ import openai
 import httpx
 import srt
 
-from app.core.db import DB_PATH, get_setting, update_job, append_job_log, save_translation_memory, get_translation_memory, get_positive_int_setting
+from app.core.db import DB_PATH, get_setting, update_job, append_job_log, save_translation_memory, get_translation_memory, get_positive_int_setting, get_title_context, set_title_context
 
 
 def get_llm_request_timeout() -> Optional[int]:
@@ -579,13 +579,61 @@ def format_glossary_section(glossary: str) -> str:
     return ""
 
 
-def get_system_instruction(target_language: str, glossary: str = "", show_title: str = "", source_language: str = "English", custom_instructions: str = "") -> str:
+def format_title_context_section(title_context: str) -> str:
+    if title_context and title_context.strip():
+        return (
+            "\n\nTITLE CONTEXT - characters, forms of address, setting and fixed "
+            "terms for this title. Follow it for names, genders, ranks and "
+            "formal/informal address. The GLOSSARY wins any conflict:\n"
+            + title_context.strip() + "\n"
+        )
+    return ""
+
+
+TITLE_CONTEXT_INPUT_CHARS = 60000
+
+
+def build_title_context_prompt(subs: List[srt.Subtitle], show_title: str, source_language: str, target_language: str) -> Tuple[str, str]:
+    """Prompt for a short per-title brief drawn from the source dialogue."""
+    from app.core.languages import get_display_language_name
+    src_name = get_display_language_name(source_language)
+    tgt_name = get_display_language_name(target_language)
+    system_prompt = (
+        f"You prepare a brief for subtitle translators working from {src_name} "
+        f"to {tgt_name} on \"{show_title}\". Read the dialogue and write at most "
+        "300 words, plain text, no markdown, no plot summary, in exactly these "
+        "sections:\n"
+        "CHARACTERS: one line per recurring named character: "
+        "Name - male/female/unknown - role.\n"
+        f"ADDRESS: who uses formal or informal address with whom, in {tgt_name} "
+        f"terms (write n/a if {tgt_name} makes no such distinction).\n"
+        "SETTING: setting, era, genre and tone in one or two lines.\n"
+        "TERMS: one line per recurring rank, title, institution, place or "
+        f"invented term: source term = fixed {tgt_name} rendering. Use "
+        f"{tgt_name} grammatical gender that matches the character holding "
+        "the title.\n"
+        "Only state what the dialogue supports; write unknown rather than guess."
+    )
+    lines = []
+    size = 0
+    for sub in subs:
+        text = re.sub(r"\{[^}]*\}|<[^>]+>", "", sub.content).replace("\n", " ").strip()
+        if not text:
+            continue
+        size += len(text) + 1
+        if size > TITLE_CONTEXT_INPUT_CHARS:
+            break
+        lines.append(text)
+    return system_prompt, "DIALOGUE:\n" + "\n".join(lines)
+
+
+def get_system_instruction(target_language: str, glossary: str = "", show_title: str = "", source_language: str = "English", custom_instructions: str = "", title_context: str = "") -> str:
     from app.core.languages import get_display_language_name
     tgt_name = get_display_language_name(target_language)
     src_name = get_display_language_name(source_language)
 
     custom_section = format_custom_instructions_section(custom_instructions)
-    glossary_section = format_glossary_section(glossary)
+    glossary_section = format_glossary_section(glossary) + format_title_context_section(title_context)
 
     show_context = ""
     if show_title:
@@ -2581,7 +2629,7 @@ CRITICAL RULES:
         from app.core.ai_providers import get_model_capabilities
         caps = get_model_capabilities("gemini", model_name)
         config_kwargs = {
-            "system_instruction": get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions),
+            "system_instruction": get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions, title_context=get_title_context(show_title, source_language, target_language)),
             "response_mime_type": "application/json",
             "response_schema": schema,
             "max_output_tokens": 8192,
@@ -2622,7 +2670,7 @@ CRITICAL RULES:
             kwargs = {
                 "model": model_to_use,
                 "messages": [
-                    {"role": "system", "content": get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)},
+                    {"role": "system", "content": get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions, title_context=get_title_context(show_title, source_language, target_language))},
                     {"role": "user", "content": prompt}
                 ],
             }
@@ -2689,7 +2737,7 @@ CRITICAL RULES:
 
         glossary = get_setting("glossary", "")
         custom_instructions = get_setting("custom_translation_instructions", "")
-        prompt = f"{get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)}\n\n{build_translation_prompt(items, target_language, context_section)}"
+        prompt = f"{get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions, title_context=get_title_context(show_title, source_language, target_language))}\n\n{build_translation_prompt(items, target_language, context_section)}"
 
         from app.core.ai_providers import get_model_capabilities
         caps = get_model_capabilities(provider or "ollama", model_name)
@@ -3251,7 +3299,7 @@ CRITICAL RULES:
         schema = build_translation_output_schema(items, target_language)
         glossary = get_setting("glossary", "")
         custom_instructions = get_setting("custom_translation_instructions", "")
-        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)
+        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions, title_context=get_title_context(show_title, source_language, target_language))
 
         raw = await self._dispatch_llm_completion(
             provider="anthropic",
@@ -3272,7 +3320,7 @@ CRITICAL RULES:
         schema = build_translation_output_schema(items, target_language)
         glossary = get_setting("glossary", "")
         custom_instructions = get_setting("custom_translation_instructions", "")
-        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)
+        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions, title_context=get_title_context(show_title, source_language, target_language))
 
         raw = await self._dispatch_llm_completion(
             provider="openrouter",
@@ -3293,7 +3341,7 @@ CRITICAL RULES:
         schema = build_translation_output_schema(items, target_language)
         glossary = get_setting("glossary", "")
         custom_instructions = get_setting("custom_translation_instructions", "")
-        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)
+        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions, title_context=get_title_context(show_title, source_language, target_language))
 
         raw = await self._dispatch_llm_completion(
             provider="deepseek",
@@ -3314,7 +3362,7 @@ CRITICAL RULES:
         schema = build_translation_output_schema(items, target_language)
         glossary = get_setting("glossary", "")
         custom_instructions = get_setting("custom_translation_instructions", "")
-        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions)
+        system_prompt = get_system_instruction(target_language, glossary=glossary, show_title=show_title, source_language=source_language, custom_instructions=custom_instructions, title_context=get_title_context(show_title, source_language, target_language))
 
         raw = await self._dispatch_llm_completion(
             provider="custom",
@@ -3326,6 +3374,40 @@ CRITICAL RULES:
             job_id=job_id,
         )
         return extract_json_safely(raw or "{}")
+
+    async def ensure_title_context(self, subs: List[srt.Subtitle], show_title: str, source_language: str, target_language: str, job_id: Optional[int] = None) -> str:
+        """Return the stored title context, generating it from these subtitles once."""
+        existing = get_title_context(show_title, source_language, target_language)
+        if existing:
+            return existing
+        from app.core.ai_providers import resolve_job_provider_context, context_from_settings
+        ctx = resolve_job_provider_context(job_id) if job_id else context_from_settings()
+        if ctx.provider == "deepl":
+            return ""
+        if ctx.provider in ("gemini", "openai", "openrouter", "deepseek", "anthropic") and not get_setting(f"{ctx.provider}_api_key", ""):
+            return ""
+        system_prompt, user_prompt = build_title_context_prompt(subs, show_title, source_language, target_language)
+        try:
+            generated = await self._dispatch_llm_completion(
+                provider=ctx.provider,
+                model_name=ctx.model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=0.2,
+                job_id=job_id,
+            )
+        except Exception as e:
+            logger.warning("Title context generation failed for %s: %s", show_title, type(e).__name__)
+            if job_id:
+                append_job_log(job_id, "Title context generation failed; translating without it")
+            return ""
+        generated = (generated or "").strip()
+        if not generated:
+            return ""
+        set_title_context(show_title, source_language, target_language, generated)
+        if job_id:
+            append_job_log(job_id, f"Generated title context for \"{show_title}\" ({len(generated.split())} words)")
+        return generated
 
     async def translate_batch(self, items: List[dict], target_language: str = "English", source_language: str = "English", context_lines: List[dict] = None, show_title: str = "", job_id: Optional[int] = None, provider_ctx=None) -> List[dict]:
         from app.core.ai_providers import resolve_job_provider_context, context_from_settings, normalize_provider
@@ -3443,7 +3525,10 @@ CRITICAL RULES:
         processed_count = 0
         context_window_size = 5
         global_tm_context = []
+        title_context = ""
         if show_title:
+            title_context = await self.ensure_title_context(subs, show_title, source_language, target_language, job_id)
+        if show_title and not title_context:
             try:
                 tm_context = get_translation_memory(
                     show_title,
