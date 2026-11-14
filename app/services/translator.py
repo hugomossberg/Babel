@@ -419,6 +419,7 @@ import httpx
 import srt
 
 from app.core.db import DB_PATH, get_setting, update_job, append_job_log, save_translation_memory, get_translation_memory, get_positive_int_setting
+from app.core.cleaner import removed_speaker_labels
 
 
 def get_llm_request_timeout() -> Optional[int]:
@@ -601,6 +602,7 @@ STRICT RULES:
 4. Preserve all subtitle formatting tags exactly as they appear (e.g. <i>, </i>, and ASS tags like {{\\an8}}). Do not encode them into HTML entities.
 5. If a block is empty or contains only '<i></i>', keep it exactly as '<i></i>'.
 6. If a line starts with a speaker name or label in capital letters (e.g. ALICE:, OFFICER:), keep character names intact and only translate descriptive titles if appropriate, maintaining the colon separator.
+   An item may have a "speaker" field naming who says it (several names follow the order of the lines). Use it only as context for gender agreement and formal/informal address; never write it into the translation.
 7. You MUST return a JSON object with a key "translations" containing the array of objects with integer "id" and string "text".
 8. Keep translations concise and natural. Split lines naturally using "\\n" if a line exceeds 42 characters, but NEVER exceed 2 lines per subtitle block. Combine or condense text if necessary.
 9. STRICT 1-TO-1 CUE SYNCHRONIZATION & ID CONTRACT:
@@ -3404,7 +3406,13 @@ CRITICAL RULES:
         batches = []
         for i in range(0, total_lines, batch_size):
             chunk = subs[i:i + batch_size]
-            batch_payload = [{"id": j, "text": sub.content} for j, sub in enumerate(chunk, start=i)]
+            batch_payload = []
+            for j, sub in enumerate(chunk, start=i):
+                item = {"id": j, "text": sub.content}
+                speaker = removed_speaker_labels(provenance_map.get(j)) if provenance_map else ""
+                if speaker:
+                    item["speaker"] = speaker
+                batch_payload.append(item)
             batches.append((i, chunk, batch_payload))
 
         translated_subs = [
