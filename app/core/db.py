@@ -130,6 +130,17 @@ def init_db():
         """)
 
         cursor.execute("""
+        CREATE TABLE IF NOT EXISTS title_context (
+            series_title TEXT NOT NULL,
+            source_language TEXT NOT NULL,
+            target_language TEXT NOT NULL,
+            context TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (series_title, source_language, target_language)
+        )
+        """)
+
+        cursor.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -1158,6 +1169,55 @@ def get_translation_memory(series_title: str, limit: int = 20, source_language: 
         if len(valid) > limit:
             return random.sample(valid, limit)
         return valid
+
+def _title_context_key(series_title: str, source_language: str, target_language: str) -> tuple:
+    from app.core.languages import normalize_language_code
+    return (
+        (series_title or "").strip(),
+        normalize_language_code(source_language, default="en"),
+        normalize_language_code(target_language, default="sv"),
+    )
+
+def get_title_context(series_title: str, source_language: str, target_language: str) -> str:
+    key = _title_context_key(series_title, source_language, target_language)
+    if not key[0]:
+        return ""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT context FROM title_context WHERE series_title = ? AND source_language = ? AND target_language = ?",
+            key,
+        ).fetchone()
+    return row[0] if row else ""
+
+def set_title_context(series_title: str, source_language: str, target_language: str, context: str):
+    from datetime import datetime, timezone
+    key = _title_context_key(series_title, source_language, target_language)
+    if not key[0] or not (context or "").strip():
+        return
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO title_context
+               (series_title, source_language, target_language, context, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (*key, context.strip(), datetime.now(timezone.utc).isoformat()),
+        )
+
+def delete_title_context(series_title: str, source_language: str, target_language: str):
+    key = _title_context_key(series_title, source_language, target_language)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "DELETE FROM title_context WHERE series_title = ? AND source_language = ? AND target_language = ?",
+            key,
+        )
+
+def list_title_contexts() -> list:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT series_title, source_language, target_language, context, updated_at
+               FROM title_context ORDER BY series_title, source_language, target_language"""
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 def recover_stale_queued_jobs():
     import sqlite3
