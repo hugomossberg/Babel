@@ -2,6 +2,7 @@ import asyncio
 import pytest
 import json
 import socket
+import ssl
 import sys
 import time
 import httpx
@@ -155,6 +156,9 @@ def empty_gemini_provider(monkeypatch):
         })
 
     monkeypatch.setattr(httpx.HTTPTransport, 'handle_request', handle_request)
+    # No TLS happens, and the SDK builds a client (loading the CA bundle)
+    # for every call.
+    monkeypatch.setattr(ssl.SSLContext, 'load_verify_locations', lambda *a, **k: None)
     return state
 
 
